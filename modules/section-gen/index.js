@@ -1,6 +1,5 @@
 /**
- * Section Gen — uses stored lng/lat footprints, only type='section-axis'
- * Fixes: axis orientation matches footprint side, internal dividers only
+ * Section Gen — wireframe boxes for full height, click selects universally
  */
 
 import { createProjection, centroid } from '../urban-block/projection.js';
@@ -10,12 +9,12 @@ import {
 } from './cells.js';
 import { buildSectionGraph, computeFloorCount } from './graph.js';
 import { SectionGenLayer } from './SectionGenLayer.js';
-import { buildSectionMeshes, buildDividerWall } from '../../core/three/MeshBuilder.js';
+import { buildSectionMeshes, buildDividerWall, buildSectionWireframe } from '../../core/three/MeshBuilder.js';
 
 var TYPE_COLORS = { apartment: '#dce8f0', commercial: '#ffb74d', corridor: '#c8c8c8', llu: '#4f81bd' };
 var DEFAULT_PARAMS = {
   sectionWidth: 18.0, corridorWidth: 2.0, cellWidth: 3.3,
-  sectionHeight: 15, firstFloorHeight: 4.5, typicalFloorHeight: 3.0
+  sectionHeight: 28, firstFloorHeight: 4.5, typicalFloorHeight: 3.0
 };
 
 var _layer, _threeOverlay, _eventBus, _featureStore, _mapManager;
@@ -33,36 +32,26 @@ function getParams(f) {
   return p;
 }
 
-function closeRing(polyLL) {
-  var ring = polyLL.slice();
-  ring.push(ring[0]);
-  return ring;
+function closeRing(polyLL) { var r = polyLL.slice(); r.push(r[0]); return r; }
+
+function orientAxis(fpM) {
+  var a = fpM[0]; var b = fpM[1]; var d = fpM[3];
+  var dx = b[0]-a[0]; var dy = b[1]-a[1];
+  var len = Math.sqrt(dx*dx+dy*dy);
+  if (len < 1e-10) return [a, b];
+  var nx = -dy/len; var ny = dx/len;
+  var tdx = d[0]-a[0]; var tdy = d[1]-a[1];
+  if (nx*tdx + ny*tdy >= 0) return [a, b];
+  return [b, a];
 }
 
 /**
- * unitNormal(a,b) returns left perpendicular of a→b.
- * Check if it points toward footprint corner d.
- * If not, reverse axis so cells are built on correct side.
+ * Compute full building height in meters (all floors).
  */
-function orientAxis(fpM) {
-  var a = fpM[0]; var b = fpM[1]; var d = fpM[3];
-  var dx = b[0] - a[0]; var dy = b[1] - a[1];
-  var len = Math.sqrt(dx * dx + dy * dy);
-  if (len < 1e-10) return [a, b];
-
-  // left perpendicular of a→b
-  var nx = -dy / len;
-  var ny = dx / len;
-
-  // direction from a to d (where section extends)
-  var tdx = d[0] - a[0];
-  var tdy = d[1] - a[1];
-
-  // dot product: if positive, cells will go toward d (correct)
-  var dot = nx * tdx + ny * tdy;
-  if (dot >= 0) return [a, b];
-  // reverse axis so unitNormal points toward d
-  return [b, a];
+function computeBuildingHeight(params) {
+  var fc = computeFloorCount(params.sectionHeight, params.firstFloorHeight, params.typicalFloorHeight);
+  if (fc <= 1) return params.firstFloorHeight;
+  return params.firstFloorHeight + (fc - 1) * params.typicalFloorHeight;
 }
 
 function setupClickHandler() {
@@ -72,7 +61,11 @@ function setupClickHandler() {
   map.on('click', _layer.getClickLayerId(), function (e) {
     if (e.features && e.features.length > 0) {
       var lid = e.features[0].properties.lineId;
-      if (lid) _eventBus.emit('feature:selected', { id: lid });
+      if (lid) {
+        // Emit both events so FeaturePanel AND DrawManager know
+        _eventBus.emit('feature:selected', { id: lid });
+        _eventBus.emit('sidebar:feature:click', { id: lid });
+      }
     }
   });
   map.on('mouseenter', _layer.getClickLayerId(), function () { _mapManager.setCursor('pointer'); });
@@ -114,8 +107,11 @@ function processAllSections() {
     var apartmentDepth = (params.sectionWidth - params.corridorWidth) / 2.0;
     var floorCount = computeFloorCount(params.sectionHeight, params.firstFloorHeight, params.typicalFloorHeight);
     var renderFloors = Math.min(floorCount, 2);
-    var totalH = params.firstFloorHeight;
-    if (renderFloors > 1) totalH = params.firstFloorHeight + params.typicalFloorHeight;
+    var renderH = params.firstFloorHeight;
+    if (renderFloors > 1) renderH = params.firstFloorHeight + params.typicalFloorHeight;
+
+    // Full building height for wireframe
+    var buildingH = computeBuildingHeight(params);
 
     var lineFPsLL = [];
 
@@ -125,13 +121,11 @@ function processAllSections() {
       lineFPsLL.push({ ring: fpRing, lineId: lineId });
       allFootLL.push({ ring: fpRing, lineId: lineId });
 
-      // Convert to meters
       var fpM = [];
       for (var j = 0; j < fp.polygon.length; j++) {
         fpM.push(globalProj.toMeters(fp.polygon[j][0], fp.polygon[j][1]));
       }
 
-      // Orient axis so cells go toward the correct side of footprint
       var sectionAxis = orientAxis(fpM);
 
       var nearCells = createNearCells(sectionAxis, params.cellWidth, apartmentDepth);
@@ -159,30 +153,27 @@ function processAllSections() {
           ring.push(globalProj.toLngLat(poly[j][0], poly[j][1]));
         }
         ring.push(ring[0]);
-        var color = TYPE_COLORS[node.type] || '#cccccc';
-        var label = node.type === 'llu' ? 'LLU ' + (node.lluTag || '') : String(node.cellId);
-        allCellsLL.push({ ring: ring, color: color, label: label });
+        allCellsLL.push({
+          ring: ring,
+          color: TYPE_COLORS[node.type] || '#cccccc',
+          label: node.type === 'llu' ? 'LLU ' + (node.lluTag || '') : String(node.cellId)
+        });
       }
 
       if (_threeOverlay) {
+        // Cell bricks (rendered floors only)
         _threeOverlay.addMesh(buildSectionMeshes(
-          graph.nodes, renderFloors - 1, params.firstFloorHeight, params.typicalFloorHeight, 0.08));
+          graph.nodes, renderFloors - 1,
+          params.firstFloorHeight, params.typicalFloorHeight, 0.08));
+
+        // Wireframe box for full building height
+        _threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
       }
 
-      // Internal divider walls — only between adjacent sections, not at ends
+      // Internal divider wall
       if (_threeOverlay && fi > 0) {
-        // Divider between section fi-1 and fi: at start of fi (edge d→a of current fp)
-        var prevFP = storedFP[fi - 1];
-        var prevM = [];
-        for (var j = 0; j < prevFP.polygon.length; j++) {
-          prevM.push(globalProj.toMeters(prevFP.polygon[j][0], prevFP.polygon[j][1]));
-        }
-        // Shared boundary: end of prev section (b→c) = start of current (d→a)
-        // Use current section's d→a edge
-        var wallP1 = fpM[3];
-        var wallP2 = fpM[0];
-        var wall = buildDividerWall(wallP1, wallP2, 0, totalH + 0.05, 0.12);
-        _threeOverlay.addMesh(wall);
+        var wallP1 = fpM[3]; var wallP2 = fpM[0];
+        _threeOverlay.addMesh(buildDividerWall(wallP1, wallP2, 0, renderH + 0.05, 0.12));
       }
     }
     _lineFootprints[lineId] = lineFPsLL;
@@ -190,23 +181,6 @@ function processAllSections() {
 
   _layer.update(allCellsLL, allFootLL);
   setupClickHandler();
-}
-
-function mergeGraphs(graphs) {
-  var merged = { nodes: {}, edges: [] };
-  for (var gi = 0; gi < graphs.length; gi++) {
-    var g = graphs[gi];
-    var prefix = 's' + gi + '_';
-    for (var key in g.nodes) {
-      if (!g.nodes.hasOwnProperty(key)) continue;
-      merged.nodes[prefix + key] = g.nodes[key];
-    }
-    for (var ei = 0; ei < g.edges.length; ei++) {
-      var e = g.edges[ei];
-      merged.edges.push({ from: prefix + e.from, to: prefix + e.to, type: e.type });
-    }
-  }
-  return merged;
 }
 
 function highlightIds(ids) {

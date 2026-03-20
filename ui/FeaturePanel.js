@@ -9,7 +9,7 @@ import { eventBus } from '../core/EventBus.js';
 
 var DEFAULT_PARAMS = {
   sectionWidth: 18.0, corridorWidth: 2.0, cellWidth: 3.3,
-  sectionHeight: 15, firstFloorHeight: 4.5, typicalFloorHeight: 3.0
+  sectionHeight: 28, firstFloorHeight: 4.5, typicalFloorHeight: 3.0
 };
 
 var PARAM_DEFS = [
