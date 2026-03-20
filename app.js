@@ -1,10 +1,5 @@
 /**
  * U·B·SYSTEM — Entry Point
- *
- * Initialization order:
- * 1. MapManager.init() — creates 3D map
- * 2. DrawManager — tools + feature layers
- * 3. UI components — toolbar, status bar, panels
  */
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles/main.css';
@@ -17,31 +12,40 @@ import { RemoveFeatureCommand } from './core/commands/RemoveFeatureCommand.js';
 import { Toolbar } from './ui/Toolbar.js';
 import { StatusBar } from './ui/StatusBar.js';
 import { FeaturePanel } from './ui/FeaturePanel.js';
+import { CompassControl } from './ui/CompassControl.js';
+import { ThreeOverlay } from './core/three/ThreeOverlay.js';
 
 // ── Modules (plug/unplug here) ─────────────────────────
-import urbanBlockModule from './modules/urban-block/index.js';
+// import urbanBlockModule from './modules/urban-block/index.js';
+// import sectionDistributorModule from './modules/section-distributor/index.js';
+import sectionGenModule from './modules/section-gen/index.js';
 
 var MODULES = [
-  urbanBlockModule
+  // urbanBlockModule,
+  // sectionDistributorModule,
+  sectionGenModule
 ];
 
 // ── State ──────────────────────────────────────────────
 
 var mapManager = null;
 var drawManager = null;
+var threeOverlay = null;
 
 // ── Bootstrap ──────────────────────────────────────────
 
 async function bootstrap() {
   try {
-    // 1. Map
     mapManager = new MapManager('map');
     await mapManager.init();
 
-    // 2. Draw
     drawManager = new DrawManager(mapManager, featureStore);
 
-    // 3. UI
+    // Initialize Three.js overlay
+    threeOverlay = new ThreeOverlay(mapManager);
+    threeOverlay.init();
+
+    // UI
     var toolbar = new Toolbar('toolbar', function (toolId) {
       if (toolId === 'select') {
         drawManager.deactivateTool();
@@ -49,7 +53,6 @@ async function bootstrap() {
         drawManager.activateTool(toolId);
       }
     }, function () {
-      // Delete selected
       var ids = drawManager.getSelectedIds();
       for (var i = 0; i < ids.length; i++) {
         commandManager.execute(new RemoveFeatureCommand(featureStore, ids[i]));
@@ -64,7 +67,9 @@ async function bootstrap() {
     var featurePanel = new FeaturePanel('feature-panel', featureStore);
     featurePanel.init();
 
-    // Wire sidebar → map selection
+    var compass = new CompassControl();
+    compass.init(mapManager);
+
     eventBus.on('sidebar:feature:click', function (data) {
       var ids = drawManager.getSelectedIds();
       if (ids.indexOf(data.id) >= 0) {
@@ -74,11 +79,12 @@ async function bootstrap() {
       }
     });
 
-    // 4. Initialize modules
+    // Initialize modules with threeOverlay in context
     var moduleCtx = {
       mapManager: mapManager,
       eventBus: eventBus,
-      featureStore: featureStore
+      featureStore: featureStore,
+      threeOverlay: threeOverlay
     };
     for (var i = 0; i < MODULES.length; i++) {
       try {
@@ -89,7 +95,7 @@ async function bootstrap() {
     }
 
     eventBus.emit('app:ready');
-    console.log('U·B·SYSTEM started (' + MODULES.length + ' modules)');
+    console.log('U·B·SYSTEM started (' + MODULES.length + ' modules, Three.js enabled)');
 
   } catch (err) {
     console.error('Failed to start U·B·SYSTEM:', err);
@@ -102,8 +108,6 @@ async function bootstrap() {
     }
   }
 }
-
-// ── Start ──────────────────────────────────────────────
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', bootstrap);

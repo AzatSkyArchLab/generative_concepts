@@ -1,19 +1,37 @@
 /**
- * FeaturePanel — right panel listing drawn features
+ * FeaturePanel — right panel: feature list + section parameters
  */
 
 import { eventBus } from '../core/EventBus.js';
 
+var PARAM_DEFS = [
+  { key: 'sectionWidth', label: 'Section width', unit: 'м', step: 0.5, min: 10, max: 30 },
+  { key: 'corridorWidth', label: 'Corridor width', unit: 'м', step: 0.5, min: 1, max: 5 },
+  { key: 'cellWidth', label: 'Cell width', unit: 'м', step: 0.1, min: 2, max: 5 },
+  { key: 'sectionHeight', label: 'Section height', unit: 'м', step: 1, min: 5, max: 75 },
+  { key: 'firstFloorHeight', label: '1st floor height', unit: 'м', step: 0.1, min: 3, max: 6 },
+  { key: 'typicalFloorHeight', label: 'Typical floor height', unit: 'м', step: 0.1, min: 2.5, max: 4 }
+];
+
+var DEFAULT_PARAMS = {
+  sectionWidth: 18.0,
+  corridorWidth: 2.0,
+  cellWidth: 3.3,
+  sectionHeight: 15,
+  firstFloorHeight: 4.5,
+  typicalFloorHeight: 3.0
+};
+
 export class FeaturePanel {
-  /**
-   * @param {string} containerId
-   * @param {import('../data/FeatureStore.js').FeatureStore} featureStore
-   */
   constructor(containerId, featureStore) {
     this._container = document.getElementById(containerId);
     if (!this._container) throw new Error('FeaturePanel container #' + containerId + ' not found');
     this._featureStore = featureStore;
     this._selectedId = null;
+    this._params = {};
+    for (var k in DEFAULT_PARAMS) {
+      if (DEFAULT_PARAMS.hasOwnProperty(k)) this._params[k] = DEFAULT_PARAMS[k];
+    }
   }
 
   init() {
@@ -27,7 +45,53 @@ export class FeaturePanel {
         '<span class="panel-title">Features</span>' +
         '<span class="panel-badge" id="feature-count">0</span>' +
       '</div>' +
-      '<div class="panel-body" id="feature-list"></div>';
+      '<div class="panel-body">' +
+        '<div id="feature-list"></div>' +
+        '<div id="param-section" class="param-section"></div>' +
+      '</div>';
+    this._renderParams();
+  }
+
+  _renderParams() {
+    var paramEl = document.getElementById('param-section');
+    if (!paramEl) return;
+
+    var html = '<div class="param-header">Section Parameters</div>';
+    for (var i = 0; i < PARAM_DEFS.length; i++) {
+      var def = PARAM_DEFS[i];
+      var val = this._params[def.key];
+      html +=
+        '<div class="param-row">' +
+          '<label class="param-label" for="param-' + def.key + '">' + def.label + '</label>' +
+          '<div class="param-input-wrap">' +
+            '<input type="number" class="param-input" id="param-' + def.key + '"' +
+            ' data-key="' + def.key + '"' +
+            ' value="' + val + '"' +
+            ' step="' + def.step + '"' +
+            ' min="' + def.min + '"' +
+            ' max="' + def.max + '">' +
+            '<span class="param-unit">' + def.unit + '</span>' +
+          '</div>' +
+        '</div>';
+    }
+    paramEl.innerHTML = html;
+
+    // Bind change events
+    var self = this;
+    for (var i = 0; i < PARAM_DEFS.length; i++) {
+      var def = PARAM_DEFS[i];
+      var input = document.getElementById('param-' + def.key);
+      if (input) {
+        input.addEventListener('change', function (e) {
+          var key = e.target.dataset.key;
+          var val = parseFloat(e.target.value);
+          if (!isNaN(val)) {
+            self._params[key] = val;
+            eventBus.emit('section-gen:params:changed', self._params);
+          }
+        });
+      }
+    }
   }
 
   _setupEventListeners() {
@@ -51,9 +115,7 @@ export class FeaturePanel {
       var item = e.target.closest('.feature-item');
       if (!item) return;
       var id = item.dataset.id;
-      if (id) {
-        eventBus.emit('sidebar:feature:click', { id: id });
-      }
+      if (id) eventBus.emit('sidebar:feature:click', { id: id });
     });
   }
 
@@ -66,7 +128,7 @@ export class FeaturePanel {
     countEl.textContent = String(features.length);
 
     if (features.length === 0) {
-      listEl.innerHTML = '<div class="panel-empty">Draw a polygon or line to begin</div>';
+      listEl.innerHTML = '<div class="panel-empty">Draw a line (L) to begin</div>';
       return;
     }
 

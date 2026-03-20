@@ -8,7 +8,8 @@
         "preview": "vite preview"
     },
     "dependencies": {
-        "maplibre-gl": "^4.7.1"
+        "maplibre-gl": "^4.7.1",
+        "three": "^0.170.0"
     },
     "devDependencies": {
         "vite": "^6.3.5"
