@@ -1,193 +1,195 @@
 /**
- * Section Gen Module — Three.js 3D + MapLibre 2D plan
+ * Section Gen — uses stored lng/lat footprints, only type='section-axis'
+ * Fixes: axis orientation matches footprint side, internal dividers only
  */
 
 import { createProjection, centroid } from '../urban-block/projection.js';
-import { classifyPolyline } from '../section-distributor/orientation.js';
-import { getSectionLengths, createSectionSequence, placeSections, polylineLength }
-  from '../section-distributor/distributor.js';
 import {
   createNearCells, createFarCells, createCorridorCells,
   getNorthSide, getLLUParams, getCentralIndices
 } from './cells.js';
 import { buildSectionGraph, computeFloorCount } from './graph.js';
 import { SectionGenLayer } from './SectionGenLayer.js';
-import { buildSectionMeshes, buildSectionFrame } from '../../core/three/MeshBuilder.js';
+import { buildSectionMeshes, buildDividerWall } from '../../core/three/MeshBuilder.js';
 
-var _params = {
-  sectionWidth: 18.0,
-  corridorWidth: 2.0,
-  cellWidth: 3.3,
-  sectionHeight: 15,
-  firstFloorHeight: 4.5,
-  typicalFloorHeight: 3.0
+var TYPE_COLORS = { apartment: '#dce8f0', commercial: '#ffb74d', corridor: '#c8c8c8', llu: '#4f81bd' };
+var DEFAULT_PARAMS = {
+  sectionWidth: 18.0, corridorWidth: 2.0, cellWidth: 3.3,
+  sectionHeight: 15, firstFloorHeight: 4.5, typicalFloorHeight: 3.0
 };
 
-var _layer = null;
-var _threeOverlay = null;
-var _eventBus = null;
-var _featureStore = null;
-var _mapManager = null;
+var _layer, _threeOverlay, _eventBus, _featureStore, _mapManager;
 var _unsubs = [];
 var _lineFootprints = {};
-var _globalProj = null;
+var _highlightedIds = [];
 var _clickWired = false;
 
-function unitNormal(p1, p2) {
-  var dx = p2[0] - p1[0];
-  var dy = p2[1] - p1[1];
-  var len = Math.sqrt(dx * dx + dy * dy);
-  if (len < 1e-10) return [0, 0];
-  return [-dy / len, dx / len];
+function getParams(f) {
+  var p = {};
+  for (var k in DEFAULT_PARAMS) {
+    if (DEFAULT_PARAMS.hasOwnProperty(k))
+      p[k] = f.properties[k] !== undefined ? f.properties[k] : DEFAULT_PARAMS[k];
+  }
+  return p;
 }
 
-function sectionFootprint(startM, endM, sectionWidth) {
-  var n = unitNormal(startM, endM);
-  var ox = n[0] * sectionWidth;
-  var oy = n[1] * sectionWidth;
-  return [startM, endM, [endM[0] + ox, endM[1] + oy], [startM[0] + ox, startM[1] + oy]];
+function closeRing(polyLL) {
+  var ring = polyLL.slice();
+  ring.push(ring[0]);
+  return ring;
+}
+
+/**
+ * unitNormal(a,b) returns left perpendicular of a→b.
+ * Check if it points toward footprint corner d.
+ * If not, reverse axis so cells are built on correct side.
+ */
+function orientAxis(fpM) {
+  var a = fpM[0]; var b = fpM[1]; var d = fpM[3];
+  var dx = b[0] - a[0]; var dy = b[1] - a[1];
+  var len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 1e-10) return [a, b];
+
+  // left perpendicular of a→b
+  var nx = -dy / len;
+  var ny = dx / len;
+
+  // direction from a to d (where section extends)
+  var tdx = d[0] - a[0];
+  var tdy = d[1] - a[1];
+
+  // dot product: if positive, cells will go toward d (correct)
+  var dot = nx * tdx + ny * tdy;
+  if (dot >= 0) return [a, b];
+  // reverse axis so unitNormal points toward d
+  return [b, a];
 }
 
 function setupClickHandler() {
   if (_clickWired) return;
   var map = _mapManager.getMap();
   if (!map) return;
-  var clickLayerId = _layer.getClickLayerId();
-  map.on('click', clickLayerId, function (e) {
+  map.on('click', _layer.getClickLayerId(), function (e) {
     if (e.features && e.features.length > 0) {
-      var lineId = e.features[0].properties.lineId;
-      if (lineId) _eventBus.emit('feature:selected', { id: lineId });
+      var lid = e.features[0].properties.lineId;
+      if (lid) _eventBus.emit('feature:selected', { id: lid });
     }
   });
-  map.on('mouseenter', clickLayerId, function () { _mapManager.setCursor('pointer'); });
-  map.on('mouseleave', clickLayerId, function () { _mapManager.setCursor('grab'); });
+  map.on('mouseenter', _layer.getClickLayerId(), function () { _mapManager.setCursor('pointer'); });
+  map.on('mouseleave', _layer.getClickLayerId(), function () { _mapManager.setCursor('grab'); });
   _clickWired = true;
 }
 
-function processAllLines() {
+function processAllSections() {
   if (!_layer || !_featureStore) return;
-
   var all = _featureStore.toArray();
-  var lines = [];
+  var sects = [];
   for (var i = 0; i < all.length; i++) {
-    if (all[i].geometry.type === 'LineString') lines.push(all[i]);
+    if (all[i].properties.type === 'section-axis') sects.push(all[i]);
   }
 
   if (_threeOverlay) _threeOverlay.clear();
-
-  if (lines.length === 0) {
-    _layer.clear();
-    _lineFootprints = {};
-    _globalProj = null;
-    return;
-  }
-
-  var allGraphs = [];
-  var allFootprints = [];
-  _lineFootprints = {};
-  var apartmentDepth = (_params.sectionWidth - _params.corridorWidth) / 2.0;
-  var floorCount = computeFloorCount(_params.sectionHeight, _params.firstFloorHeight, _params.typicalFloorHeight);
-  var renderFloors = Math.min(floorCount, 2);
-
-  // Total height for frames
-  var totalHeight = _params.firstFloorHeight;
-  if (renderFloors > 1) {
-    totalHeight = _params.firstFloorHeight + _params.typicalFloorHeight;
-  }
+  if (sects.length === 0) { _layer.clear(); _lineFootprints = {}; return; }
 
   var allCoords = [];
-  for (var li = 0; li < lines.length; li++) {
-    var coords = lines[li].geometry.coordinates;
-    for (var ci = 0; ci < coords.length; ci++) allCoords.push(coords[ci]);
+  for (var i = 0; i < sects.length; i++) {
+    var c = sects[i].geometry.coordinates;
+    for (var j = 0; j < c.length; j++) allCoords.push(c[j]);
   }
   var gc = centroid(allCoords);
-  _globalProj = createProjection(gc[0], gc[1]);
+  var globalProj = createProjection(gc[0], gc[1]);
+  if (_threeOverlay) _threeOverlay.setOrigin(gc[0], gc[1]);
 
-  if (_threeOverlay) {
-    _threeOverlay.setOrigin(gc[0], gc[1]);
-  }
+  var allCellsLL = [];
+  var allFootLL = [];
+  _lineFootprints = {};
 
-  for (var li = 0; li < lines.length; li++) {
-    var lineFeature = lines[li];
-    var lineId = lineFeature.properties.id;
-    var coords = lineFeature.geometry.coordinates;
-    if (coords.length < 2) continue;
+  for (var si = 0; si < sects.length; si++) {
+    var feature = sects[si];
+    var lineId = feature.properties.id;
+    var storedFP = feature.properties.footprints;
+    if (!storedFP || storedFP.length === 0) continue;
 
-    var coordsM = [];
-    for (var ci = 0; ci < coords.length; ci++) {
-      coordsM.push(_globalProj.toMeters(coords[ci][0], coords[ci][1]));
-    }
+    var params = getParams(feature);
+    var apartmentDepth = (params.sectionWidth - params.corridorWidth) / 2.0;
+    var floorCount = computeFloorCount(params.sectionHeight, params.firstFloorHeight, params.typicalFloorHeight);
+    var renderFloors = Math.min(floorCount, 2);
+    var totalH = params.firstFloorHeight;
+    if (renderFloors > 1) totalH = params.firstFloorHeight + params.typicalFloorHeight;
 
-    var totalLen = polylineLength(coordsM);
-    if (totalLen < 1) continue;
+    var lineFPsLL = [];
 
-    var ori = classifyPolyline(coordsM);
-    var sectionLengths = getSectionLengths(ori.orientation);
-    var minSL = Infinity;
-    for (var si = 0; si < sectionLengths.length; si++) {
-      if (sectionLengths[si] < minSL) minSL = sectionLengths[si];
-    }
-    if (totalLen < minSL) continue;
+    for (var fi = 0; fi < storedFP.length; fi++) {
+      var fp = storedFP[fi];
+      var fpRing = closeRing(fp.polygon);
+      lineFPsLL.push({ ring: fpRing, lineId: lineId });
+      allFootLL.push({ ring: fpRing, lineId: lineId });
 
-    var sequence = createSectionSequence(sectionLengths, totalLen);
-    var sections = placeSections(coordsM, sequence, totalLen);
-    var lineFootprintsList = [];
+      // Convert to meters
+      var fpM = [];
+      for (var j = 0; j < fp.polygon.length; j++) {
+        fpM.push(globalProj.toMeters(fp.polygon[j][0], fp.polygon[j][1]));
+      }
 
-    for (var si = 0; si < sections.length; si++) {
-      var sec = sections[si];
-      if (sec.isGap) continue;
+      // Orient axis so cells go toward the correct side of footprint
+      var sectionAxis = orientAxis(fpM);
 
-      var sectionAxis = [sec.startM, sec.endM];
-      var fp = sectionFootprint(sec.startM, sec.endM, _params.sectionWidth);
-      var fpObj = { polygon: fp, lineId: lineId };
-      lineFootprintsList.push(fpObj);
-      allFootprints.push(fpObj);
-
-      var nearCells = createNearCells(sectionAxis, _params.cellWidth, apartmentDepth);
-      var farCells = createFarCells(sectionAxis, _params.cellWidth, apartmentDepth,
-                                     apartmentDepth + _params.corridorWidth);
-      var corridorCells = createCorridorCells(sectionAxis, _params.cellWidth,
-                                               _params.corridorWidth, apartmentDepth);
-
+      var nearCells = createNearCells(sectionAxis, params.cellWidth, apartmentDepth);
+      var farCells = createFarCells(sectionAxis, params.cellWidth, apartmentDepth,
+                                     apartmentDepth + params.corridorWidth);
+      var corridorCells = createCorridorCells(sectionAxis, params.cellWidth,
+                                               params.corridorWidth, apartmentDepth);
       var N = nearCells.length;
       if (N === 0) continue;
 
       var northSide = getNorthSide(sectionAxis);
-      var lluParams = getLLUParams(_params.sectionHeight);
+      var lluParams = getLLUParams(params.sectionHeight);
       var lluIndices = getCentralIndices(lluParams.count, N);
-
-      var graph = buildSectionGraph(
-        N, nearCells, farCells, corridorCells,
-        northSide, lluIndices, lluParams.tag, renderFloors
-      );
+      var graph = buildSectionGraph(N, nearCells, farCells, corridorCells,
+        northSide, lluIndices, lluParams.tag, renderFloors);
 
       for (var key in graph.nodes) {
-        if (graph.nodes.hasOwnProperty(key)) graph.nodes[key].lineId = lineId;
+        if (!graph.nodes.hasOwnProperty(key)) continue;
+        var node = graph.nodes[key];
+        if (node.floor !== 1) continue;
+        var poly = node.polygon;
+        if (!poly || poly.length < 3) continue;
+        var ring = [];
+        for (var j = 0; j < poly.length; j++) {
+          ring.push(globalProj.toLngLat(poly[j][0], poly[j][1]));
+        }
+        ring.push(ring[0]);
+        var color = TYPE_COLORS[node.type] || '#cccccc';
+        var label = node.type === 'llu' ? 'LLU ' + (node.lluTag || '') : String(node.cellId);
+        allCellsLL.push({ ring: ring, color: color, label: label });
       }
 
-      allGraphs.push(graph);
-
-      // Three.js: cell bricks
       if (_threeOverlay) {
-        var meshGroup = buildSectionMeshes(
-          graph.nodes, renderFloors - 1,
-          _params.firstFloorHeight, _params.typicalFloorHeight, 0.08
-        );
-        _threeOverlay.addMesh(meshGroup);
+        _threeOverlay.addMesh(buildSectionMeshes(
+          graph.nodes, renderFloors - 1, params.firstFloorHeight, params.typicalFloorHeight, 0.08));
+      }
 
-        // Three.js: dark frame around section perimeter
-        var frame = buildSectionFrame(fp, 0, totalHeight);
-        _threeOverlay.addMesh(frame);
+      // Internal divider walls — only between adjacent sections, not at ends
+      if (_threeOverlay && fi > 0) {
+        // Divider between section fi-1 and fi: at start of fi (edge d→a of current fp)
+        var prevFP = storedFP[fi - 1];
+        var prevM = [];
+        for (var j = 0; j < prevFP.polygon.length; j++) {
+          prevM.push(globalProj.toMeters(prevFP.polygon[j][0], prevFP.polygon[j][1]));
+        }
+        // Shared boundary: end of prev section (b→c) = start of current (d→a)
+        // Use current section's d→a edge
+        var wallP1 = fpM[3];
+        var wallP2 = fpM[0];
+        var wall = buildDividerWall(wallP1, wallP2, 0, totalH + 0.05, 0.12);
+        _threeOverlay.addMesh(wall);
       }
     }
-    _lineFootprints[lineId] = lineFootprintsList;
+    _lineFootprints[lineId] = lineFPsLL;
   }
 
-  var merged = mergeGraphs(allGraphs);
-  _layer.update(merged, allFootprints, _globalProj);
+  _layer.update(allCellsLL, allFootLL);
   setupClickHandler();
-
-  console.log('[section-gen] ' + lines.length + ' lines → ' + allGraphs.length + ' sections');
 }
 
 function mergeGraphs(graphs) {
@@ -207,41 +209,40 @@ function mergeGraphs(graphs) {
   return merged;
 }
 
-function onFeatureSelected(data) {
-  if (!_layer || !_globalProj) return;
-  var fps = _lineFootprints[data.id];
-  if (fps && fps.length > 0) _layer.highlight(fps, _globalProj);
+function highlightIds(ids) {
+  if (!_layer) return;
+  var allFps = [];
+  for (var i = 0; i < ids.length; i++) {
+    var fps = _lineFootprints[ids[i]];
+    if (fps) { for (var j = 0; j < fps.length; j++) allFps.push(fps[j]); }
+  }
+  if (allFps.length > 0) _layer.highlightRaw(allFps);
   else _layer.clearHighlight();
 }
 
-function onFeatureDeselected() { if (_layer) _layer.clearHighlight(); }
-function onFeaturesChanged() { processAllLines(); }
-
-function onParamsChanged(newParams) {
-  for (var key in newParams) {
-    if (newParams.hasOwnProperty(key) && _params.hasOwnProperty(key)) _params[key] = newParams[key];
-  }
-  processAllLines();
+function onSelected(d) { _highlightedIds = [d.id]; highlightIds(_highlightedIds); }
+function onMultiselect(d) {
+  var idx = _highlightedIds.indexOf(d.id);
+  if (idx >= 0) _highlightedIds.splice(idx, 1);
+  else _highlightedIds.push(d.id);
+  highlightIds(_highlightedIds);
 }
+function onDeselected() { _highlightedIds = []; if (_layer) _layer.clearHighlight(); }
+function onChanged() { processAllSections(); }
 
 var sectionGenModule = {
   id: 'section-gen',
   init: function (ctx) {
-    _eventBus = ctx.eventBus;
-    _featureStore = ctx.featureStore;
-    _mapManager = ctx.mapManager;
-    _threeOverlay = ctx.threeOverlay || null;
-
-    _layer = new SectionGenLayer(ctx.mapManager);
-    _layer.init();
-
-    _unsubs.push(_eventBus.on('draw:line:complete', onFeaturesChanged));
-    _unsubs.push(_eventBus.on('features:changed', onFeaturesChanged));
-    _unsubs.push(_eventBus.on('section-gen:params:changed', onParamsChanged));
-    _unsubs.push(_eventBus.on('feature:selected', onFeatureSelected));
-    _unsubs.push(_eventBus.on('feature:deselected', onFeatureDeselected));
-
-    console.log('[section-gen] initialized (Three.js: ' + (!!_threeOverlay) + ')');
+    _eventBus = ctx.eventBus; _featureStore = ctx.featureStore;
+    _mapManager = ctx.mapManager; _threeOverlay = ctx.threeOverlay || null;
+    _layer = new SectionGenLayer(ctx.mapManager); _layer.init();
+    _unsubs.push(_eventBus.on('draw:section:complete', onChanged));
+    _unsubs.push(_eventBus.on('features:changed', onChanged));
+    _unsubs.push(_eventBus.on('section-gen:params:changed', onChanged));
+    _unsubs.push(_eventBus.on('feature:selected', onSelected));
+    _unsubs.push(_eventBus.on('feature:multiselect', onMultiselect));
+    _unsubs.push(_eventBus.on('feature:deselected', onDeselected));
+    console.log('[section-gen] initialized');
   },
   destroy: function () {
     for (var i = 0; i < _unsubs.length; i++) { _unsubs[i](); }
@@ -249,7 +250,7 @@ var sectionGenModule = {
     if (_threeOverlay) _threeOverlay.clear();
     if (_layer) { _layer.destroy(); _layer = null; }
     _eventBus = null; _featureStore = null; _mapManager = null;
-    _threeOverlay = null; _lineFootprints = {}; _globalProj = null; _clickWired = false;
+    _threeOverlay = null; _lineFootprints = {}; _highlightedIds = []; _clickWired = false;
   }
 };
 

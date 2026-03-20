@@ -10,6 +10,7 @@ import { PreviewLayer } from './layers/PreviewLayer.js';
 import { SelectTool } from './tools/SelectTool.js';
 import { PolygonTool } from './tools/PolygonTool.js';
 import { LineTool } from './tools/LineTool.js';
+import { SectionTool } from './tools/SectionTool.js';
 
 export class DrawManager {
   /**
@@ -43,6 +44,7 @@ export class DrawManager {
     this._registerTool(new SelectTool(this, this._featureStore));
     this._registerTool(new PolygonTool(this, this._featureStore));
     this._registerTool(new LineTool(this, this._featureStore));
+    this._registerTool(new SectionTool(this, this._featureStore, this._mapManager));
   }
 
   _registerTool(tool) {
