@@ -1,5 +1,6 @@
 /**
- * Section Gen — stored lng/lat footprints, type='section-axis' only
+ * Section Gen — shift+click multi-select in edit mode
+ * _editSelectedIndices: array of selected section indices
  */
 
 import { createProjection, centroid } from '../urban-block/projection.js';
@@ -22,6 +23,9 @@ var _unsubs = [];
 var _lineFootprints = {};
 var _highlightedIds = [];
 var _clickWired = false;
+var _editAxisId = null;
+var _editSelectedIndices = [];  // array of selected section indices
+var _keyHandler = null;
 
 function getParams(f) {
   var p = {};
@@ -32,6 +36,11 @@ function getParams(f) {
   return p;
 }
 
+function getSectionHeight(fp, axisParams) {
+  if (fp.sectionHeight !== undefined) return fp.sectionHeight;
+  return axisParams.sectionHeight;
+}
+
 function closeRing(polyLL) { var r = polyLL.slice(); r.push(r[0]); return r; }
 
 function orientAxis(fpM) {
@@ -40,34 +49,135 @@ function orientAxis(fpM) {
   var len = Math.sqrt(dx*dx+dy*dy);
   if (len < 1e-10) return [a, b];
   var nx = -dy/len; var ny = dx/len;
-  var tdx = d[0]-a[0]; var tdy = d[1]-a[1];
-  if (nx*tdx + ny*tdy >= 0) return [a, b];
+  if (nx*(d[0]-a[0]) + ny*(d[1]-a[1]) >= 0) return [a, b];
   return [b, a];
 }
 
-function computeBuildingHeight(params) {
-  var fc = computeFloorCount(params.sectionHeight, params.firstFloorHeight, params.typicalFloorHeight);
-  if (fc <= 1) return params.firstFloorHeight;
-  return params.firstFloorHeight + (fc - 1) * params.typicalFloorHeight;
+function computeBuildingHeight(secH, firstH, typH) {
+  var fc = computeFloorCount(secH, firstH, typH);
+  if (fc <= 1) return firstH;
+  return firstH + (fc - 1) * typH;
 }
+
+// ── Edit mode ──────────────────────────────────────────
+
+function enterEditMode(lineId) {
+  _editAxisId = lineId;
+  _editSelectedIndices = [];
+  _layer.clearHighlight();
+  var fps = _lineFootprints[lineId];
+  if (fps && fps.length > 0) {
+    _layer.enterEditMode(fps, function () { exitEditMode(); });
+  }
+  _eventBus.emit('section:edit-mode', { axisId: lineId });
+}
+
+function exitEditMode() {
+  _editAxisId = null;
+  _editSelectedIndices = [];
+  _layer.exitEditMode();
+  _eventBus.emit('section:edit-exit');
+}
+
+function updateEditHighlight() {
+  var fps = _lineFootprints[_editAxisId];
+  if (!fps) return;
+
+  if (_editSelectedIndices.length === 0) {
+    _layer.clearEditSelection(fps);
+  } else {
+    var selectedFPs = [];
+    var dimFPs = [];
+    for (var i = 0; i < fps.length; i++) {
+      if (_editSelectedIndices.indexOf(i) >= 0) {
+        selectedFPs.push(fps[i]);
+      } else {
+        dimFPs.push(fps[i]);
+      }
+    }
+    _layer.selectEditSections(selectedFPs, dimFPs);
+  }
+}
+
+function selectSection(secIdx, addToSelection) {
+  if (addToSelection) {
+    // Shift+click: toggle in selection
+    var pos = _editSelectedIndices.indexOf(secIdx);
+    if (pos >= 0) {
+      _editSelectedIndices.splice(pos, 1);
+    } else {
+      _editSelectedIndices.push(secIdx);
+      _editSelectedIndices.sort(function (a, b) { return a - b; });
+    }
+  } else {
+    // Normal click: replace selection
+    _editSelectedIndices = [secIdx];
+  }
+
+  updateEditHighlight();
+  _eventBus.emit('section:individual:selected', {
+    axisId: _editAxisId,
+    sectionIndices: _editSelectedIndices.slice()
+  });
+}
+
+// ── Click / keyboard ───────────────────────────────────
 
 function setupClickHandler() {
   if (_clickWired) return;
   var map = _mapManager.getMap();
   if (!map) return;
+
   map.on('click', _layer.getClickLayerId(), function (e) {
-    if (e.features && e.features.length > 0) {
-      var lid = e.features[0].properties.lineId;
-      if (lid) {
-        _eventBus.emit('feature:selected', { id: lid });
-        _eventBus.emit('sidebar:feature:click', { id: lid });
+    if (!e.features || e.features.length === 0) return;
+    var props = e.features[0].properties;
+    var lineId = props.lineId;
+    var secIdx = props.secIdx !== undefined ? parseInt(props.secIdx) : -1;
+
+    if (_editAxisId) {
+      if (lineId === _editAxisId && secIdx >= 0) {
+        selectSection(secIdx, e.originalEvent.shiftKey);
       }
+      return;
     }
+
+    _highlightedIds = [lineId];
+    highlightIds(_highlightedIds);
+    _eventBus.emit('feature:selected', { id: lineId });
+    _eventBus.emit('sidebar:feature:click', { id: lineId });
   });
+
+  map.on('dblclick', _layer.getClickLayerId(), function (e) {
+    if (!e.features || e.features.length === 0) return;
+    e.preventDefault();
+    var lineId = e.features[0].properties.lineId;
+    if (!lineId || _editAxisId) return;
+    _layer.clearHighlight();
+    enterEditMode(lineId);
+  });
+
+  _keyHandler = function (e) {
+    if (e.key === 'Escape' && _editAxisId) exitEditMode();
+  };
+  document.addEventListener('keydown', _keyHandler);
+
   map.on('mouseenter', _layer.getClickLayerId(), function () { _mapManager.setCursor('pointer'); });
   map.on('mouseleave', _layer.getClickLayerId(), function () { _mapManager.setCursor('grab'); });
   _clickWired = true;
 }
+
+function highlightIds(ids) {
+  if (!_layer) return;
+  var allFps = [];
+  for (var i = 0; i < ids.length; i++) {
+    var fps = _lineFootprints[ids[i]];
+    if (fps) { for (var j = 0; j < fps.length; j++) allFps.push(fps[j]); }
+  }
+  if (allFps.length > 0) _layer.highlightRaw(allFps);
+  else _layer.clearHighlight();
+}
+
+// ── Process ────────────────────────────────────────────
 
 function processAllSections() {
   if (!_layer || !_featureStore) return;
@@ -98,40 +208,38 @@ function processAllSections() {
     var lineId = feature.properties.id;
     var storedFP = feature.properties.footprints;
     if (!storedFP || storedFP.length === 0) continue;
-
     var params = getParams(feature);
-    var apartmentDepth = (params.sectionWidth - params.corridorWidth) / 2.0;
-    var floorCount = computeFloorCount(params.sectionHeight, params.firstFloorHeight, params.typicalFloorHeight);
-    var renderFloors = Math.min(floorCount, 2);
-    var renderH = params.firstFloorHeight;
-    if (renderFloors > 1) renderH = params.firstFloorHeight + params.typicalFloorHeight;
-    var buildingH = computeBuildingHeight(params);
-
     var lineFPsLL = [];
 
     for (var fi = 0; fi < storedFP.length; fi++) {
       var fp = storedFP[fi];
+      var secH = getSectionHeight(fp, params);
+      var floorCount = computeFloorCount(secH, params.firstFloorHeight, params.typicalFloorHeight);
+      var renderFloors = Math.min(floorCount, 2);
+      var renderH = params.firstFloorHeight;
+      if (renderFloors > 1) renderH = params.firstFloorHeight + params.typicalFloorHeight;
+      var buildingH = computeBuildingHeight(secH, params.firstFloorHeight, params.typicalFloorHeight);
+      var apartmentDepth = (params.sectionWidth - params.corridorWidth) / 2.0;
+
       var fpRing = closeRing(fp.polygon);
-      // Pass floorCount and buildingH for labels
-      lineFPsLL.push({ ring: fpRing, lineId: lineId, floorCount: floorCount, buildingH: buildingH });
-      allFootLL.push({ ring: fpRing, lineId: lineId, floorCount: floorCount, buildingH: buildingH });
+      var fpData = { ring: fpRing, lineId: lineId, secIdx: fi,
+        floorCount: floorCount, buildingH: buildingH, sectionHeight: secH };
+      lineFPsLL.push(fpData);
+      allFootLL.push(fpData);
 
       var fpM = [];
-      for (var j = 0; j < fp.polygon.length; j++) {
+      for (var j = 0; j < fp.polygon.length; j++)
         fpM.push(globalProj.toMeters(fp.polygon[j][0], fp.polygon[j][1]));
-      }
 
       var sectionAxis = orientAxis(fpM);
       var nearCells = createNearCells(sectionAxis, params.cellWidth, apartmentDepth);
-      var farCells = createFarCells(sectionAxis, params.cellWidth, apartmentDepth,
-                                     apartmentDepth + params.corridorWidth);
-      var corridorCells = createCorridorCells(sectionAxis, params.cellWidth,
-                                               params.corridorWidth, apartmentDepth);
+      var farCells = createFarCells(sectionAxis, params.cellWidth, apartmentDepth, apartmentDepth + params.corridorWidth);
+      var corridorCells = createCorridorCells(sectionAxis, params.cellWidth, params.corridorWidth, apartmentDepth);
       var N = nearCells.length;
       if (N === 0) continue;
 
       var northSide = getNorthSide(sectionAxis);
-      var lluParams = getLLUParams(params.sectionHeight);
+      var lluParams = getLLUParams(secH);
       var lluIndices = getCentralIndices(lluParams.count, N);
       var graph = buildSectionGraph(N, nearCells, farCells, corridorCells,
         northSide, lluIndices, lluParams.tag, renderFloors);
@@ -143,49 +251,40 @@ function processAllSections() {
         var poly = node.polygon;
         if (!poly || poly.length < 3) continue;
         var ring = [];
-        for (var j = 0; j < poly.length; j++) {
-          ring.push(globalProj.toLngLat(poly[j][0], poly[j][1]));
-        }
+        for (var j = 0; j < poly.length; j++) ring.push(globalProj.toLngLat(poly[j][0], poly[j][1]));
         ring.push(ring[0]);
-        allCellsLL.push({
-          ring: ring,
-          color: TYPE_COLORS[node.type] || '#cccccc',
-          label: node.type === 'llu' ? 'LLU ' + (node.lluTag || '') : String(node.cellId)
-        });
+        allCellsLL.push({ ring: ring, color: TYPE_COLORS[node.type] || '#cccccc',
+          label: node.type === 'llu' ? 'LLU ' + (node.lluTag || '') : String(node.cellId) });
       }
 
       if (_threeOverlay) {
-        _threeOverlay.addMesh(buildSectionMeshes(
-          graph.nodes, renderFloors - 1,
+        _threeOverlay.addMesh(buildSectionMeshes(graph.nodes, renderFloors - 1,
           params.firstFloorHeight, params.typicalFloorHeight, 0.08));
         _threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
       }
-
-      if (_threeOverlay && fi > 0) {
-        var wallP1 = fpM[3]; var wallP2 = fpM[0];
-        _threeOverlay.addMesh(buildDividerWall(wallP1, wallP2, 0, renderH + 0.05, 0.12));
-      }
+      if (_threeOverlay && fi > 0)
+        _threeOverlay.addMesh(buildDividerWall(fpM[3], fpM[0], 0, renderH + 0.05, 0.12));
     }
     _lineFootprints[lineId] = lineFPsLL;
   }
 
   _layer.update(allCellsLL, allFootLL);
   setupClickHandler();
-}
 
-function highlightIds(ids) {
-  if (!_layer) return;
-  var allFps = [];
-  for (var i = 0; i < ids.length; i++) {
-    var fps = _lineFootprints[ids[i]];
-    if (fps) { for (var j = 0; j < fps.length; j++) allFps.push(fps[j]); }
+  if (_editAxisId) {
+    var fps = _lineFootprints[_editAxisId];
+    if (fps && fps.length > 0) {
+      _layer.enterEditMode(fps, function () { exitEditMode(); });
+      updateEditHighlight();
+    }
+  } else if (_highlightedIds.length > 0) {
+    highlightIds(_highlightedIds);
   }
-  if (allFps.length > 0) _layer.highlightRaw(allFps);
-  else _layer.clearHighlight();
 }
 
-function onSelected(d) { _highlightedIds = [d.id]; highlightIds(_highlightedIds); }
+function onSelected(d) { if (_editAxisId) return; _highlightedIds = [d.id]; highlightIds(_highlightedIds); }
 function onMultiselect(d) {
+  if (_editAxisId) return;
   var idx = _highlightedIds.indexOf(d.id);
   if (idx >= 0) _highlightedIds.splice(idx, 1);
   else _highlightedIds.push(d.id);
@@ -193,6 +292,31 @@ function onMultiselect(d) {
 }
 function onDeselected() { _highlightedIds = []; if (_layer) _layer.clearHighlight(); }
 function onChanged() { processAllSections(); }
+
+function onSectionParamChanged(data) {
+  if (!data.axisId) return;
+  var f = _featureStore.get(data.axisId);
+  if (!f || !f.properties.footprints) return;
+
+  // data.sectionIndices = array of indices to update
+  var indices = data.sectionIndices || (data.sectionIdx !== undefined ? [data.sectionIdx] : []);
+  if (indices.length === 0) return;
+
+  var newFP = [];
+  for (var i = 0; i < f.properties.footprints.length; i++) {
+    var copy = {};
+    for (var k in f.properties.footprints[i]) {
+      if (f.properties.footprints[i].hasOwnProperty(k)) copy[k] = f.properties.footprints[i][k];
+    }
+    if (indices.indexOf(i) >= 0) {
+      copy[data.key] = data.value;
+    }
+    newFP.push(copy);
+  }
+  _featureStore.update(data.axisId, { footprints: newFP });
+  processAllSections();
+  _eventBus.emit('buffers:recompute');
+}
 
 var sectionGenModule = {
   id: 'section-gen',
@@ -203,6 +327,7 @@ var sectionGenModule = {
     _unsubs.push(_eventBus.on('draw:section:complete', onChanged));
     _unsubs.push(_eventBus.on('features:changed', onChanged));
     _unsubs.push(_eventBus.on('section-gen:params:changed', onChanged));
+    _unsubs.push(_eventBus.on('section:param:changed', onSectionParamChanged));
     _unsubs.push(_eventBus.on('feature:selected', onSelected));
     _unsubs.push(_eventBus.on('feature:multiselect', onMultiselect));
     _unsubs.push(_eventBus.on('feature:deselected', onDeselected));
@@ -211,10 +336,12 @@ var sectionGenModule = {
   destroy: function () {
     for (var i = 0; i < _unsubs.length; i++) { _unsubs[i](); }
     _unsubs = [];
+    if (_keyHandler) { document.removeEventListener('keydown', _keyHandler); _keyHandler = null; }
     if (_threeOverlay) _threeOverlay.clear();
     if (_layer) { _layer.destroy(); _layer = null; }
     _eventBus = null; _featureStore = null; _mapManager = null;
-    _threeOverlay = null; _lineFootprints = {}; _highlightedIds = []; _clickWired = false;
+    _threeOverlay = null; _lineFootprints = {}; _highlightedIds = [];
+    _editAxisId = null; _editSelectedIndices = []; _clickWired = false;
   }
 };
 

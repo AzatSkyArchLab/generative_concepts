@@ -1,18 +1,15 @@
 /**
- * Buffer Module — buffers from MERGED section footprints per axis
+ * Buffers — independent sections get own fire buffer, rest merged
  *
- * For each axis: merge all section footprints into one polygon,
- * then compute buffers from that unified shape.
- *
- * Fire:        11m (≤28m height) / 14m (>28m) — polygon buffer, rounded
- * End:         20m — polygon buffer, rounded corners
- * Insolation:  40m — only long facades, nothing on торцы
+ * Grouped (no sectionHeight override): merged into one polygon → one buffer
+ * Independent (has sectionHeight): each gets own fire buffer
+ * End + Insol always from full merged polygon of entire axis
  */
 
 import { eventBus } from '../../core/EventBus.js';
 import { createProjection, centroid } from '../urban-block/projection.js';
 
-var _distances = { fire: 11, end: 20, insolation: 40 };
+var _distances = { end: 20, insolation: 40 };
 
 var STYLES = {
   insolation: { fill: 'rgba(22, 163, 74, 0.12)', line: '#16a34a' },
@@ -28,6 +25,8 @@ var _map, _mapManager, _featureStore, _eventBus;
 var _visible = false;
 var _initialized = false;
 var _unsubs = [];
+
+function autoFireDist(h) { return h <= 28 ? 11 : 14; }
 
 function initLayers() {
   if (_initialized) return;
@@ -48,8 +47,6 @@ function initLayers() {
   _initialized = true;
 }
 
-// ── Geometry helpers ───────────────────────────────────
-
 function polyCentroid(poly) {
   var cx = 0; var cy = 0;
   for (var i = 0; i < poly.length; i++) { cx += poly[i][0]; cy += poly[i][1]; }
@@ -57,20 +54,18 @@ function polyCentroid(poly) {
 }
 
 function outwardNormal(p1, p2, cx, cy) {
-  var dx = p2[0] - p1[0]; var dy = p2[1] - p1[1];
-  var len = Math.sqrt(dx * dx + dy * dy);
-  if (len < 1e-10) return [0, 0];
-  var n1x = -dy / len; var n1y = dx / len;
-  var mx = (p1[0] + p2[0]) / 2; var my = (p1[1] + p2[1]) / 2;
-  var dot = n1x * (mx - cx) + n1y * (my - cy);
-  if (dot >= 0) return [n1x, n1y];
+  var dx = p2[0]-p1[0]; var dy = p2[1]-p1[1];
+  var len = Math.sqrt(dx*dx+dy*dy);
+  if (len < 1e-10) return [0,0];
+  var n1x = -dy/len; var n1y = dx/len;
+  var mx = (p1[0]+p2[0])/2; var my = (p1[1]+p2[1])/2;
+  if (n1x*(mx-cx)+n1y*(my-cy) >= 0) return [n1x, n1y];
   return [-n1x, -n1y];
 }
 
 function offsetEdgeOutward(p1, p2, dist, cx, cy) {
   var n = outwardNormal(p1, p2, cx, cy);
-  return [[p1[0], p1[1]], [p2[0], p2[1]],
-    [p2[0] + n[0]*dist, p2[1] + n[1]*dist], [p1[0] + n[0]*dist, p1[1] + n[1]*dist]];
+  return [[p1[0],p1[1]], [p2[0],p2[1]], [p2[0]+n[0]*dist,p2[1]+n[1]*dist], [p1[0]+n[0]*dist,p1[1]+n[1]*dist]];
 }
 
 function bufferPolygonRounded(poly, dist, segments) {
@@ -80,46 +75,34 @@ function bufferPolygonRounded(poly, dist, segments) {
   var c = polyCentroid(poly);
   var result = [];
   for (var i = 0; i < n; i++) {
-    var prev = (i - 1 + n) % n;
-    var next = (i + 1) % n;
+    var prev = (i-1+n)%n; var next = (i+1)%n;
     var n0 = outwardNormal(poly[prev], poly[i], c[0], c[1]);
     var n1 = outwardNormal(poly[i], poly[next], c[0], c[1]);
-    var angle0 = Math.atan2(n0[1], n0[0]);
-    var angle1 = Math.atan2(n1[1], n1[0]);
-    var da = angle1 - angle0;
-    if (da > Math.PI) da -= 2 * Math.PI;
-    if (da < -Math.PI) da += 2 * Math.PI;
+    var a0 = Math.atan2(n0[1], n0[0]); var a1 = Math.atan2(n1[1], n1[0]);
+    var da = a1-a0;
+    if (da > Math.PI) da -= 2*Math.PI;
+    if (da < -Math.PI) da += 2*Math.PI;
     var px = poly[i][0]; var py = poly[i][1];
-    if (Math.abs(da) < 0.01) {
-      result.push([px + n0[0]*dist, py + n0[1]*dist]);
-    } else {
-      var segs = Math.max(2, Math.round(Math.abs(da) / (Math.PI/2) * segments));
+    if (Math.abs(da) < 0.01) { result.push([px+n0[0]*dist, py+n0[1]*dist]); }
+    else {
+      var segs = Math.max(2, Math.round(Math.abs(da)/(Math.PI/2)*segments));
       for (var s = 0; s <= segs; s++) {
-        var a = angle0 + da * (s / segs);
-        result.push([px + Math.cos(a)*dist, py + Math.sin(a)*dist]);
+        var a = a0 + da*(s/segs);
+        result.push([px+Math.cos(a)*dist, py+Math.sin(a)*dist]);
       }
     }
   }
   return result;
 }
 
-function offsetChamfered(p1, p2, dist, cx, cy) {
-  var dx = p2[0]-p1[0]; var dy = p2[1]-p1[1];
-  var len = Math.sqrt(dx*dx+dy*dy);
-  if (len < 0.01) return null;
-  var tx = dx/len; var ty = dy/len;
-  var n = outwardNormal(p1, p2, cx, cy);
-  var chamfer = dist * 0.4;
-  var maxChamfer = len * 0.45;
-  if (chamfer > maxChamfer) chamfer = maxChamfer;
-  return [
-    [p1[0]+tx*chamfer, p1[1]+ty*chamfer],
-    [p2[0]-tx*chamfer, p2[1]-ty*chamfer],
-    [p2[0]+n[0]*chamfer, p2[1]+n[1]*chamfer],
-    [p2[0]+n[0]*dist-tx*chamfer, p2[1]+n[1]*dist-ty*chamfer],
-    [p1[0]+n[0]*dist+tx*chamfer, p1[1]+n[1]*dist+ty*chamfer],
-    [p1[0]+n[0]*chamfer, p1[1]+n[1]*chamfer]
-  ];
+/**
+ * Merge consecutive footprints into one polygon.
+ * Adjacent sections share edges, so merged = [first.a, last.b, last.c, first.d]
+ */
+function mergeConsecutive(fpMs) {
+  if (fpMs.length === 0) return null;
+  if (fpMs.length === 1) return fpMs[0];
+  return [fpMs[0][0], fpMs[fpMs.length-1][1], fpMs[fpMs.length-1][2], fpMs[0][3]];
 }
 
 function polyMToLL(polyM, proj) {
@@ -128,22 +111,6 @@ function polyMToLL(polyM, proj) {
   ring.push(ring[0]);
   return ring;
 }
-
-/**
- * Merge all section footprints on one axis into a single polygon.
- * Sections are sequential: first[a,d] → last[b,c].
- * Merged = [first.a, last.b, last.c, first.d]
- */
-function mergeFootprints(fpMs) {
-  if (fpMs.length === 0) return null;
-  if (fpMs.length === 1) return fpMs[0];
-  var first = fpMs[0];
-  var last = fpMs[fpMs.length - 1];
-  // [a of first, b of last, c of last, d of first]
-  return [first[0], last[1], last[2], first[3]];
-}
-
-// ── Compute ────────────────────────────────────────────
 
 function computeBuffers() {
   if (!_featureStore) return;
@@ -165,46 +132,80 @@ function computeBuffers() {
   var proj = createProjection(gc[0], gc[1]);
 
   for (var si = 0; si < sects.length; si++) {
-    var storedFP = sects[si].properties.footprints;
+    var feature = sects[si];
+    var storedFP = feature.properties.footprints;
     if (!storedFP || storedFP.length === 0) continue;
+    var axisH = feature.properties.sectionHeight || 28;
 
-    // Convert all footprints to meters
+    // Convert all to meters
     var fpMs = [];
     for (var fi = 0; fi < storedFP.length; fi++) {
       var fpM = [];
-      for (var j = 0; j < storedFP[fi].polygon.length; j++) {
+      for (var j = 0; j < storedFP[fi].polygon.length; j++)
         fpM.push(proj.toMeters(storedFP[fi].polygon[j][0], storedFP[fi].polygon[j][1]));
-      }
       fpMs.push(fpM);
     }
 
-    // Merge all footprints on this axis into one polygon
-    var merged = mergeFootprints(fpMs);
-    if (!merged) continue;
+    // Full merged for end + insol (always whole axis)
+    var fullMerged = mergeConsecutive(fpMs);
+    if (!fullMerged) continue;
+    var fcx = polyCentroid(fullMerged);
 
-    var cx = polyCentroid(merged);
+    // End buffer: always from full merged
+    endPolys.push(polyMToLL(bufferPolygonRounded(fullMerged, _distances.end, 8), proj));
 
-    // Merged polygon: [a, b, c, d]
-    // a→b: near long facade
-    // b→c: end торец (last section end)
-    // c→d: far long facade
-    // d→a: start торец (first section start)
+    // Insol: long facades of full merged
+    insolPolys.push(polyMToLL(offsetEdgeOutward(fullMerged[0], fullMerged[1], _distances.insolation, fcx[0], fcx[1]), proj));
+    insolPolys.push(polyMToLL(offsetEdgeOutward(fullMerged[2], fullMerged[3], _distances.insolation, fcx[0], fcx[1]), proj));
 
-    // ── Fire: distance depends on building height ──
-    var sectionH = sects[si].properties.sectionHeight || 28;
-    var fireDist = sectionH <= 28 ? Math.min(_distances.fire, 11) : _distances.fire;
-    firePolys.push(polyMToLL(bufferPolygonRounded(merged, fireDist, 6), proj));
+    // Fire: separate independent sections, merge grouped
+    // Split into runs of grouped + individual independent sections
+    var grouped = [];  // indices of sections without sectionHeight override
+    var independent = []; // indices with override
 
-    // ── End: rounded buffer from merged polygon ──
-    endPolys.push(polyMToLL(bufferPolygonRounded(merged, _distances.end, 8), proj));
+    for (var fi = 0; fi < storedFP.length; fi++) {
+      if (storedFP[fi].sectionHeight !== undefined) {
+        independent.push(fi);
+      } else {
+        grouped.push(fi);
+      }
+    }
 
-    // ── Insolation: only long facades a→b and c→d ──
-    var insolR1 = offsetEdgeOutward(merged[0], merged[1], _distances.insolation, cx[0], cx[1]);
-    var insolR2 = offsetEdgeOutward(merged[2], merged[3], _distances.insolation, cx[0], cx[1]);
-    insolPolys.push(polyMToLL(insolR1, proj));
-    insolPolys.push(polyMToLL(insolR2, proj));
+    // Independent sections: each gets own fire buffer
+    for (var ii = 0; ii < independent.length; ii++) {
+      var idx = independent[ii];
+      var secH = storedFP[idx].sectionHeight;
+      var dist = autoFireDist(secH);
+      firePolys.push(polyMToLL(bufferPolygonRounded(fpMs[idx], dist, 6), proj));
+    }
 
-    // Insolation: only long facades, nothing on торцы
+    // Grouped sections: find consecutive runs, merge each run
+    if (grouped.length > 0) {
+      var runs = [];
+      var currentRun = [grouped[0]];
+      for (var gi = 1; gi < grouped.length; gi++) {
+        if (grouped[gi] === grouped[gi-1] + 1) {
+          currentRun.push(grouped[gi]);
+        } else {
+          runs.push(currentRun);
+          currentRun = [grouped[gi]];
+        }
+      }
+      runs.push(currentRun);
+
+      for (var ri = 0; ri < runs.length; ri++) {
+        var run = runs[ri];
+        var runFpMs = [];
+        for (var rfi = 0; rfi < run.length; rfi++) {
+          runFpMs.push(fpMs[run[rfi]]);
+        }
+        var merged = mergeConsecutive(runFpMs);
+        if (merged) {
+          var dist = autoFireDist(axisH);
+          firePolys.push(polyMToLL(bufferPolygonRounded(merged, dist, 6), proj));
+        }
+      }
+    }
   }
 
   updateSources(firePolys, endPolys, insolPolys);
@@ -214,10 +215,8 @@ function updateSources(fire, end, insol) {
   var sets = [{ key: 'fire', polys: fire }, { key: 'end', polys: end }, { key: 'insolation', polys: insol }];
   for (var i = 0; i < sets.length; i++) {
     var features = [];
-    for (var j = 0; j < sets[i].polys.length; j++) {
-      features.push({ type: 'Feature', properties: {},
-        geometry: { type: 'Polygon', coordinates: [sets[i].polys[j]] } });
-    }
+    for (var j = 0; j < sets[i].polys.length; j++)
+      features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [sets[i].polys[j]] } });
     _mapManager.updateGeoJSONSource(SOURCES[sets[i].key], { type: 'FeatureCollection', features: features });
   }
 }
@@ -235,9 +234,7 @@ function setVisible(vis) {
 }
 
 function onToggle() { setVisible(!_visible); _eventBus.emit('buffers:visibility', { visible: _visible }); }
-function onDistanceChanged(data) {
-  if (data.key && data.value !== undefined) { _distances[data.key] = data.value; if (_visible) computeBuffers(); }
-}
+function onDistanceChanged(d) { if (d.key && d.value !== undefined) { _distances[d.key] = d.value; if (_visible) computeBuffers(); } }
 function onChanged() { if (_visible) computeBuffers(); }
 
 var buffersModule = {
@@ -247,6 +244,7 @@ var buffersModule = {
     initLayers();
     _unsubs.push(_eventBus.on('buffers:toggle', onToggle));
     _unsubs.push(_eventBus.on('buffers:distance:changed', onDistanceChanged));
+    _unsubs.push(_eventBus.on('buffers:recompute', onChanged));
     _unsubs.push(_eventBus.on('features:changed', onChanged));
     _unsubs.push(_eventBus.on('draw:section:complete', onChanged));
     _unsubs.push(_eventBus.on('section-gen:params:changed', onChanged));

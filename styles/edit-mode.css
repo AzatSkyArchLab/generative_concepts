@@ -1,0 +1,43 @@
+
+/* ============================================
+   Edit Mode Close Button
+   ============================================ */
+.edit-mode-close {
+  position: absolute;
+  top: 12px;
+  left: 56px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  z-index: 20;
+  transition: background 0.15s;
+}
+
+.edit-mode-close:hover {
+  background: #fff;
+  border-color: #ff6600;
+}
+
+.edit-close-x {
+  font-size: 14px;
+  font-weight: 700;
+  color: #666;
+  line-height: 1;
+}
+
+.edit-mode-close:hover .edit-close-x {
+  color: #ff6600;
+}
+
+.edit-close-text {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  white-space: nowrap;
+}
