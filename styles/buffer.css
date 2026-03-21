@@ -1,0 +1,92 @@
+
+/* ============================================
+   Buffer Controls (right panel)
+   ============================================ */
+.buffer-controls {
+  border-top: 1px solid var(--border-color);
+  padding: 8px 0 4px;
+  margin-top: 8px;
+}
+
+.buffer-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: calc(100% - 24px);
+  margin: 0 12px 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.buffer-toggle-btn:hover {
+  border-color: var(--text-muted);
+}
+
+.buffer-toggle-btn.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+.buffer-toggle-icon {
+  font-size: 14px;
+}
+
+.buffer-params {
+  padding: 4px 0;
+}
+
+.buffer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+}
+
+.buffer-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.buffer-label {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.buffer-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.buffer-input {
+  width: 48px;
+  padding: 2px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  text-align: right;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.buffer-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.buffer-unit {
+  font-size: 10px;
+  color: var(--text-muted);
+}

@@ -1,5 +1,5 @@
 /**
- * MeshBuilder — cell bricks + divider walls + section wireframe boxes
+ * MeshBuilder — cell bricks + divider walls + section wireframe
  */
 
 import * as THREE from 'three';
@@ -18,8 +18,6 @@ var MATERIALS = {
 var DIVIDER_MATERIAL = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide });
 var EDGE_MATERIAL = new THREE.LineBasicMaterial({ color: 0x666666 });
 var WIREFRAME_MATERIAL = new THREE.LineBasicMaterial({ color: 0x555555 });
-
-// ── Box geometry ───────────────────────────────────────
 
 function buildBoxGeometry(corners, baseZ, topZ) {
   var a = corners[0]; var b = corners[1]; var c = corners[2]; var d = corners[3];
@@ -62,35 +60,24 @@ function buildBoxEdges(corners, baseZ, topZ) {
   return new THREE.LineSegments(geo, EDGE_MATERIAL);
 }
 
-// ── Section wireframe (edges-only box, full building height) ──
-
 /**
- * Wireframe box: 12 edges only (4 bottom + 4 top + 4 vertical).
- * No faces. Shows full building volume.
- *
- * @param {Array<[number,number]>} footprintM - 4 corners in meters
- * @param {number} baseZ
- * @param {number} topZ - full building height
- * @returns {THREE.LineSegments}
+ * Clean wireframe box: 12 edges only. No floor lines.
  */
 export function buildSectionWireframe(footprintM, baseZ, topZ) {
   var a = footprintM[0]; var b = footprintM[1];
   var c = footprintM[2]; var d = footprintM[3];
   var p = [];
 
-  // Bottom rectangle
   p.push(a[0],a[1],baseZ, b[0],b[1],baseZ);
   p.push(b[0],b[1],baseZ, c[0],c[1],baseZ);
   p.push(c[0],c[1],baseZ, d[0],d[1],baseZ);
   p.push(d[0],d[1],baseZ, a[0],a[1],baseZ);
 
-  // Top rectangle
   p.push(a[0],a[1],topZ, b[0],b[1],topZ);
   p.push(b[0],b[1],topZ, c[0],c[1],topZ);
   p.push(c[0],c[1],topZ, d[0],d[1],topZ);
   p.push(d[0],d[1],topZ, a[0],a[1],topZ);
 
-  // 4 vertical edges
   p.push(a[0],a[1],baseZ, a[0],a[1],topZ);
   p.push(b[0],b[1],baseZ, b[0],b[1],topZ);
   p.push(c[0],c[1],baseZ, c[0],c[1],topZ);
@@ -101,23 +88,16 @@ export function buildSectionWireframe(footprintM, baseZ, topZ) {
   return new THREE.LineSegments(geo, WIREFRAME_MATERIAL);
 }
 
-// ── Divider wall (between adjacent sections) ───────────
-
 export function buildDividerWall(p1, p2, baseZ, topZ, thickness) {
-  var dx = p2[0] - p1[0]; var dy = p2[1] - p1[1];
-  var len = Math.sqrt(dx * dx + dy * dy);
+  var dx = p2[0]-p1[0]; var dy = p2[1]-p1[1];
+  var len = Math.sqrt(dx*dx+dy*dy);
   if (len < 0.01) return new THREE.Group();
-  var px = -dy / len * thickness * 0.5;
-  var py = dx / len * thickness * 0.5;
-  var corners = [
-    [p1[0]-px,p1[1]-py], [p2[0]-px,p2[1]-py],
-    [p2[0]+px,p2[1]+py], [p1[0]+px,p1[1]+py]
-  ];
+  var px = -dy/len*thickness*0.5;
+  var py = dx/len*thickness*0.5;
+  var corners = [[p1[0]-px,p1[1]-py],[p2[0]-px,p2[1]-py],[p2[0]+px,p2[1]+py],[p1[0]+px,p1[1]+py]];
   var geo = buildBoxGeometry(corners, baseZ, topZ);
   return new THREE.Mesh(geo, DIVIDER_MATERIAL);
 }
-
-// ── Cell mesh ──────────────────────────────────────────
 
 export function buildCellMesh(polygon, base, height, cellType, floor, inset) {
   if (inset === undefined) inset = 0.08;
@@ -156,7 +136,7 @@ function insetPoly(poly, margin) {
   var n = poly.length;
   var inNormals = [];
   for (var i = 0; i < n; i++) {
-    var a = poly[i]; var b = poly[(i + 1) % n];
+    var a = poly[i]; var b = poly[(i+1)%n];
     var dx = b[0]-a[0]; var dy = b[1]-a[1];
     var len = Math.sqrt(dx*dx+dy*dy);
     if (len < 1e-10) { inNormals.push([0,0]); continue; }

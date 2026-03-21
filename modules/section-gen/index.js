@@ -1,5 +1,5 @@
 /**
- * Section Gen — wireframe boxes for full height, click selects universally
+ * Section Gen — stored lng/lat footprints, type='section-axis' only
  */
 
 import { createProjection, centroid } from '../urban-block/projection.js';
@@ -45,9 +45,6 @@ function orientAxis(fpM) {
   return [b, a];
 }
 
-/**
- * Compute full building height in meters (all floors).
- */
 function computeBuildingHeight(params) {
   var fc = computeFloorCount(params.sectionHeight, params.firstFloorHeight, params.typicalFloorHeight);
   if (fc <= 1) return params.firstFloorHeight;
@@ -62,7 +59,6 @@ function setupClickHandler() {
     if (e.features && e.features.length > 0) {
       var lid = e.features[0].properties.lineId;
       if (lid) {
-        // Emit both events so FeaturePanel AND DrawManager know
         _eventBus.emit('feature:selected', { id: lid });
         _eventBus.emit('sidebar:feature:click', { id: lid });
       }
@@ -109,8 +105,6 @@ function processAllSections() {
     var renderFloors = Math.min(floorCount, 2);
     var renderH = params.firstFloorHeight;
     if (renderFloors > 1) renderH = params.firstFloorHeight + params.typicalFloorHeight;
-
-    // Full building height for wireframe
     var buildingH = computeBuildingHeight(params);
 
     var lineFPsLL = [];
@@ -118,8 +112,9 @@ function processAllSections() {
     for (var fi = 0; fi < storedFP.length; fi++) {
       var fp = storedFP[fi];
       var fpRing = closeRing(fp.polygon);
-      lineFPsLL.push({ ring: fpRing, lineId: lineId });
-      allFootLL.push({ ring: fpRing, lineId: lineId });
+      // Pass floorCount and buildingH for labels
+      lineFPsLL.push({ ring: fpRing, lineId: lineId, floorCount: floorCount, buildingH: buildingH });
+      allFootLL.push({ ring: fpRing, lineId: lineId, floorCount: floorCount, buildingH: buildingH });
 
       var fpM = [];
       for (var j = 0; j < fp.polygon.length; j++) {
@@ -127,7 +122,6 @@ function processAllSections() {
       }
 
       var sectionAxis = orientAxis(fpM);
-
       var nearCells = createNearCells(sectionAxis, params.cellWidth, apartmentDepth);
       var farCells = createFarCells(sectionAxis, params.cellWidth, apartmentDepth,
                                      apartmentDepth + params.corridorWidth);
@@ -161,16 +155,12 @@ function processAllSections() {
       }
 
       if (_threeOverlay) {
-        // Cell bricks (rendered floors only)
         _threeOverlay.addMesh(buildSectionMeshes(
           graph.nodes, renderFloors - 1,
           params.firstFloorHeight, params.typicalFloorHeight, 0.08));
-
-        // Wireframe box for full building height
         _threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
       }
 
-      // Internal divider wall
       if (_threeOverlay && fi > 0) {
         var wallP1 = fpM[3]; var wallP2 = fpM[0];
         _threeOverlay.addMesh(buildDividerWall(wallP1, wallP2, 0, renderH + 0.05, 0.12));

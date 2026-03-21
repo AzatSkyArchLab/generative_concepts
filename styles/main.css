@@ -460,3 +460,50 @@ html, body {
   cursor: pointer;
   background: none;
 }
+
+/* ============================================
+   Buffer Legend & Toggle
+   ============================================ */
+.buffer-legend {
+  position: absolute;
+  bottom: 40px;
+  left: 60px;
+  background: rgba(255,255,255,0.95);
+  border-radius: 8px;
+  padding: 10px 14px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  font-size: 12px;
+  z-index: 10;
+}
+
+.buffer-legend-title {
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #666;
+  margin-bottom: 6px;
+}
+
+.buffer-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.buffer-legend-swatch {
+  width: 16px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.buffer-legend-label {
+  color: #333;
+}
+
+.tool-btn--toggle.active {
+  background: var(--primary);
+  color: white;
+}

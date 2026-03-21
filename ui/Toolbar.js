@@ -1,7 +1,5 @@
 /**
- * Toolbar — tool selection panel (left sidebar)
- *
- * Keyboard shortcuts: V=select, P=polygon, L=line, S=section, Delete=remove
+ * Toolbar — V=select, P=polygon, L=line, S=section, B=buffers, Delete=remove
  */
 
 import { eventBus } from '../core/EventBus.js';
@@ -15,11 +13,6 @@ const ICONS = {
 };
 
 export class Toolbar {
-  /**
-   * @param {string} containerId
-   * @param {function} onToolSelect - callback(toolId)
-   * @param {function} onDelete - callback()
-   */
   constructor(containerId, onToolSelect, onDelete) {
     this._container = document.getElementById(containerId);
     if (!this._container) throw new Error('Toolbar container #' + containerId + ' not found');
@@ -47,7 +40,6 @@ export class Toolbar {
 
   _setupEventListeners() {
     var self = this;
-
     this._container.addEventListener('click', function (e) {
       var btn = e.target.closest('.tool-btn');
       if (!btn) return;
@@ -59,13 +51,8 @@ export class Toolbar {
       }
     });
 
-    eventBus.on('tool:activated', function (data) {
-      self._setActive(data.id);
-    });
-
-    eventBus.on('tool:deactivated', function () {
-      self._setActive('select');
-    });
+    eventBus.on('tool:activated', function (data) { self._setActive(data.id); });
+    eventBus.on('tool:deactivated', function () { self._setActive('select'); });
   }
 
   _setupKeyboardShortcuts() {
@@ -73,37 +60,27 @@ export class Toolbar {
     document.addEventListener('keydown', function (e) {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
+      if (e.key.toLowerCase() === 'b') { eventBus.emit('buffers:toggle'); return; }
+
       var shortcuts = { 'v': 'select', 'p': 'polygon', 'l': 'line', 's': 'section' };
       var tool = shortcuts[e.key.toLowerCase()];
-      if (tool) {
-        self._selectTool(tool);
-        return;
-      }
+      if (tool) { self._selectTool(tool); return; }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Only delete when in select mode and not drawing
-        if (self._activeTool === 'select' && self._onDelete) {
-          self._onDelete();
-        }
+        if (self._activeTool === 'select' && self._onDelete) self._onDelete();
       }
     });
   }
 
-  _selectTool(toolId) {
-    if (this._onToolSelect) this._onToolSelect(toolId);
-  }
+  _selectTool(toolId) { if (this._onToolSelect) this._onToolSelect(toolId); }
 
   _setActive(toolId) {
     this._activeTool = toolId;
     var buttons = this._container.querySelectorAll('.tool-btn');
     for (var i = 0; i < buttons.length; i++) {
       var btn = buttons[i];
-      var t = btn.getAttribute('data-tool');
-      if (t === toolId) {
-        btn.classList.add('active');
-      } else {
-        btn.classList.remove('active');
-      }
+      if (btn.getAttribute('data-tool') === toolId) btn.classList.add('active');
+      else btn.classList.remove('active');
     }
   }
 }

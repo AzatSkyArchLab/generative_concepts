@@ -19,11 +19,13 @@ import { ThreeOverlay } from './core/three/ThreeOverlay.js';
 // import urbanBlockModule from './modules/urban-block/index.js';
 // import sectionDistributorModule from './modules/section-distributor/index.js';
 import sectionGenModule from './modules/section-gen/index.js';
+import buffersModule from './modules/buffers/index.js';
 
 var MODULES = [
   // urbanBlockModule,
   // sectionDistributorModule,
-  sectionGenModule
+  sectionGenModule,
+  buffersModule
 ];
 
 // ── State ──────────────────────────────────────────────
