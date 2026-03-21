@@ -2,21 +2,7 @@
  * Graph — builds section graph with configurable floor heights
  */
 
-/**
- * Compute floor count.
- * @param {number} sectionHeight - total height in meters
- * @param {number} firstH
- * @param {number} typicalH
- * @returns {number}
- */
-export function computeFloorCount(sectionHeight, firstH, typicalH) {
-  if (!firstH) firstH = 4.5;
-  if (!typicalH) typicalH = 3.0;
-  if (sectionHeight <= firstH) return 1;
-  var remaining = sectionHeight - firstH;
-  var typicalFloors = Math.floor(remaining / typicalH);
-  return 1 + typicalFloors + 1;
-}
+export { computeFloorCount } from '../../core/SectionParams.js';
 
 export function computeZOffset(floor, firstH, typicalH) {
   if (floor === 0) return 0;

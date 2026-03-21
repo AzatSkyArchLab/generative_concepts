@@ -4,11 +4,9 @@
  */
 
 import { eventBus } from '../core/EventBus.js';
-
-var DEFAULT_PARAMS = {
-  sectionWidth: 18.0, corridorWidth: 2.0, cellWidth: 3.3,
-  sectionHeight: 28, firstFloorHeight: 4.5, typicalFloorHeight: 3.0
-};
+import { commandManager } from '../core/commands/CommandManager.js';
+import { UpdateFeatureCommand } from '../core/commands/UpdateFeatureCommand.js';
+import { DEFAULT_PARAMS, getParams, computeFloorCount, computeBuildingHeight, autoFireDist } from '../core/SectionParams.js';
 
 var PARAM_DEFS = [
   { key: 'sectionWidth', label: 'Section width', unit: 'м', step: 0.5, min: 10, max: 30 },
@@ -25,8 +23,6 @@ var BUFFER_DEFS = [
   { key: 'insolation', label: 'Insol', unit: 'м', step: 5, min: 10, max: 80, color: '#16a34a', def: 40 }
 ];
 
-function computeFC(sH, fH, tH) { if (sH <= fH) return 1; return 1 + Math.floor((sH - fH) / tH) + 1; }
-function computeBH(sH, fH, tH) { var fc = computeFC(sH, fH, tH); if (fc <= 1) return fH; return fH + (fc-1)*tH; }
 
 export class FeaturePanel {
   constructor(containerId, featureStore) {
@@ -194,11 +190,7 @@ export class FeaturePanel {
     var f = this._featureStore.get(this._editAxisId);
     if (!f || !f.properties.footprints) return '';
     var fps = f.properties.footprints;
-    var params = {};
-    for (var k in DEFAULT_PARAMS) {
-      if (DEFAULT_PARAMS.hasOwnProperty(k))
-        params[k] = f.properties[k] !== undefined ? f.properties[k] : DEFAULT_PARAMS[k];
-    }
+    var params = getParams(f.properties);
 
     var indices = this._editSelectedIndices;
     var isSingle = indices.length === 1;
@@ -220,9 +212,9 @@ export class FeaturePanel {
     }
 
     var displayH = allSameH ? heights[0] : heights[0];
-    var fireAuto = displayH <= 28 ? 11 : 14;
-    var fc = computeFC(displayH, params.firstFloorHeight, params.typicalFloorHeight);
-    var bh = computeBH(displayH, params.firstFloorHeight, params.typicalFloorHeight);
+    var fireAuto = autoFireDist(displayH);
+    var fc = computeFloorCount(displayH, params.firstFloorHeight, params.typicalFloorHeight);
+    var bh = computeBuildingHeight(displayH, params.firstFloorHeight, params.typicalFloorHeight);
 
     // Title
     var title;
@@ -285,17 +277,12 @@ export class FeaturePanel {
   }
 
   _renderSectionProps(features) {
-    var params = {};
-    var fp = features[0].properties;
-    for (var k in DEFAULT_PARAMS) {
-      if (DEFAULT_PARAMS.hasOwnProperty(k))
-        params[k] = fp[k] !== undefined ? fp[k] : DEFAULT_PARAMS[k];
-    }
+    var params = getParams(features[0].properties);
     var totalLen = 0;
     for (var i = 0; i < features.length; i++) totalLen += features[i].properties.axisLength || 0;
     var footArea = totalLen * params.sectionWidth;
     var aptArea = footArea * 0.65;
-    var fireAuto = params.sectionHeight <= 28 ? 11 : 14;
+    var fireAuto = autoFireDist(params.sectionHeight);
     var label = features.length === 1 ? 'Section ' + features[0].properties.id.slice(0, 6) : features.length + ' sections';
 
     var h = '<div class="props-section"><div class="props-header">' + label + '</div>';
@@ -342,8 +329,14 @@ export class FeaturePanel {
         var key = e.target.dataset.key; var val = parseFloat(e.target.value);
         if (isNaN(val)) return;
         for (var si = 0; si < self._selectedIds.length; si++) {
-          var u = {}; u[key] = val;
-          self._featureStore.update(self._selectedIds[si], u);
+          var f = self._featureStore.get(self._selectedIds[si]);
+          if (!f) continue;
+          var oldVal = f.properties[key];
+          var newProps = {}; newProps[key] = val;
+          var oldProps = {}; oldProps[key] = oldVal;
+          commandManager.execute(new UpdateFeatureCommand(
+            self._featureStore, self._selectedIds[si], newProps, oldProps
+          ));
         }
         eventBus.emit('section-gen:params:changed');
         eventBus.emit('buffers:recompute');
@@ -352,8 +345,14 @@ export class FeaturePanel {
     var colorInputs = this._container.querySelectorAll('.param-color[data-target="line"]');
     for (var i = 0; i < colorInputs.length; i++) {
       colorInputs[i].addEventListener('input', function (e) {
-        for (var si = 0; si < self._selectedIds.length; si++)
-          self._featureStore.update(self._selectedIds[si], { color: e.target.value });
+        for (var si = 0; si < self._selectedIds.length; si++) {
+          var f = self._featureStore.get(self._selectedIds[si]);
+          var oldColor = f ? f.properties.color : '#3388ff';
+          commandManager.execute(new UpdateFeatureCommand(
+            self._featureStore, self._selectedIds[si],
+            { color: e.target.value }, { color: oldColor }
+          ));
+        }
         eventBus.emit('features:changed');
       });
     }

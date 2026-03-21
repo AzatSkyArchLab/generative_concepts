@@ -17,13 +17,12 @@ import { ThreeOverlay } from './core/three/ThreeOverlay.js';
 
 // ── Modules (plug/unplug here) ─────────────────────────
 // import urbanBlockModule from './modules/urban-block/index.js';
-// import sectionDistributorModule from './modules/section-distributor/index.js';
+// section-distributor removed — code lives in urban-block
 import sectionGenModule from './modules/section-gen/index.js';
 import buffersModule from './modules/buffers/index.js';
 
 var MODULES = [
   // urbanBlockModule,
-  // sectionDistributorModule,
   sectionGenModule,
   buffersModule
 ];
@@ -81,11 +80,26 @@ async function bootstrap() {
       }
     });
 
+    // Block tool activation during section edit mode
+    var _inEditMode = false;
+    eventBus.on('section:edit-mode', function () {
+      _inEditMode = true;
+      drawManager.deactivateTool();
+    });
+    eventBus.on('section:edit-exit', function () { _inEditMode = false; });
+
+    var _originalActivateTool = drawManager.activateTool.bind(drawManager);
+    drawManager.activateTool = function (toolId) {
+      if (_inEditMode) return;
+      _originalActivateTool(toolId);
+    };
+
     // Initialize modules with threeOverlay in context
     var moduleCtx = {
       mapManager: mapManager,
       eventBus: eventBus,
       featureStore: featureStore,
+      commandManager: commandManager,
       threeOverlay: threeOverlay
     };
     for (var i = 0; i < MODULES.length; i++) {

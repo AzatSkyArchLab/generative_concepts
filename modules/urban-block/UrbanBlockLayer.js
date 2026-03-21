@@ -110,7 +110,7 @@ export class UrbanBlockLayer {
       layout: {
         'text-field': ['get', 'label'],
         'text-size': 11,
-        'text-font': ['Open Sans Regular'],
+        'text-font': ['Noto Sans Regular'],
         'text-offset': [0, -1.2],
         'text-anchor': 'bottom',
         'text-allow-overlap': true

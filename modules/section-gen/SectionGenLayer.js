@@ -92,7 +92,7 @@ export class SectionGenLayer {
     map.addLayer({
       id: 'sg-labels-text', type: 'symbol', source: this.LABELS_SOURCE,
       layout: {
-        'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Open Sans Regular'],
+        'text-field': ['get', 'label'], 'text-size': 9, 'text-font': ['Noto Sans Regular'],
         'text-allow-overlap': true
       },
       paint: { 'text-color': '#333', 'text-halo-color': '#fff', 'text-halo-width': 1 }
@@ -100,7 +100,7 @@ export class SectionGenLayer {
     map.addLayer({
       id: 'sg-floor-labels-text', type: 'symbol', source: this.FLOOR_LABELS_SOURCE,
       layout: {
-        'text-field': ['get', 'label'], 'text-size': 11, 'text-font': ['Open Sans Bold'],
+        'text-field': ['get', 'label'], 'text-size': 11, 'text-font': ['Noto Sans Bold'],
         'text-allow-overlap': true, 'text-anchor': 'bottom-left', 'text-offset': [0.4, -0.4]
       },
       paint: { 'text-color': '#444', 'text-halo-color': 'rgba(255,255,255,0.92)', 'text-halo-width': 1.5 }

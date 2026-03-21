@@ -1,13 +1,13 @@
 /**
  * Buffers — independent sections get own fire buffer, rest merged
  *
- * Grouped (no sectionHeight override): merged into one polygon → one buffer
- * Independent (has sectionHeight): each gets own fire buffer
- * End + Insol always from full merged polygon of entire axis
+ * Refactored:
+ * - Imports from core/geo and core/SectionParams
+ * - destroy() properly removes MapLibre layers and sources
  */
 
-import { eventBus } from '../../core/EventBus.js';
-import { createProjection, centroid } from '../urban-block/projection.js';
+import { createProjection, centroid } from '../../core/geo/projection.js';
+import { autoFireDist } from '../../core/SectionParams.js';
 
 var _distances = { end: 20, insolation: 40 };
 
@@ -26,8 +26,6 @@ var _visible = false;
 var _initialized = false;
 var _unsubs = [];
 
-function autoFireDist(h) { return h <= 28 ? 11 : 14; }
-
 function initLayers() {
   if (_initialized) return;
   var map = _mapManager.getMap();
@@ -45,6 +43,17 @@ function initLayers() {
       paint: { 'line-color': st.line, 'line-width': 1.5, 'line-dasharray': [4, 2] }, layout: { 'visibility': 'none' } });
   }
   _initialized = true;
+}
+
+function removeLayers() {
+  if (!_map) return;
+  var keys = ['fire', 'end', 'insolation'];
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (_map.getLayer(FILL_LAYERS[k])) _map.removeLayer(FILL_LAYERS[k]);
+    if (_map.getLayer(LINE_LAYERS[k])) _map.removeLayer(LINE_LAYERS[k]);
+    if (_map.getSource(SOURCES[k])) _map.removeSource(SOURCES[k]);
+  }
 }
 
 function polyCentroid(poly) {
@@ -95,10 +104,6 @@ function bufferPolygonRounded(poly, dist, segments) {
   return result;
 }
 
-/**
- * Merge consecutive footprints into one polygon.
- * Adjacent sections share edges, so merged = [first.a, last.b, last.c, first.d]
- */
 function mergeConsecutive(fpMs) {
   if (fpMs.length === 0) return null;
   if (fpMs.length === 1) return fpMs[0];
@@ -137,7 +142,6 @@ function computeBuffers() {
     if (!storedFP || storedFP.length === 0) continue;
     var axisH = feature.properties.sectionHeight || 28;
 
-    // Convert all to meters
     var fpMs = [];
     for (var fi = 0; fi < storedFP.length; fi++) {
       var fpM = [];
@@ -146,64 +150,39 @@ function computeBuffers() {
       fpMs.push(fpM);
     }
 
-    // Full merged for end + insol (always whole axis)
     var fullMerged = mergeConsecutive(fpMs);
     if (!fullMerged) continue;
     var fcx = polyCentroid(fullMerged);
 
-    // End buffer: always from full merged
     endPolys.push(polyMToLL(bufferPolygonRounded(fullMerged, _distances.end, 8), proj));
-
-    // Insol: long facades of full merged
     insolPolys.push(polyMToLL(offsetEdgeOutward(fullMerged[0], fullMerged[1], _distances.insolation, fcx[0], fcx[1]), proj));
     insolPolys.push(polyMToLL(offsetEdgeOutward(fullMerged[2], fullMerged[3], _distances.insolation, fcx[0], fcx[1]), proj));
 
-    // Fire: separate independent sections, merge grouped
-    // Split into runs of grouped + individual independent sections
-    var grouped = [];  // indices of sections without sectionHeight override
-    var independent = []; // indices with override
-
+    var grouped = [];
+    var independent = [];
     for (var fi = 0; fi < storedFP.length; fi++) {
-      if (storedFP[fi].sectionHeight !== undefined) {
-        independent.push(fi);
-      } else {
-        grouped.push(fi);
-      }
+      if (storedFP[fi].sectionHeight !== undefined) independent.push(fi);
+      else grouped.push(fi);
     }
 
-    // Independent sections: each gets own fire buffer
     for (var ii = 0; ii < independent.length; ii++) {
       var idx = independent[ii];
-      var secH = storedFP[idx].sectionHeight;
-      var dist = autoFireDist(secH);
-      firePolys.push(polyMToLL(bufferPolygonRounded(fpMs[idx], dist, 6), proj));
+      firePolys.push(polyMToLL(bufferPolygonRounded(fpMs[idx], autoFireDist(storedFP[idx].sectionHeight), 6), proj));
     }
 
-    // Grouped sections: find consecutive runs, merge each run
     if (grouped.length > 0) {
       var runs = [];
       var currentRun = [grouped[0]];
       for (var gi = 1; gi < grouped.length; gi++) {
-        if (grouped[gi] === grouped[gi-1] + 1) {
-          currentRun.push(grouped[gi]);
-        } else {
-          runs.push(currentRun);
-          currentRun = [grouped[gi]];
-        }
+        if (grouped[gi] === grouped[gi-1] + 1) currentRun.push(grouped[gi]);
+        else { runs.push(currentRun); currentRun = [grouped[gi]]; }
       }
       runs.push(currentRun);
-
       for (var ri = 0; ri < runs.length; ri++) {
-        var run = runs[ri];
         var runFpMs = [];
-        for (var rfi = 0; rfi < run.length; rfi++) {
-          runFpMs.push(fpMs[run[rfi]]);
-        }
+        for (var rfi = 0; rfi < runs[ri].length; rfi++) runFpMs.push(fpMs[runs[ri][rfi]]);
         var merged = mergeConsecutive(runFpMs);
-        if (merged) {
-          var dist = autoFireDist(axisH);
-          firePolys.push(polyMToLL(bufferPolygonRounded(merged, dist, 6), proj));
-        }
+        if (merged) firePolys.push(polyMToLL(bufferPolygonRounded(merged, autoFireDist(axisH), 6), proj));
       }
     }
   }
@@ -250,7 +229,13 @@ var buffersModule = {
     _unsubs.push(_eventBus.on('section-gen:params:changed', onChanged));
     console.log('[buffers] initialized');
   },
-  destroy: function () { for (var i = 0; i < _unsubs.length; i++) _unsubs[i](); _unsubs = []; _initialized = false; }
+  destroy: function () {
+    for (var i = 0; i < _unsubs.length; i++) _unsubs[i]();
+    _unsubs = [];
+    removeLayers();
+    _map = null; _mapManager = null; _featureStore = null; _eventBus = null;
+    _visible = false; _initialized = false;
+  }
 };
 
 export default buffersModule;

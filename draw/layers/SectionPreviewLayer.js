@@ -37,7 +37,7 @@ export class SectionPreviewLayer {
       paint: { 'line-color': '#444444', 'line-width': 1.5 } });
 
     map.addLayer({ id: this.LABEL_LAYER, type: 'symbol', source: this.LABEL_SOURCE,
-      layout: { 'text-field': ['get', 'label'], 'text-size': 14, 'text-font': ['Open Sans Bold'],
+      layout: { 'text-field': ['get', 'label'], 'text-size': 14, 'text-font': ['Noto Sans Bold'],
         'text-anchor': 'bottom', 'text-offset': [0, -1.5], 'text-allow-overlap': true },
       paint: { 'text-color': '#1a1a1a', 'text-halo-color': '#ffffff', 'text-halo-width': 2 } });
 

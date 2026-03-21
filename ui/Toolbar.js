@@ -40,7 +40,12 @@ export class Toolbar {
 
   _setupEventListeners() {
     var self = this;
+    this._inEditMode = false;
+    eventBus.on('section:edit-mode', function () { self._inEditMode = true; });
+    eventBus.on('section:edit-exit', function () { self._inEditMode = false; });
+
     this._container.addEventListener('click', function (e) {
+      if (self._inEditMode) return;
       var btn = e.target.closest('.tool-btn');
       if (!btn) return;
       var tool = btn.dataset.tool;
@@ -59,6 +64,7 @@ export class Toolbar {
     var self = this;
     document.addEventListener('keydown', function (e) {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (self._inEditMode) return;
 
       if (e.key.toLowerCase() === 'b') { eventBus.emit('buffers:toggle'); return; }
 
@@ -67,7 +73,7 @@ export class Toolbar {
       if (tool) { self._selectTool(tool); return; }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (self._activeTool === 'select' && self._onDelete) self._onDelete();
+        if (self._onDelete) self._onDelete();
       }
     });
   }

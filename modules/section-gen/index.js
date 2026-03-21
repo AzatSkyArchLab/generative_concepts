@@ -1,45 +1,35 @@
 /**
- * Section Gen — shift+click multi-select in edit mode
- * _editSelectedIndices: array of selected section indices
+ * Section Gen — edit mode with shift+click multi-select
+ *
+ * Refactored:
+ * - Imports projection from core/geo
+ * - Imports params/floor utils from core/SectionParams
+ * - map.on() handlers saved and removed in destroy()
+ * - No direct UI coupling (sidebar:feature:click removed)
  */
 
-import { createProjection, centroid } from '../urban-block/projection.js';
+import { createProjection, centroid } from '../../core/geo/projection.js';
+import { getParams, getSectionHeight, computeFloorCount, computeBuildingHeight } from '../../core/SectionParams.js';
+import { UpdateFeatureCommand } from '../../core/commands/UpdateFeatureCommand.js';
 import {
   createNearCells, createFarCells, createCorridorCells,
   getNorthSide, getLLUParams, getCentralIndices
 } from './cells.js';
-import { buildSectionGraph, computeFloorCount } from './graph.js';
+import { buildSectionGraph } from './graph.js';
 import { SectionGenLayer } from './SectionGenLayer.js';
-import { buildSectionMeshes, buildDividerWall, buildSectionWireframe } from '../../core/three/MeshBuilder.js';
+import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel } from '../../core/three/MeshBuilder.js';
 
 var TYPE_COLORS = { apartment: '#dce8f0', commercial: '#ffb74d', corridor: '#c8c8c8', llu: '#4f81bd' };
-var DEFAULT_PARAMS = {
-  sectionWidth: 18.0, corridorWidth: 2.0, cellWidth: 3.3,
-  sectionHeight: 28, firstFloorHeight: 4.5, typicalFloorHeight: 3.0
-};
 
-var _layer, _threeOverlay, _eventBus, _featureStore, _mapManager;
+var _layer, _threeOverlay, _eventBus, _featureStore, _mapManager, _commandManager;
 var _unsubs = [];
 var _lineFootprints = {};
 var _highlightedIds = [];
 var _clickWired = false;
 var _editAxisId = null;
-var _editSelectedIndices = [];  // array of selected section indices
+var _editSelectedIndices = [];
 var _keyHandler = null;
-
-function getParams(f) {
-  var p = {};
-  for (var k in DEFAULT_PARAMS) {
-    if (DEFAULT_PARAMS.hasOwnProperty(k))
-      p[k] = f.properties[k] !== undefined ? f.properties[k] : DEFAULT_PARAMS[k];
-  }
-  return p;
-}
-
-function getSectionHeight(fp, axisParams) {
-  if (fp.sectionHeight !== undefined) return fp.sectionHeight;
-  return axisParams.sectionHeight;
-}
+var _mapHandlers = [];
 
 function closeRing(polyLL) { var r = polyLL.slice(); r.push(r[0]); return r; }
 
@@ -51,12 +41,6 @@ function orientAxis(fpM) {
   var nx = -dy/len; var ny = dx/len;
   if (nx*(d[0]-a[0]) + ny*(d[1]-a[1]) >= 0) return [a, b];
   return [b, a];
-}
-
-function computeBuildingHeight(secH, firstH, typH) {
-  var fc = computeFloorCount(secH, firstH, typH);
-  if (fc <= 1) return firstH;
-  return firstH + (fc - 1) * typH;
 }
 
 // ── Edit mode ──────────────────────────────────────────
@@ -82,18 +66,14 @@ function exitEditMode() {
 function updateEditHighlight() {
   var fps = _lineFootprints[_editAxisId];
   if (!fps) return;
-
   if (_editSelectedIndices.length === 0) {
     _layer.clearEditSelection(fps);
   } else {
     var selectedFPs = [];
     var dimFPs = [];
     for (var i = 0; i < fps.length; i++) {
-      if (_editSelectedIndices.indexOf(i) >= 0) {
-        selectedFPs.push(fps[i]);
-      } else {
-        dimFPs.push(fps[i]);
-      }
+      if (_editSelectedIndices.indexOf(i) >= 0) selectedFPs.push(fps[i]);
+      else dimFPs.push(fps[i]);
     }
     _layer.selectEditSections(selectedFPs, dimFPs);
   }
@@ -101,53 +81,57 @@ function updateEditHighlight() {
 
 function selectSection(secIdx, addToSelection) {
   if (addToSelection) {
-    // Shift+click: toggle in selection
     var pos = _editSelectedIndices.indexOf(secIdx);
-    if (pos >= 0) {
-      _editSelectedIndices.splice(pos, 1);
-    } else {
-      _editSelectedIndices.push(secIdx);
-      _editSelectedIndices.sort(function (a, b) { return a - b; });
-    }
+    if (pos >= 0) _editSelectedIndices.splice(pos, 1);
+    else { _editSelectedIndices.push(secIdx); _editSelectedIndices.sort(function (a, b) { return a - b; }); }
   } else {
-    // Normal click: replace selection
     _editSelectedIndices = [secIdx];
   }
-
   updateEditHighlight();
   _eventBus.emit('section:individual:selected', {
-    axisId: _editAxisId,
-    sectionIndices: _editSelectedIndices.slice()
+    axisId: _editAxisId, sectionIndices: _editSelectedIndices.slice()
   });
 }
 
-// ── Click / keyboard ───────────────────────────────────
+// ── Click / keyboard (with cleanup) ───────────────────
+
+function _addMapHandler(map, event, layerOrFn, fn) {
+  if (fn) { map.on(event, layerOrFn, fn); _mapHandlers.push({ event: event, layer: layerOrFn, fn: fn }); }
+  else { map.on(event, layerOrFn); _mapHandlers.push({ event: event, fn: layerOrFn }); }
+}
+
+function _removeAllMapHandlers(map) {
+  for (var i = 0; i < _mapHandlers.length; i++) {
+    var h = _mapHandlers[i];
+    if (h.layer) map.off(h.event, h.layer, h.fn);
+    else map.off(h.event, h.fn);
+  }
+  _mapHandlers = [];
+}
 
 function setupClickHandler() {
   if (_clickWired) return;
   var map = _mapManager.getMap();
   if (!map) return;
+  var clickLayerId = _layer.getClickLayerId();
 
-  map.on('click', _layer.getClickLayerId(), function (e) {
+  _addMapHandler(map, 'click', clickLayerId, function (e) {
     if (!e.features || e.features.length === 0) return;
     var props = e.features[0].properties;
     var lineId = props.lineId;
     var secIdx = props.secIdx !== undefined ? parseInt(props.secIdx) : -1;
 
     if (_editAxisId) {
-      if (lineId === _editAxisId && secIdx >= 0) {
-        selectSection(secIdx, e.originalEvent.shiftKey);
-      }
+      if (lineId === _editAxisId && secIdx >= 0) selectSection(secIdx, e.originalEvent.shiftKey);
       return;
     }
 
     _highlightedIds = [lineId];
     highlightIds(_highlightedIds);
     _eventBus.emit('feature:selected', { id: lineId });
-    _eventBus.emit('sidebar:feature:click', { id: lineId });
   });
 
-  map.on('dblclick', _layer.getClickLayerId(), function (e) {
+  _addMapHandler(map, 'dblclick', clickLayerId, function (e) {
     if (!e.features || e.features.length === 0) return;
     e.preventDefault();
     var lineId = e.features[0].properties.lineId;
@@ -156,13 +140,12 @@ function setupClickHandler() {
     enterEditMode(lineId);
   });
 
-  _keyHandler = function (e) {
-    if (e.key === 'Escape' && _editAxisId) exitEditMode();
-  };
+  _addMapHandler(map, 'mouseenter', clickLayerId, function () { _mapManager.setCursor('pointer'); });
+  _addMapHandler(map, 'mouseleave', clickLayerId, function () { _mapManager.setCursor('grab'); });
+
+  _keyHandler = function (e) { if (e.key === 'Escape' && _editAxisId) exitEditMode(); };
   document.addEventListener('keydown', _keyHandler);
 
-  map.on('mouseenter', _layer.getClickLayerId(), function () { _mapManager.setCursor('pointer'); });
-  map.on('mouseleave', _layer.getClickLayerId(), function () { _mapManager.setCursor('grab'); });
   _clickWired = true;
 }
 
@@ -208,7 +191,7 @@ function processAllSections() {
     var lineId = feature.properties.id;
     var storedFP = feature.properties.footprints;
     if (!storedFP || storedFP.length === 0) continue;
-    var params = getParams(feature);
+    var params = getParams(feature.properties);
     var lineFPsLL = [];
 
     for (var fi = 0; fi < storedFP.length; fi++) {
@@ -261,6 +244,7 @@ function processAllSections() {
         _threeOverlay.addMesh(buildSectionMeshes(graph.nodes, renderFloors - 1,
           params.firstFloorHeight, params.typicalFloorHeight, 0.08));
         _threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
+        _threeOverlay.addMesh(buildFloorLabel(floorCount + 'F', fpM, buildingH));
       }
       if (_threeOverlay && fi > 0)
         _threeOverlay.addMesh(buildDividerWall(fpM[3], fpM[0], 0, renderH + 0.05, 0.12));
@@ -297,23 +281,37 @@ function onSectionParamChanged(data) {
   if (!data.axisId) return;
   var f = _featureStore.get(data.axisId);
   if (!f || !f.properties.footprints) return;
-
-  // data.sectionIndices = array of indices to update
   var indices = data.sectionIndices || (data.sectionIdx !== undefined ? [data.sectionIdx] : []);
   if (indices.length === 0) return;
 
+  // Snapshot old footprints for undo
+  var oldFP = [];
+  for (var i = 0; i < f.properties.footprints.length; i++) {
+    var oc = {};
+    for (var k in f.properties.footprints[i]) {
+      if (f.properties.footprints[i].hasOwnProperty(k)) oc[k] = f.properties.footprints[i][k];
+    }
+    oldFP.push(oc);
+  }
+
+  // Build new footprints
   var newFP = [];
   for (var i = 0; i < f.properties.footprints.length; i++) {
     var copy = {};
     for (var k in f.properties.footprints[i]) {
       if (f.properties.footprints[i].hasOwnProperty(k)) copy[k] = f.properties.footprints[i][k];
     }
-    if (indices.indexOf(i) >= 0) {
-      copy[data.key] = data.value;
-    }
+    if (indices.indexOf(i) >= 0) copy[data.key] = data.value;
     newFP.push(copy);
   }
-  _featureStore.update(data.axisId, { footprints: newFP });
+
+  if (_commandManager) {
+    _commandManager.execute(new UpdateFeatureCommand(
+      _featureStore, data.axisId, { footprints: newFP }, { footprints: oldFP }
+    ));
+  } else {
+    _featureStore.update(data.axisId, { footprints: newFP });
+  }
   processAllSections();
   _eventBus.emit('buffers:recompute');
 }
@@ -323,6 +321,7 @@ var sectionGenModule = {
   init: function (ctx) {
     _eventBus = ctx.eventBus; _featureStore = ctx.featureStore;
     _mapManager = ctx.mapManager; _threeOverlay = ctx.threeOverlay || null;
+    _commandManager = ctx.commandManager || null;
     _layer = new SectionGenLayer(ctx.mapManager); _layer.init();
     _unsubs.push(_eventBus.on('draw:section:complete', onChanged));
     _unsubs.push(_eventBus.on('features:changed', onChanged));
@@ -337,10 +336,12 @@ var sectionGenModule = {
     for (var i = 0; i < _unsubs.length; i++) { _unsubs[i](); }
     _unsubs = [];
     if (_keyHandler) { document.removeEventListener('keydown', _keyHandler); _keyHandler = null; }
+    var map = _mapManager ? _mapManager.getMap() : null;
+    if (map) _removeAllMapHandlers(map);
     if (_threeOverlay) _threeOverlay.clear();
     if (_layer) { _layer.destroy(); _layer = null; }
     _eventBus = null; _featureStore = null; _mapManager = null;
-    _threeOverlay = null; _lineFootprints = {}; _highlightedIds = [];
+    _commandManager = null; _threeOverlay = null; _lineFootprints = {}; _highlightedIds = [];
     _editAxisId = null; _editSelectedIndices = []; _clickWired = false;
   }
 };

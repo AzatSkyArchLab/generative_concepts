@@ -10,9 +10,9 @@ import { BaseTool } from './BaseTool.js';
 import { commandManager } from '../../core/commands/CommandManager.js';
 import { AddFeatureCommand } from '../../core/commands/AddFeatureCommand.js';
 import { SectionPreviewLayer } from '../layers/SectionPreviewLayer.js';
-import { createProjection } from '../../modules/urban-block/projection.js';
-import { classifySegment } from '../../modules/section-distributor/orientation.js';
-import { getSectionLengths, createSectionSequence } from '../../modules/section-distributor/distributor.js';
+import { createProjection } from '../../core/geo/projection.js';
+import { classifySegment } from '../../modules/urban-block/orientation.js';
+import { getSectionLengths, createSectionSequence } from '../../modules/urban-block/distributor.js';
 
 var SECTION_WIDTH = 18.0;
 
