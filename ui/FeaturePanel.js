@@ -42,8 +42,9 @@ export class FeaturePanel {
       '<div class="panel-header"><span class="panel-title">Features</span>' +
       '<span class="panel-badge" id="feature-count">0</span></div>' +
       '<div class="panel-body"><div id="feature-list"></div><div id="section-props"></div>' +
-      '<div id="buffer-section"></div></div>';
+      '<div id="buffer-section"></div><div id="insol-section"></div></div>';
     this._renderBufferSection();
+    this._renderInsolSection();
   }
 
   _renderBufferSection() {
@@ -77,37 +78,162 @@ export class FeaturePanel {
     }
   }
 
+  _renderInsolSection() {
+    var el = document.getElementById('insol-section');
+    if (!el) return;
+    var h = '<div class="props-divider"></div>';
+    h += '<div class="insol-panel" id="insol-panel">';
+    h += '<div id="insol-btn-wrap"></div>';
+    h += '<div id="insol-results" style="display:none"></div>';
+    h += '</div>';
+    el.innerHTML = h;
+  }
+
+  /**
+   * Context-aware insolation button.
+   * Adapts label and action to current selection state:
+   *   - No selection → "All sections"
+   *   - Axis selected → "Axis · N sections"  
+   *   - Edit mode, section selected → "Section #N"
+   *   - Global active → show LIVE badge
+   */
+  _updateInsolButton() {
+    var wrap = document.getElementById('insol-btn-wrap');
+    if (!wrap) return;
+
+    // Check if any sections exist
+    var all = this._featureStore.toArray();
+    var hasSections = false;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].properties.type === 'section-axis') { hasSections = true; break; }
+    }
+
+    if (!hasSections) { wrap.innerHTML = ''; return; }
+
+    // Determine context
+    var scope, label, event, eventData;
+
+    if (this._editAxisId && this._editSelectedIndices.length === 1) {
+      // Edit mode — single section selected
+      scope = 'section';
+      var secNum = this._editSelectedIndices[0] + 1;
+      label = 'Section #' + secNum;
+      event = 'insolation:analyze:section';
+      eventData = { axisId: this._editAxisId, sectionIdx: this._editSelectedIndices[0] };
+    } else if (this._editAxisId) {
+      // Edit mode — no section or multi-select
+      scope = 'axis';
+      var f = this._featureStore.get(this._editAxisId);
+      var n = f && f.properties.footprints ? f.properties.footprints.length : 0;
+      label = 'Editing axis · ' + n + ' sect.';
+      event = 'insolation:analyze:axis';
+      eventData = { axisId: this._editAxisId };
+    } else if (this._selectedIds.length === 1) {
+      // Axis selected
+      var f = this._featureStore.get(this._selectedIds[0]);
+      if (f && f.properties.type === 'section-axis') {
+        scope = 'axis';
+        var n = f.properties.footprints ? f.properties.footprints.length : 0;
+        label = 'Selected axis · ' + n + ' sect.';
+        event = 'insolation:analyze:axis';
+        eventData = { axisId: this._selectedIds[0] };
+      } else {
+        scope = 'global';
+        label = 'All sections';
+        event = 'insolation:analyze:global';
+        eventData = null;
+      }
+    } else {
+      scope = 'global';
+      label = 'All sections';
+      event = 'insolation:analyze:global';
+      eventData = null;
+    }
+
+    // Check if global is live (results card visible)
+    var resultsEl = document.getElementById('insol-results');
+    var isLive = resultsEl && resultsEl.style.display === 'block';
+
+    var h = '<button class="insol-btn insol-btn--analyze" id="insol-analyze-btn" data-scope="' + scope + '">';
+    h += '<span class="insol-btn-icon">◐</span>';
+    h += '<span class="insol-btn-label">' + label + '</span>';
+    if (isLive && scope === 'global') {
+      h += '<span class="insol-live-badge">LIVE</span>';
+    }
+    h += '</button>';
+
+    wrap.innerHTML = h;
+
+    var btn = document.getElementById('insol-analyze-btn');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        eventBus.emit(event, eventData);
+      });
+    }
+  }
+
+  _showInsolResults(data) {
+    var el = document.getElementById('insol-results');
+    if (!el) return;
+    var levelLabel = data.level === 'global' ? 'All sections' : data.level === 'axis' ? 'Selected axis' : 'Section';
+    el.style.display = 'block';
+    el.innerHTML =
+      '<div class="insol-results-card">' +
+      '<div class="insol-results-header">' + levelLabel + ' — ' + data.total + ' points</div>' +
+      '<div class="insol-results-bar">' +
+        '<div class="insol-bar-pass" style="width:' + (data.total > 0 ? data.pass / data.total * 100 : 0) + '%"></div>' +
+        '<div class="insol-bar-warn" style="width:' + (data.total > 0 ? data.warning / data.total * 100 : 0) + '%"></div>' +
+        '<div class="insol-bar-fail" style="width:' + (data.total > 0 ? data.fail / data.total * 100 : 0) + '%"></div>' +
+      '</div>' +
+      '<div class="insol-results-stats">' +
+        '<span class="insol-stat insol-stat--pass">' + data.pass + ' pass</span>' +
+        '<span class="insol-stat insol-stat--warn">' + data.warning + ' warn</span>' +
+        '<span class="insol-stat insol-stat--fail">' + data.fail + ' fail</span>' +
+      '</div>' +
+      '<div class="insol-compliance">' + data.complianceRate + '% compliance</div>' +
+      '<div class="insol-actions">' +
+        '<button class="insol-btn insol-btn--rays" id="insol-rays-btn">' +
+          '<span class="insol-btn-icon">⟋</span> <span id="insol-rays-label">Show rays</span></button>' +
+        '<button class="insol-btn insol-btn--clear" id="insol-clear-btn">Clear results</button>' +
+      '</div>' +
+      '</div>';
+    var clearBtn = document.getElementById('insol-clear-btn');
+    if (clearBtn) clearBtn.addEventListener('click', function () { eventBus.emit('insolation:clear'); el.style.display = 'none'; });
+    var raysBtn = document.getElementById('insol-rays-btn');
+    if (raysBtn) raysBtn.addEventListener('click', function () { eventBus.emit('insolation:rays:toggle'); });
+  }
+
   _setupEvents() {
     var self = this;
-    eventBus.on('features:changed', function () { self._updateList(); self._updateProps(); });
+    eventBus.on('features:changed', function () { self._updateList(); self._updateProps(); self._updateInsolButton(); });
     eventBus.on('feature:selected', function (d) {
       self._selectedIds = [d.id]; self._editAxisId = null; self._editSelectedIndices = [];
-      self._updateList(); self._updateProps();
+      self._updateList(); self._updateProps(); self._updateInsolButton();
     });
     eventBus.on('feature:multiselect', function (d) {
       var idx = self._selectedIds.indexOf(d.id);
       if (idx >= 0) self._selectedIds.splice(idx, 1);
       else self._selectedIds.push(d.id);
       self._editAxisId = null; self._editSelectedIndices = [];
-      self._updateList(); self._updateProps();
+      self._updateList(); self._updateProps(); self._updateInsolButton();
     });
     eventBus.on('feature:deselected', function () {
       self._selectedIds = []; self._editAxisId = null; self._editSelectedIndices = [];
-      self._updateList(); self._updateProps();
+      self._updateList(); self._updateProps(); self._updateInsolButton();
     });
     eventBus.on('section:edit-mode', function (d) {
       self._editAxisId = d.axisId; self._editSelectedIndices = [];
       self._selectedIds = [d.axisId];
-      self._updateList(); self._updateProps();
+      self._updateList(); self._updateProps(); self._updateInsolButton();
     });
     eventBus.on('section:edit-exit', function () {
       self._editAxisId = null; self._editSelectedIndices = [];
-      self._updateProps();
+      self._updateProps(); self._updateInsolButton();
     });
     eventBus.on('section:individual:selected', function (d) {
       self._editAxisId = d.axisId;
       self._editSelectedIndices = d.sectionIndices || [];
-      self._updateProps();
+      self._updateProps(); self._updateInsolButton();
     });
     eventBus.on('buffers:visibility', function (d) {
       self._buffersVisible = d.visible;
@@ -125,6 +251,21 @@ export class FeaturePanel {
       if (e.ctrlKey || e.metaKey) eventBus.emit('feature:multiselect', { id: id });
       else eventBus.emit('sidebar:feature:click', { id: id });
     });
+
+    eventBus.on('insolation:results', function (data) {
+      self._showInsolResults(data);
+      self._updateInsolButton();
+    });
+    eventBus.on('insolation:clear', function () {
+      var el = document.getElementById('insol-results');
+      if (el) el.style.display = 'none';
+      self._updateInsolButton();
+    });
+    eventBus.on('insolation:rays:visibility', function (d) {
+      var lbl = document.getElementById('insol-rays-label');
+      if (lbl) lbl.textContent = d.visible ? 'Hide rays' : 'Show rays';
+    });
+    eventBus.on('draw:section:complete', function () { self._updateInsolButton(); });
   }
 
   _updateList() {

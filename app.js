@@ -3,6 +3,7 @@
  */
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles/main.css';
+import './styles/insolation.css';
 import { eventBus } from './core/EventBus.js';
 import { MapManager } from './map/MapManager.js';
 import { DrawManager } from './draw/DrawManager.js';
@@ -20,11 +21,13 @@ import { ThreeOverlay } from './core/three/ThreeOverlay.js';
 // section-distributor removed — code lives in urban-block
 import sectionGenModule from './modules/section-gen/index.js';
 import buffersModule from './modules/buffers/index.js';
+import insolationModule from './modules/insolation/index.js';
 
 var MODULES = [
   // urbanBlockModule,
   sectionGenModule,
-  buffersModule
+  buffersModule,
+  insolationModule
 ];
 
 // ── State ──────────────────────────────────────────────

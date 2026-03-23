@@ -67,6 +67,7 @@ export class Toolbar {
       if (self._inEditMode) return;
 
       if (e.key.toLowerCase() === 'b') { eventBus.emit('buffers:toggle'); return; }
+      if (e.key.toLowerCase() === 'i') { eventBus.emit('insolation:analyze:global'); return; }
 
       var shortcuts = { 'v': 'select', 'p': 'polygon', 'l': 'line', 's': 'section' };
       var tool = shortcuts[e.key.toLowerCase()];

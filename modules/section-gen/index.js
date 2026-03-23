@@ -5,7 +5,7 @@
  * - Imports projection from core/geo
  * - Imports params/floor utils from core/SectionParams
  * - map.on() handlers saved and removed in destroy()
- * - No direct UI coupling (sidebar:feature:click removed)
+ * - Click footprint → sidebar:feature:click → DrawManager selects axis
  */
 
 import { createProjection, centroid } from '../../core/geo/projection.js';
@@ -128,7 +128,7 @@ function setupClickHandler() {
 
     _highlightedIds = [lineId];
     highlightIds(_highlightedIds);
-    _eventBus.emit('feature:selected', { id: lineId });
+    _eventBus.emit('sidebar:feature:click', { id: lineId });
   });
 
   _addMapHandler(map, 'dblclick', clickLayerId, function (e) {
