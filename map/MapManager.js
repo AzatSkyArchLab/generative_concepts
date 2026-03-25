@@ -11,6 +11,7 @@ export class MapManager {
     this._containerId = containerId;
     this._map = null;
     this._currentBasemap = 'osm';
+    this._cursorLocked = false;
   }
 
   async init() {
@@ -161,8 +162,19 @@ export class MapManager {
   }
 
   setCursor(cursor) {
+    if (this._cursorLocked) return;
     var canvas = this._map ? this._map.getCanvas() : null;
     if (canvas) canvas.style.cursor = cursor;
+  }
+
+  lockCursor(cursor) {
+    this._cursorLocked = true;
+    var canvas = this._map ? this._map.getCanvas() : null;
+    if (canvas) canvas.style.cursor = cursor;
+  }
+
+  unlockCursor() {
+    this._cursorLocked = false;
   }
 
   queryRenderedFeatures(point, options) {

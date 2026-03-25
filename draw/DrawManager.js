@@ -147,11 +147,21 @@ export class DrawManager {
     if (this._activeTool) this._activeTool.deactivate();
     this._activeTool = tool;
     tool.activate();
+
+    // Lock cursor for draw tools, unlock for select
+    if (toolId !== 'select') {
+      this._mapManager.lockCursor(tool.cursor);
+    } else {
+      this._mapManager.unlockCursor();
+      this._mapManager.setCursor(tool.cursor);
+    }
+
     eventBus.emit('tool:activate', toolId);
   }
 
   deactivateTool() {
     if (this._activeTool) this._activeTool.deactivate();
+    this._mapManager.unlockCursor();
     this.activateTool('select');
     eventBus.emit('tool:deactivate');
   }

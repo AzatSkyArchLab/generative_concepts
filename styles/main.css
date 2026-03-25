@@ -168,6 +168,14 @@ html, body {
   background: var(--bg-primary);
   border-left: 1px solid var(--border-color);
   overflow: hidden;
+  height: 100%;
+}
+
+#feature-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 
 .panel-header {
@@ -205,6 +213,7 @@ html, body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
+  min-height: 0;
 }
 
 .panel-empty {
@@ -451,6 +460,48 @@ html, body {
   margin: 6px 12px;
 }
 
+/* Collapsible params */
+.params-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+}
+
+.params-toggle:hover {
+  background: var(--bg-tertiary);
+}
+
+.params-toggle-label {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.params-toggle-chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+}
+
+.params-toggle-chevron.open {
+  transform: rotate(90deg);
+}
+
+.params-body {
+  display: none;
+  padding-bottom: 4px;
+}
+
+.params-body.open {
+  display: block;
+}
+
 .param-color {
   width: 32px;
   height: 24px;
@@ -504,6 +555,313 @@ html, body {
 }
 
 .tool-btn--toggle.active {
+  background: var(--primary);
+  color: white;
+}
+
+/* ============================================
+   Stats Panel
+   ============================================ */
+.stats-panel {
+  padding: 4px 0;
+}
+
+.stats-summary {
+  padding: 6px 12px;
+}
+
+.stats-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 0;
+}
+
+.stats-summary-row--pop {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+}
+
+.stats-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.stats-value {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.stats-value--pop {
+  font-size: 14px;
+  color: var(--primary);
+}
+
+.stats-sections {
+  padding: 4px 8px 8px;
+}
+
+.stats-axis-header {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 6px 4px 3px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.stats-axis-sum {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.stats-sec-card {
+  display: grid;
+  grid-template-columns: 28px 1fr 1fr;
+  gap: 2px 6px;
+  padding: 4px 4px;
+  margin-bottom: 2px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  font-size: 10px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text-secondary);
+}
+
+.stats-sec-card:hover {
+  background: var(--bg-tertiary);
+}
+
+.stats-sec-idx {
+  grid-row: 1 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.stats-sec-metric {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.stats-sec-metric-label {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.stats-sec-metric-value {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.stats-sec-metric-value--pop {
+  color: var(--primary);
+  font-weight: 700;
+}
+
+/* ============================================
+   Apartment Mix Panel
+   ============================================ */
+.apt-mix-panel {
+  padding: 4px 0;
+}
+
+.apt-mix-header {
+  padding: 6px 12px 4px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.apt-mix-inputs {
+  padding: 2px 12px 6px;
+}
+
+.apt-mix-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.apt-mix-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.apt-mix-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  width: 24px;
+}
+
+.apt-mix-input {
+  width: 48px;
+  padding: 2px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  text-align: right;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+}
+
+.apt-mix-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.apt-mix-unit {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.apt-mix-total {
+  padding: 4px 0 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--success);
+}
+
+.apt-mix-actions {
+  padding: 6px 12px;
+}
+
+.apt-mix-btn {
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--primary);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.apt-mix-btn:hover {
+  background: var(--primary-hover);
+}
+
+/* WZ status in section cards */
+.stats-sec-wz {
+  font-size: 9px;
+  padding-top: 2px;
+  border-top: 1px dashed var(--border-color);
+  margin-top: 1px;
+}
+
+.stats-sec-wz.wz-ok .stats-sec-metric-value {
+  color: var(--success);
+}
+
+.stats-sec-wz.wz-fail .stats-sec-metric-value {
+  color: var(--danger);
+}
+
+/* Reset button */
+.apt-mix-btn--reset {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.apt-mix-btn--reset:hover {
+  background: var(--border-color);
+  color: var(--text-primary);
+}
+
+/* Building plan results */
+.bplan-card {
+  margin: 8px 12px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+
+.bplan-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 4px;
+}
+
+.bplan-table {
+  font-size: 10px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.bplan-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 1fr 36px;
+  gap: 4px;
+  padding: 2px 0;
+  align-items: center;
+}
+
+.bplan-row--header {
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 3px;
+  margin-bottom: 2px;
+}
+
+.bplan-row small {
+  color: var(--text-muted);
+}
+
+.bplan-type {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.bplan-ok { color: var(--success); font-weight: 600; }
+.bplan-over { color: var(--warning); font-weight: 600; }
+.bplan-under { color: var(--danger); font-weight: 600; }
+
+.bplan-summary {
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.apt-mix-btn--report {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.apt-mix-btn--report:hover {
   background: var(--primary);
   color: white;
 }
