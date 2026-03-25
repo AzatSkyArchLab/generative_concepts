@@ -175,7 +175,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         var d = Math.abs(c - awz);
         if (d < bestDist) { bestDist = d; bestWZ = awz; }
       }
-      // Fallback: any same-row WZ, clear path (even >4)
+      // Fallback: same-row WZ with clear path BUT still cap 4
       if (bestWZ === null) {
         bestDist = Infinity;
         for (var wi = 0; wi < midWZ.length; wi++) {
@@ -183,8 +183,24 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
           var sameRow = (row === 0 && awz < N) || (row === 1 && awz >= N);
           if (!sameRow) continue;
           if (!isPathClear(c, awz, sweepBarriers)) continue;
+          if (allocated[awz].length >= 4) continue;
           var d = Math.abs(c - awz);
           if (d < bestDist) { bestDist = d; bestWZ = awz; }
+        }
+      }
+      // Last resort same-row: nearest torec
+      if (bestWZ === null) {
+        bestDist = Infinity;
+        var bestTi = -1;
+        for (var ai = 0; ai < apartments.length; ai++) {
+          if (!apartments[ai].torec) continue;
+          var d = Math.abs(c - apartments[ai].wetCell);
+          if (d < bestDist) { bestDist = d; bestTi = ai; }
+        }
+        if (bestTi >= 0) {
+          apartments[bestTi].cells.push(c);
+          usedCells[c] = true;
+          continue;
         }
       }
       if (bestWZ !== null) {
@@ -194,34 +210,52 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     }
   }
 
-  // Pass 2: any remaining → nearest reachable mid WZ or torec
+  // Pass 2: remaining → same-row mid WZ with cap 4, or torec
   for (var c = 0; c < 2 * N; c++) {
     if (usedCells[c]) continue;
+    var cRow = c < N ? 0 : 1;
     var bestWZ = null;
     var bestDist = Infinity;
-    // Same-row with clear path
+    // Same-row mid WZ with clear path + cap 4
     for (var wi = 0; wi < midWZ.length; wi++) {
-      if (!isPathClear(c, midWZ[wi], sweepBarriers)) continue;
-      var d = Math.abs(c - midWZ[wi]);
-      if (d < bestDist) { bestDist = d; bestWZ = midWZ[wi]; }
+      var awz = midWZ[wi];
+      var wzRow = awz < N ? 0 : 1;
+      if (wzRow !== cRow) continue;
+      if (allocated[awz].length >= 4) continue;
+      if (!isPathClear(c, awz, sweepBarriers)) continue;
+      var d = Math.abs(c - awz);
+      if (d < bestDist) { bestDist = d; bestWZ = awz; }
     }
-    // Cross-row fallback: nearest mid WZ regardless
+    // Same-row without path check + cap 4
     if (bestWZ === null) {
       bestDist = Infinity;
       for (var wi = 0; wi < midWZ.length; wi++) {
-        var d = Math.abs(c - midWZ[wi]);
-        if (d < bestDist) { bestDist = d; bestWZ = midWZ[wi]; }
+        var awz = midWZ[wi];
+        var wzRow = awz < N ? 0 : 1;
+        if (wzRow !== cRow) continue;
+        if (allocated[awz].length >= 4) continue;
+        var d = Math.abs(c - awz);
+        if (d < bestDist) { bestDist = d; bestWZ = awz; }
+      }
+    }
+    // Torec fallback
+    if (bestWZ === null) {
+      var bestTorec = -1;
+      bestDist = Infinity;
+      for (var ai = 0; ai < apartments.length; ai++) {
+        if (!apartments[ai].torec) continue;
+        var d = Math.abs(c - apartments[ai].wetCell);
+        if (d < bestDist) { bestDist = d; bestTorec = ai; }
+      }
+      if (bestTorec >= 0) {
+        apartments[bestTorec].cells.push(c);
+        usedCells[c] = true;
+        continue;
       }
     }
     if (bestWZ !== null) {
       allocated[bestWZ].push(c);
       usedCells[c] = true;
-    } else {
-      for (var ai = 0; ai < apartments.length; ai++) {
-        apartments[ai].cells.push(c);
-        usedCells[c] = true;
-        break;
-      }
     }
   }
 
