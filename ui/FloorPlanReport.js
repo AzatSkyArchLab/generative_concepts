@@ -136,7 +136,7 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
 
   var totalW = nearCells.length * (cellW + 1) + 2;
   var h = '<div class="floor-block">';
-  h += '<div class="floor-header">Floor ' + fl;
+  h += '<div class="floor-header">Floor ' + (fl + 1);
   h += '<span class="floor-meta"> ' + apts.length + ' apts · WZ:' + (floorData.activeWZ || '?');
   h += ' · ' + summary.join(' ') + '</span></div>';
 
@@ -300,7 +300,7 @@ function renderDebugDump(planKey, plan, graphData) {
     var fd = plan.floors[fi];
     var fl = fd.floor;
     var flInsol = insol[fl] || {};
-    lines.push('--- Floor ' + fl + ' (activeWZ: ' + (fd.activeWZ || '?') + ') ---');
+    lines.push('--- Floor ' + (fl + 1) + ' (activeWZ: ' + (fd.activeWZ || '?') + ') ---');
 
     // Collect all WZ for this floor
     var wzSet = {};

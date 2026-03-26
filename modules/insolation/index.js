@@ -256,7 +256,24 @@ function buildAllCollisionMeshes(sections, proj) {
       var a = fpM[0]; var b = fpM[1]; var c = fpM[2]; var d = fpM[3];
       var ccx = (a[0]+b[0]+c[0]+d[0]) / 4;
       var ccy = (a[1]+b[1]+c[1]+d[1]) / 4;
-      var lluSide = computeLLUSide(fpM);
+
+      // Use real section-gen data if available
+      var lluSide;
+      var N;
+      var lluIdx = {};
+      if (fp.N) {
+        N = fp.N;
+        lluSide = fp.northSide || computeLLUSide(fpM);
+        if (fp.lluIndices) {
+          for (var li = 0; li < fp.lluIndices.length; li++) lluIdx[fp.lluIndices[li]] = true;
+        }
+      } else {
+        lluSide = computeLLUSide(fpM);
+        var nearDx = b[0]-a[0]; var nearDy = b[1]-a[1];
+        var nearLen = Math.sqrt(nearDx*nearDx + nearDy*nearDy);
+        N = Math.max(1, Math.round(nearLen / params.cellWidth));
+        lluIdx = computeLLUIndices(N, secH);
+      }
 
       function outN(p1, p2) {
         var ex = p2[0]-p1[0]; var ey = p2[1]-p1[1];
@@ -266,12 +283,8 @@ function buildAllCollisionMeshes(sections, proj) {
         if (nx*(mx-ccx) + ny*(my-ccy) < 0) { nx = -nx; ny = -ny; }
         return [nx, ny];
       }
-
-      var nearDx = b[0]-a[0]; var nearDy = b[1]-a[1];
-      var nearLen = Math.sqrt(nearDx*nearDx + nearDy*nearDy);
-      var N = Math.max(1, Math.round(nearLen / params.cellWidth));
       var aptDepth = (params.sectionWidth - params.corridorWidth) / 2.0;
-      var lluIdx = computeLLUIndices(N, secH);
+
       var nearLLU0 = (lluSide === 'near' && lluIdx[0]);
       var nearLLUN = (lluSide === 'near' && lluIdx[N - 1]);
       var farLLUatC = (lluSide === 'far' && lluIdx[0]);
@@ -350,7 +363,7 @@ function computeLLUIndices(cellCount, secH) {
   return indices;
 }
 
-function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighbor, floorNum) {
+function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighbor, floorNum, sectionData) {
   var points = [];
   var cx = (fpM[0][0] + fpM[1][0] + fpM[2][0] + fpM[3][0]) / 4;
   var cy = (fpM[0][1] + fpM[1][1] + fpM[2][1] + fpM[3][1]) / 4;
@@ -365,12 +378,26 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
   var floorBaseZ = params.firstFloorHeight + (floorNum - 1) * params.typicalFloorHeight;
   var z = floorBaseZ + 1.6;
 
-  // LLU skip
-  var lluSide = computeLLUSide(fpM);
-  var edgeLen0 = Math.sqrt(
-    Math.pow(fpM[1][0] - fpM[0][0], 2) + Math.pow(fpM[1][1] - fpM[0][1], 2));
-  var cellCount = Math.max(1, Math.round(edgeLen0 / params.cellWidth));
-  var lluIndices = computeLLUIndices(cellCount, secH);
+  // LLU: use real data from section-gen if available, else fallback
+  var lluSide;
+  var cellCount;
+  var lluIndices = {};
+
+  if (sectionData && sectionData.N) {
+    cellCount = sectionData.N;
+    lluSide = sectionData.northSide || computeLLUSide(fpM);
+    if (sectionData.lluIndices) {
+      for (var li = 0; li < sectionData.lluIndices.length; li++) {
+        lluIndices[sectionData.lluIndices[li]] = true;
+      }
+    }
+  } else {
+    lluSide = computeLLUSide(fpM);
+    var edgeLen0 = Math.sqrt(
+      Math.pow(fpM[1][0] - fpM[0][0], 2) + Math.pow(fpM[1][1] - fpM[0][1], 2));
+    cellCount = Math.max(1, Math.round(edgeLen0 / params.cellWidth));
+    lluIndices = computeLLUIndices(cellCount, secH);
+  }
 
   // Long facades — use same N for both (near edge defines cell count, matching section-gen)
   for (var fi = 0; fi < facades.length; fi++) {
@@ -580,7 +607,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
       var actualMaxFloor = Math.min(floorEnd, fc - 1); // fc includes floor 0
 
       for (var fl = floorStart; fl <= actualMaxFloor; fl++) {
-        var points = generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighbor, fl);
+        var points = generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighbor, fl, fp);
         for (var pi = 0; pi < points.length; pi++) {
           var pt = points[pi];
           var rayResults = castSunRays(pt.position, sunVectors, _collisionMeshes);

@@ -132,6 +132,12 @@ export function processAllSections() {
       var northSide = getNorthSide(sectionAxis);
       var lluParams = getLLUParams(secH);
       var lluIndices = getCentralIndices(lluParams.count, N);
+
+      // Store real cell data on footprint for insolation module
+      fp.N = N;
+      fp.northSide = northSide;
+      fp.lluIndices = lluIndices;
+
       var graph = buildSectionGraph(N, nearCells, farCells, corridorCells,
         northSide, lluIndices, lluParams.tag, renderFloors);
 
@@ -152,6 +158,27 @@ export function processAllSections() {
         }
 
         var sectionOri = feature.properties.orientation || 'lat';
+
+        // Diagnostic: show insolMap for first floor
+        if (insolMap) {
+          var nearFlags = [];
+          var farFlags = [];
+          for (var ci = 0; ci < N; ci++) {
+            var f = insolMap[ci];
+            nearFlags.push(ci + ':' + (f || '-'));
+          }
+          for (var ci = N; ci < 2 * N; ci++) {
+            var f = insolMap[ci];
+            farFlags.push(ci + ':' + (f || '-'));
+          }
+          console.log('[InsolMap] sec=' + fi + ' ori=' + sectionOri + ' N=' + N +
+            ' north=' + northSide + ' LLU=[' + lluIndices.join(',') + ']');
+          console.log('  near: ' + nearFlags.join(' '));
+          console.log('  far:  ' + farFlags.join(' '));
+        } else {
+          console.log('[InsolMap] sec=' + fi + ' — no insolation data');
+        }
+
         aptResult = solveFloor(graph.nodes, N, 1, insolMap, sectionOri);
 
         // WZ planning (step 1)

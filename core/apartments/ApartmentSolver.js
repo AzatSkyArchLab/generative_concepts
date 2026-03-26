@@ -486,12 +486,12 @@ function greedySolveSegment(segment, insolMap) {
     }
   }
 
-  // Phase 3b: orphan cells → absorb into neighboring apartments
+  // Phase 3b: orphan cells → absorb into neighboring apartments if valid, else orphan
   for (var i = 0; i < n; i++) {
     if (used[i]) continue;
     var absorbed = false;
 
-    // Try absorb into adjacent apartment (no size cap — matches Python)
+    // Try absorb into adjacent apartment (validation required)
     for (var di = 0; di < 2; di++) {
       var nb = i + (di === 0 ? 1 : -1);
       if (nb < 0 || nb >= n) continue;
