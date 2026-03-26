@@ -146,6 +146,3 @@ export function buildUpperFloors(graphNodes, floorCount, firstFloorH, typicalFlo
   }
   return group;
 }
-
-
-

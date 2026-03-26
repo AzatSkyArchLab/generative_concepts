@@ -43,7 +43,6 @@ var _lastCellMap = null;
 var _analysisLevel = null;
 var _raysVisible = false;
 var _globalActive = false;    // persistent global mode
-var _autoAnalyzed = false;   // set once after auto-trigger on first sections
 
 // ── Collision box ──────────────────────────────────────
 
@@ -651,7 +650,6 @@ function toggleRays() {
 
 function onClear() {
   _globalActive = false;
-  _autoAnalyzed = false;
   _raysVisible = false;
   clearResults();
   _eventBus.emit('insolation:cell-map', null);
@@ -671,17 +669,6 @@ function onSectionsChanged() {
 }
 
 function onSectionRebuilt() {
-  // Auto-trigger: first time sections appear and no analysis yet
-  if (!_autoAnalyzed && !_lastCellMap) {
-    var sections = collectSections();
-    if (sections.length > 0 && getProj()) {
-      _autoAnalyzed = true;
-      // Debounce: let section-gen finish rendering before heavy raycasting
-      setTimeout(function () { runAnalysis('global'); }, 50);
-      return;
-    }
-  }
-
   // section-gen's processAllSections calls threeOverlay.clear(),
   // which destroys our dot/ray meshes. Re-display if we have results.
   if (!_lastResults || _lastResults.length === 0) return;
@@ -737,7 +724,6 @@ var insolationModule = {
     for (var i = 0; i < _unsubs.length; i++) _unsubs[i]();
     _unsubs = [];
     _globalActive = false;
-    _autoAnalyzed = false;
     clearResults();
     _mapManager = null; _featureStore = null; _eventBus = null; _threeOverlay = null;
     _stableOrigin = null;

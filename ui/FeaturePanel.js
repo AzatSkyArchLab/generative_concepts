@@ -17,8 +17,7 @@ import { DEFAULT_PARAMS, getParams, computeFloorCount, computeBuildingHeight, au
 
 import { renderBufferSection, onBuffersVisibility } from './panels/BufferPanel.js';
 import { renderInsolSection, updateInsolButton, showInsolResults, onInsolClear, onRaysVisibility } from './panels/InsolPanel.js';
-import { renderAptMixSection } from './panels/AptMixPanel.js';
-import { showBuildingPlan } from './panels/AptMixPanel.js';
+import { renderAptMixSection, showBuildingPlan, updateAptMixVisibility, resetDistributeState } from './panels/AptMixPanel.js';
 import { updateStats } from './panels/StatsPanel.js';
 
 var PARAM_DEFS = [
@@ -39,6 +38,7 @@ export class FeaturePanel {
     this._buffersVisible = false;
     this._editAxisId = null;
     this._editSelectedIndices = [];
+    this._paramsOpen = false;
   }
 
   init() { this._render(); this._setupEvents(); }
@@ -64,12 +64,25 @@ export class FeaturePanel {
     updateInsolButton(this._featureStore, this._editAxisId, this._editSelectedIndices, this._selectedIds);
   }
 
+  _updateAptMixVisibility() {
+    var all = this._featureStore.toArray();
+    var hasSections = false;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].properties.type === 'section-axis') { hasSections = true; break; }
+    }
+    updateAptMixVisibility(hasSections);
+  }
+
   // ── Events ──────────────────────────────────────────
 
   _setupEvents() {
     var self = this;
 
-    eventBus.on('features:changed', function () { self._updateList(); self._updateProps(); self._refreshInsolButton(); });
+    eventBus.on('features:changed', function () {
+      self._updateList(); self._updateProps(); self._refreshInsolButton();
+      self._updateAptMixVisibility();
+      resetDistributeState();
+    });
     eventBus.on('feature:selected', function (d) {
       self._selectedIds = [d.id]; self._editAxisId = null; self._editSelectedIndices = [];
       self._updateList(); self._updateProps(); self._refreshInsolButton();
@@ -298,9 +311,9 @@ export class FeaturePanel {
     h += '</div><div class="props-divider"></div>';
     h += '<div class="params-toggle" id="params-toggle">';
     h += '<span class="params-toggle-label">Parameters</span>';
-    h += '<span class="params-toggle-chevron" id="params-chevron">▸</span>';
+    h += '<span class="params-toggle-chevron' + (this._paramsOpen ? ' open' : '') + '" id="params-chevron">▸</span>';
     h += '</div>';
-    h += '<div class="params-body" id="params-body">';
+    h += '<div class="params-body' + (this._paramsOpen ? ' open' : '') + '" id="params-body">';
     for (var pi = 0; pi < PARAM_DEFS.length; pi++) {
       var d = PARAM_DEFS[pi];
       h += '<div class="param-row"><label class="param-label">' + d.label + '</label>' +
@@ -339,6 +352,7 @@ export class FeaturePanel {
         if (body && chev) {
           body.classList.toggle('open');
           chev.classList.toggle('open');
+          self._paramsOpen = body.classList.contains('open');
         }
       });
     }

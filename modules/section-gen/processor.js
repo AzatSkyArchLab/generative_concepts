@@ -151,10 +151,10 @@ export function processAllSections() {
           }
         }
 
-        aptResult = solveFloor(graph.nodes, N, 1, insolMap);
+        var sectionOri = feature.properties.orientation || 'lat';
+        aptResult = solveFloor(graph.nodes, N, 1, insolMap, sectionOri);
 
         // WZ planning (step 1)
-        var sectionOri = feature.properties.orientation || 'lat';
         wzPlan = planWZStacks(graph.nodes, N, insolMap, sectionOri, northSide, aptResult);
         allStats.sections[allStats.sections.length - 1].wzPlan = {
           wzCount: wzPlan.wzStacks.length,
@@ -296,7 +296,8 @@ export function processAllSections() {
               mix: state.aptMix,
               perFloorInsol: perFloorInsol,
               lluCells: lluCellIds,
-              sortedCorrNears: corrNears
+              sortedCorrNears: corrNears,
+              orientation: sectionOri
             });
             state.graphDataMap[planKey] = { nodes: graph.nodes, N: N, params: params, floorCount: floorCount, perFloorInsol: perFloorInsol };
           }

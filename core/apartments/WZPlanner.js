@@ -52,7 +52,7 @@ function classifyAptFacade(apt, N) {
  * @returns {Object} WZ plan result
  */
 export function planWZStacks(graphNodes, N, insolMap, orientation, northSide, precomputedResult) {
-  var solverResult = precomputedResult || solveFloor(graphNodes, N, 1, insolMap);
+  var solverResult = precomputedResult || solveFloor(graphNodes, N, 1, insolMap, orientation);
   if (!solverResult) {
     return {
       wzStacks: [], wzPairs: [], nearOrphans: [], farOrphans: [],

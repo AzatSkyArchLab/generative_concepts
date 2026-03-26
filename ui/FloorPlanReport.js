@@ -91,7 +91,16 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
     var apt = apts[ai];
     var cells = apt.cells || [];
     for (var ci = 0; ci < cells.length; ci++) {
-      cellMap[cells[ci]] = { aptIdx: ai, type: apt.type, role: cells[ci] === apt.wetCell ? 'wet' : 'living', valid: apt.valid };
+      var cid = cells[ci];
+      var role;
+      if (typeof cid === 'string') role = 'corridor';
+      else if (cid === apt.wetCell) role = 'wet';
+      else role = 'living';
+      cellMap[cid] = { aptIdx: ai, type: apt.type, role: role, valid: apt.valid };
+    }
+    // Ensure corridorLabel is mapped even if not in cells (floor 1 torec)
+    if (apt.corridorLabel && !cellMap[apt.corridorLabel]) {
+      cellMap[apt.corridorLabel] = { aptIdx: ai, type: apt.type, role: 'corridor', valid: apt.valid };
     }
   }
 
@@ -133,24 +142,87 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
 
   h += '<div class="floor-grid" style="width:' + totalW + 'px">';
 
+  // Helper: get group ID for a cell.
+  // Apartments → aptIdx (0+), LLU → -100 (shared group), unowned corridors → -200 (shared group), other → -1
+  var LLU_GROUP = -100;
+  var CORR_GROUP = -200;
+  function aptIdx(cellId) {
+    var ci = cellMap[cellId];
+    if (ci) return ci.aptIdx;
+    // Check if LLU
+    if (typeof cellId === 'number') {
+      for (var nk in nodes) {
+        if (!nodes.hasOwnProperty(nk)) continue;
+        var nd = nodes[nk];
+        if (nd.floor === 1 && nd.cellId === cellId && nd.type === 'llu') return LLU_GROUP;
+      }
+    }
+    // Unowned corridor
+    if (typeof cellId === 'string' && cellId.indexOf('-') >= 0) return CORR_GROUP;
+    return -1;
+  }
+
   // Near row
   h += '<div class="cell-row">';
   for (var i = 0; i < nearCells.length; i++) {
-    h += renderCell(nearCells[i].cellId, cellMap, cellW, nearH, nearCells[i].type, insolMap);
+    var cid = nearCells[i].cellId;
+    var prevApt = i > 0 ? aptIdx(nearCells[i - 1].cellId) : -2;
+    var nextApt = i < nearCells.length - 1 ? aptIdx(nearCells[i + 1].cellId) : -2;
+    var myApt = aptIdx(cid);
+    var corrId = cid + '-' + (2 * N - 1 - cid);
+    var corrApt = aptIdx(corrId);
+    var borders = {
+      left: i === 0 || myApt !== prevApt || myApt < 0,
+      right: i === nearCells.length - 1 || myApt !== nextApt || myApt < 0,
+      top: true,  // exterior facade
+      bottom: myApt < 0 || myApt !== corrApt
+    };
+    h += renderCell(cid, cellMap, cellW, nearH, nearCells[i].type, insolMap, borders);
   }
   h += '</div>';
 
   // Corridor row
   h += '<div class="cell-row">';
   for (var i = 0; i < corrCells.length; i++) {
-    h += renderCell(String(corrCells[i].cellId), cellMap, cellW, corrH, 'corridor', insolMap);
+    var cid = String(corrCells[i].cellId);
+    var parts = cid.split('-');
+    var nearC = parseInt(parts[0]);
+    var farC = parseInt(parts[1]);
+    var prevCorrId = i > 0 ? String(corrCells[i - 1].cellId) : null;
+    var nextCorrId = i < corrCells.length - 1 ? String(corrCells[i + 1].cellId) : null;
+    var myApt = aptIdx(cid);
+    var nearApt = aptIdx(nearC);
+    var farApt = aptIdx(farC);
+    var prevApt = prevCorrId ? aptIdx(prevCorrId) : -2;
+    var nextApt = nextCorrId ? aptIdx(nextCorrId) : -2;
+    var borders = {
+      left: i === 0 || myApt !== prevApt || myApt < 0,
+      right: i === corrCells.length - 1 || myApt !== nextApt || myApt < 0,
+      top: myApt < 0 || myApt !== nearApt,
+      bottom: myApt < 0 || myApt !== farApt
+    };
+    h += renderCell(cid, cellMap, cellW, corrH, 'corridor', insolMap, borders);
   }
   h += '</div>';
 
   // Far row (reversed to match spatial)
   h += '<div class="cell-row">';
   for (var i = farCells.length - 1; i >= 0; i--) {
-    h += renderCell(farCells[i].cellId, cellMap, cellW, farH, farCells[i].type, insolMap);
+    var cid = farCells[i].cellId;
+    // In display: left neighbor = farCells[i+1], right = farCells[i-1] (reversed)
+    var prevApt = i < farCells.length - 1 ? aptIdx(farCells[i + 1].cellId) : -2;
+    var nextApt = i > 0 ? aptIdx(farCells[i - 1].cellId) : -2;
+    var myApt = aptIdx(cid);
+    var nearC = 2 * N - 1 - cid;
+    var corrId = nearC + '-' + cid;
+    var corrApt = aptIdx(corrId);
+    var borders = {
+      left: i === farCells.length - 1 || myApt !== prevApt || myApt < 0,
+      right: i === 0 || myApt !== nextApt || myApt < 0,
+      top: myApt < 0 || myApt !== corrApt,
+      bottom: true  // exterior facade
+    };
+    h += renderCell(cid, cellMap, cellW, farH, farCells[i].type, insolMap, borders);
   }
   h += '</div>';
 
@@ -158,12 +230,11 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
   return h;
 }
 
-function renderCell(cellId, cellMap, w, h, nodeType, insolMap) {
+function renderCell(cellId, cellMap, w, h, nodeType, insolMap, aptBorders) {
   var info = cellMap[cellId];
   var bg = '#e8e8e8';
   var label = String(cellId);
   var sub = '';
-  var border = '1px solid rgba(0,0,0,0.15)';
 
   // Insol flag for numeric cells
   var insolFlag = '';
@@ -176,11 +247,11 @@ function renderCell(cellId, cellMap, w, h, nodeType, insolMap) {
 
   if (info) {
     var pal = APT_COLORS[info.type] || APT_COLORS['orphan'];
-    bg = info.role === 'wet' ? pal.wet : pal.living;
+    bg = (info.role === 'wet' || info.role === 'corridor') ? pal.wet : pal.living;
     sub = 'A' + info.aptIdx + ' ' + info.type;
     if (info.role === 'wet') sub += ' wz';
+    else if (info.role === 'corridor') sub += ' corr';
     else if (insolFlag) sub += ' ' + insolFlag;
-    if (!info.valid) border = '2px solid #e53e3e';
   } else if (insolFlag) {
     sub = insolFlag;
   }
@@ -191,7 +262,20 @@ function renderCell(cellId, cellMap, w, h, nodeType, insolMap) {
   else if (insolFlag === 'w') flagDot = '<span class="flag-dot flag-w"></span>';
   else if (insolFlag === 'f') flagDot = '<span class="flag-dot flag-f"></span>';
 
-  var s = '<div class="cell" style="width:' + w + 'px;height:' + h + 'px;background:' + bg + ';border:' + border + '">';
+  // Apartment boundary borders: thick dark on edges between apartments, thin inside
+  var bT = '1px solid rgba(0,0,0,0.08)';
+  var bR = bT; var bB = bT; var bL = bT;
+  var APT_BORDER = '2px solid #333';
+  if (aptBorders) {
+    if (aptBorders.left) bL = APT_BORDER;
+    if (aptBorders.right) bR = APT_BORDER;
+    if (aptBorders.top) bT = APT_BORDER;
+    if (aptBorders.bottom) bB = APT_BORDER;
+  }
+  if (info && !info.valid) { bT = '2px solid #e53e3e'; bR = bT; bB = bT; bL = bT; }
+  var borderStyle = bT + ';border-right:' + bR + ';border-bottom:' + bB + ';border-left:' + bL;
+
+  var s = '<div class="cell" style="width:' + w + 'px;height:' + h + 'px;background:' + bg + ';border-top:' + borderStyle + '">';
   s += '<div class="cell-id">' + label + flagDot + '</div>';
   if (sub) s += '<div class="cell-sub">' + sub + '</div>';
   s += '</div>';
@@ -246,10 +330,17 @@ function renderDebugDump(planKey, plan, graphData) {
       var cells = apt.cells || [];
       for (var ci = 0; ci < cells.length; ci++) {
         var cid = cells[ci];
-        var role = cid === apt.wetCell ? 'wz' : 'liv';
+        var role;
+        if (typeof cid === 'string') role = 'corr';
+        else if (cid === apt.wetCell) role = 'wz';
+        else role = 'liv';
         var flag = (typeof cid === 'number' && flInsol[cid]) ? flInsol[cid] : '-';
         cellStr += cid + '(' + role + '/' + flag + ')';
         if (ci < cells.length - 1) cellStr += ',';
+      }
+      // Show corridorLabel if not already in cells
+      if (apt.corridorLabel && cellStr.indexOf(apt.corridorLabel) < 0) {
+        cellStr += ',' + apt.corridorLabel + '(corr/-)';
       }
       var validStr = apt.valid ? 'OK' : 'FAIL';
       lines.push('  A' + ai + ' ' + apt.type + ' [' + validStr + '] cells=[' + cellStr + ']');

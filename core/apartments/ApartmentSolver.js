@@ -537,38 +537,155 @@ function greedySolveSegment(segment, insolMap) {
 // TOREC (forced, 1 per end)
 // ============================================================
 
-function solveTorecForced(section, insolMap, targetFloor) {
+/**
+ * For meridional (lon): standard 1K torecs (near+far pair).
+ * For latitudinal (lat): expanded 3K/4K torecs — torec ends
+ * always get large apartments because they receive insolation
+ * from the end facade. 1K/2K only go in the middle.
+ *
+ * Expansion grabs cell pairs inward: (0,2N-1) → (1,2N-2) → (2,2N-3)...
+ * Picks worst-insol cell as WZ, rest as living.
+ * Defaults to 3K, upgrades to 4K if insolation demands it.
+ */
+function solveTorecForced(section, insolMap, targetFloor, orientation) {
   var torecApts = [];
   var corridors = section.corridors;
+  var corridorKeys = section.corridorKeys;
+  var N = section.N;
   var nearUsed = {};
   var farUsed = {};
+  var isLat = (orientation === 'lat');
 
   var groups = [section.torecLeft, section.torecRight];
+  var directions = [1, -1]; // left expands rightward, right expands leftward
+
   for (var gi = 0; gi < groups.length; gi++) {
     var group = groups[gi];
-    for (var ti = 0; ti < group.length; ti++) {
-      var nearCid = group[ti];
-      if (nearUsed[nearCid]) continue;
-      if (corridors[nearCid] === undefined) continue;
-      var farCid = corridors[nearCid];
-      if (farUsed[farCid]) continue;
+    if (group.length === 0) continue;
+    var anchorNear = group[0];
+    if (nearUsed[anchorNear]) continue;
+    if (corridors[anchorNear] === undefined) continue;
+    var anchorFar = corridors[anchorNear];
+    if (farUsed[anchorFar]) continue;
 
-      var nearFlag = getFlag(insolMap, nearCid);
-      var farFlag = getFlag(insolMap, farCid);
+    if (!isLat) {
+      // Meridional: standard 1K torec (unchanged)
+      var nearFlag = getFlag(insolMap, anchorNear);
+      var farFlag = getFlag(insolMap, anchorFar);
       var wetCell, livingCell;
-      if (nearFlag === 'p') { wetCell = farCid; livingCell = nearCid; }
-      else if (farFlag === 'p') { wetCell = nearCid; livingCell = farCid; }
-      else { wetCell = nearCid; livingCell = farCid; }
+      if (nearFlag === 'p') { wetCell = anchorFar; livingCell = anchorNear; }
+      else if (farFlag === 'p') { wetCell = anchorNear; livingCell = anchorFar; }
+      else { wetCell = anchorNear; livingCell = anchorFar; }
 
       var v = validateApartment([getFlag(insolMap, livingCell)]);
       torecApts.push({
-        cells: [nearCid, farCid], corridorLabel: section.corridorKeys[nearCid],
+        cells: [anchorNear, anchorFar], corridorLabel: corridorKeys[anchorNear],
         wetCell: wetCell, livingCells: [livingCell],
         type: v.type, torec: true, valid: v.valid
       });
-      nearUsed[nearCid] = true;
-      farUsed[farCid] = true;
+      nearUsed[anchorNear] = true;
+      farUsed[anchorFar] = true;
+      continue;
     }
+
+    // ── Latitudinal: expand torec to 3K/4K ──
+    var dir = directions[gi];
+    var nearCells = [anchorNear];
+    var farCells = [anchorFar];
+    var corrLabels = [];
+    if (corridorKeys[anchorNear]) corrLabels.push(corridorKeys[anchorNear]);
+
+    // Expand inward up to 4 pairs total (enough for 4K)
+    for (var step = 1; step <= 3; step++) {
+      var nextNear = anchorNear + dir * step;
+      if (nextNear < 0 || nextNear >= N) break;
+      // Check node exists and is apartment type
+      var nKey = nextNear + ':' + targetFloor;
+      if (!section.nearAll || section.nearAll.indexOf(nextNear) < 0) {
+        // Check if it's at least not LLU
+        var isLLU = false;
+        for (var li = 0; li < section.llu.length; li++) {
+          if (section.llu[li] === nextNear || section.llu[li] === (2 * N - 1 - nextNear)) { isLLU = true; break; }
+        }
+        if (isLLU) break;
+      }
+      var nextFar = corridors[nextNear];
+      if (nextFar === undefined) {
+        // Compute mirror far
+        nextFar = 2 * N - 1 - nextNear;
+      }
+      if (nextFar < N || nextFar >= 2 * N) break;
+      nearCells.push(nextNear);
+      farCells.push(nextFar);
+      if (corridorKeys[nextNear]) corrLabels.push(corridorKeys[nextNear]);
+    }
+
+    // All cells: near + far
+    var allCells = [];
+    for (var ci = 0; ci < nearCells.length; ci++) allCells.push(nearCells[ci]);
+    for (var ci = 0; ci < farCells.length; ci++) allCells.push(farCells[ci]);
+
+    // Determine target size: 3K default, 4K if f-cells present
+    var fCount = 0;
+    for (var ci = 0; ci < allCells.length; ci++) {
+      if (getFlag(insolMap, allCells[ci]) === 'f') fCount++;
+    }
+    var targetLiving = fCount > 0 ? 4 : 3;
+
+    // Trim to target size: WZ + targetLiving = targetLiving+1 total cells
+    var totalNeeded = targetLiving + 1;
+    while (allCells.length > totalNeeded && nearCells.length > 1) {
+      // Remove furthest pair
+      var removedNear = nearCells.pop();
+      var removedFar = farCells.pop();
+      allCells = [];
+      for (var ci = 0; ci < nearCells.length; ci++) allCells.push(nearCells[ci]);
+      for (var ci = 0; ci < farCells.length; ci++) allCells.push(farCells[ci]);
+    }
+
+    // Pick worst-insol cell as WZ
+    var FLAG_SCORE = { 'f': 0, 'w': 1, 'p': 2 };
+    var worstIdx = 0;
+    var worstScore = 3;
+    for (var ci = 0; ci < allCells.length; ci++) {
+      var f = getFlag(insolMap, allCells[ci]);
+      var s = FLAG_SCORE[f] !== undefined ? FLAG_SCORE[f] : 2;
+      if (s < worstScore) { worstScore = s; worstIdx = ci; }
+    }
+    var wetCell = allCells[worstIdx];
+    var livingCells = [];
+    for (var ci = 0; ci < allCells.length; ci++) {
+      if (ci !== worstIdx) livingCells.push(allCells[ci]);
+    }
+
+    var flags = [];
+    for (var ci = 0; ci < livingCells.length; ci++) flags.push(getFlag(insolMap, livingCells[ci]));
+    var v = validateApartment(flags);
+
+    // Build cells array: all numeric + corridor labels
+    var aptCells = allCells.slice();
+    for (var ci = 0; ci < corrLabels.length; ci++) {
+      // Only include corridor if both ends are in apartment
+      var parts = corrLabels[ci].split('-');
+      var cNear = parseInt(parts[0]);
+      var cFar = parseInt(parts[1]);
+      var hasNear = false; var hasFar = false;
+      for (var ai = 0; ai < allCells.length; ai++) {
+        if (allCells[ai] === cNear) hasNear = true;
+        if (allCells[ai] === cFar) hasFar = true;
+      }
+      if (hasNear && hasFar) aptCells.push(corrLabels[ci]);
+    }
+
+    var type = v.valid ? v.type : (livingCells.length >= 4 ? '4K' : livingCells.length >= 3 ? '3K' : livingCells.length >= 2 ? '2K' : '1K');
+    torecApts.push({
+      cells: aptCells, corridorLabel: corrLabels[0] || null,
+      wetCell: wetCell, livingCells: livingCells,
+      type: type, torec: true, valid: v.valid
+    });
+
+    for (var ci = 0; ci < nearCells.length; ci++) nearUsed[nearCells[ci]] = true;
+    for (var ci = 0; ci < farCells.length; ci++) farUsed[farCells[ci]] = true;
   }
 
   return { apartments: torecApts, nearUsed: nearUsed, farUsed: farUsed };
@@ -790,16 +907,18 @@ export function wetQualityReport(allApartments) {
  * @param {number} N - cells per side
  * @param {number} targetFloor - floor to solve (typically 1)
  * @param {Object} [insolMap] - { cellId: 'p'|'w'|'f' }
+ * @param {string} [orientation] - 'lat' or 'lon'; affects torec sizing
  * @returns {Object} result
  */
-export function solveFloor(graphNodes, N, targetFloor, insolMap) {
+export function solveFloor(graphNodes, N, targetFloor, insolMap, orientation) {
   if (!insolMap) insolMap = {};
+  if (!orientation) orientation = 'lon';
 
   var section = buildSection(graphNodes, N, targetFloor);
   var allApartments = [];
 
   // Step 0: forced torecs
-  var torecResult = solveTorecForced(section, insolMap, targetFloor);
+  var torecResult = solveTorecForced(section, insolMap, targetFloor, orientation);
   var torecApts = torecResult.apartments;
   var torecNearUsed = torecResult.nearUsed;
   var torecFarUsed = torecResult.farUsed;

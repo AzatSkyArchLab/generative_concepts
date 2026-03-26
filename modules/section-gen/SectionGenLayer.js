@@ -57,17 +57,17 @@ export class SectionGenLayer {
     });
     map.addLayer({
       id: 'sg-edit-selected-line', type: 'line', source: this.EDIT_SELECTED_SOURCE,
-      paint: { 'line-color': '#151515', 'line-width': 12 }, layout: { 'visibility': 'none' }
+      paint: { 'line-color': '#f97316', 'line-width': 3, 'line-opacity': 0.9 }, layout: { 'visibility': 'none' }
     });
 
     // Normal layers
     map.addLayer({
       id: 'sg-highlight-fill', type: 'fill', source: this.HIGHLIGHT_SOURCE,
-      paint: { 'fill-color': '#ff8c00', 'fill-opacity': 0.35 }
+      paint: { 'fill-color': '#f97316', 'fill-opacity': 0.12 }
     });
     map.addLayer({
       id: 'sg-highlight-line', type: 'line', source: this.HIGHLIGHT_SOURCE,
-      paint: { 'line-color': '#232323', 'line-width': 12 }
+      paint: { 'line-color': '#f97316', 'line-width': 3, 'line-opacity': 0.9 }
     });
     map.addLayer({
       id: 'sg-axis-line', type: 'line', source: this.AXIS_SOURCE,

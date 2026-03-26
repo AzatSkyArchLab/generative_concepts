@@ -191,7 +191,7 @@ function buildFloorPlan(wzCount, remaining, fl, totalFloors) {
 /**
  * Run one building plan with given profile.
  */
-function runWithProfile(profile, allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears) {
+function runWithProfile(profile, allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears, orientation) {
   var residentialFloors = profile.length;
   var floors = [];
 
@@ -219,7 +219,7 @@ function runWithProfile(profile, allWZ, floor1Apartments, perFloorInsol, N, lluC
     var floorInsol = perFloorInsol[fl] || {};
     var active = selectActiveWZ(prevActive, targetWZCount, floorInsol, N);
     var floorPlan = buildFloorPlan(active.length, remaining, fl, residentialFloors);
-    var result = planFloor(allWZ, active, floorInsol, N, lluCells, floorPlan, sortedCorrNears);
+    var result = planFloor(allWZ, active, floorInsol, N, lluCells, floorPlan, sortedCorrNears, orientation);
 
     for (var t in result.placed) {
       if (remaining[t] !== undefined) remaining[t] = Math.max(0, remaining[t] - (result.placed[t] || 0));
@@ -287,6 +287,7 @@ export function planBuilding(params) {
   var perFloorInsol = params.perFloorInsol || {};
   var lluCells = params.lluCells || [];
   var sortedCorrNears = params.sortedCorrNears || [];
+  var orientation = params.orientation || 'lon';
 
   var residentialFloors = floorCount - 1;
   if (residentialFloors < 1 || allWZ.length === 0) {
@@ -307,7 +308,7 @@ export function planBuilding(params) {
   var bestScore = Infinity;
 
   for (var pi = 0; pi < profiles.length; pi++) {
-    var result = runWithProfile(profiles[pi], allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears);
+    var result = runWithProfile(profiles[pi], allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears, orientation);
     if (result.deviationScore < bestScore) {
       bestScore = result.deviationScore;
       bestResult = result;

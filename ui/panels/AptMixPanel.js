@@ -7,6 +7,7 @@ import { eventBus } from '../../core/EventBus.js';
 export function renderAptMixSection() {
   var el = document.getElementById('apt-mix-section');
   if (!el) return;
+  el.style.display = 'none';
   var h = '<div class="props-divider"></div>';
   h += '<div class="apt-mix-panel">';
   h += '<div class="apt-mix-header">Apartment Mix</div>';
@@ -131,4 +132,26 @@ export function showBuildingPlan(plan) {
   h += '</div>';
   h += '</div>';
   el.innerHTML = h;
+}
+
+/**
+ * Show/hide apt-mix section based on whether sections exist.
+ */
+export function updateAptMixVisibility(hasSections) {
+  var el = document.getElementById('apt-mix-section');
+  if (el) el.style.display = hasSections ? 'block' : 'none';
+}
+
+/**
+ * Reset distribute buttons to initial state (show distribute, hide reset/report).
+ */
+export function resetDistributeState() {
+  var distBtn = document.getElementById('apt-mix-distribute');
+  var resetBtn = document.getElementById('apt-mix-reset');
+  var repBtn = document.getElementById('apt-mix-report');
+  var resEl = document.getElementById('building-plan-results');
+  if (distBtn) distBtn.style.display = 'block';
+  if (resetBtn) resetBtn.style.display = 'none';
+  if (repBtn) repBtn.style.display = 'none';
+  if (resEl) resEl.innerHTML = '';
 }
