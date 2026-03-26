@@ -48,11 +48,11 @@ function classifyAptFacade(apt, N) {
  * @param {Object|null} insolMap - { cellId: 'p'|'w'|'f' }
  * @param {string} orientation - 'lat' or 'lon'
  * @param {string} northSide - 'near' or 'far'
+ * @param {Object} [precomputedResult] - solveFloor result; if provided, skips re-solve
  * @returns {Object} WZ plan result
  */
-export function planWZStacks(graphNodes, N, insolMap, orientation, northSide) {
-  // Run solver on floor 1
-  var solverResult = solveFloor(graphNodes, N, 1, insolMap);
+export function planWZStacks(graphNodes, N, insolMap, orientation, northSide, precomputedResult) {
+  var solverResult = precomputedResult || solveFloor(graphNodes, N, 1, insolMap);
   if (!solverResult) {
     return {
       wzStacks: [], wzPairs: [], nearOrphans: [], farOrphans: [],

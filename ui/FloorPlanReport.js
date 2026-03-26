@@ -4,13 +4,7 @@
  * PDF export via window.print().
  */
 
-var APT_COLORS = {
-  '1K': { living: '#ade8f4', wet: '#6bb8d0' },
-  '2K': { living: '#90ee90', wet: '#5cb85c' },
-  '3K': { living: '#ffdab9', wet: '#e0a870' },
-  '4K': { living: '#dda0dd', wet: '#b070b0' },
-  'orphan': { living: '#e0e0e0', wet: '#aaaaaa' }
-};
+import { APT_COLORS_REPORT as APT_COLORS } from '../core/constants/ApartmentColors.js';
 
 // Pixels per meter for report rendering
 var PX_PER_M = 14;

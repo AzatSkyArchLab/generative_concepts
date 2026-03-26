@@ -210,7 +210,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     }
   }
 
-  // Pass 2: remaining → same-row mid WZ with cap 4, or torec
+  // Pass 2: remaining → same-row mid WZ, adjacent to existing allocation, cap 4
   for (var c = 0; c < 2 * N; c++) {
     if (usedCells[c]) continue;
     var cRow = c < N ? 0 : 1;
@@ -226,7 +226,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
       var d = Math.abs(c - awz);
       if (d < bestDist) { bestDist = d; bestWZ = awz; }
     }
-    // Same-row without path check + cap 4
+    // Relaxed: same-row, adjacent to existing group (wz or its cells), cap 4
     if (bestWZ === null) {
       bestDist = Infinity;
       for (var wi = 0; wi < midWZ.length; wi++) {
@@ -234,6 +234,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         var wzRow = awz < N ? 0 : 1;
         if (wzRow !== cRow) continue;
         if (allocated[awz].length >= 4) continue;
+        if (!isAdjacentToGroup(c, awz, allocated[awz])) continue;
         var d = Math.abs(c - awz);
         if (d < bestDist) { bestDist = d; bestWZ = awz; }
       }
@@ -277,8 +278,28 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
 
     var type = v.valid ? v.type : (livingCount >= 4 ? '4K' : livingCount >= 3 ? '3K' : livingCount >= 2 ? '2K' : '1K');
 
-    apartments.push({ cells: cells, wetCell: wz, type: type, valid: v.valid, torec: false });
+    apartments.push({ cells: cells, wetCell: wz, type: type, valid: v.valid, torec: false, corridorLabel: null });
     if (placed[type] !== undefined) placed[type]++;
+  }
+
+  // Phase 4b: CORRIDOR ASSIGNMENT — corridors belong to apartment owning both ends
+  for (var ai = 0; ai < apartments.length; ai++) {
+    var apt = apartments[ai];
+    if (apt.corridorLabel) continue; // torec already has corridor
+    var aptCellSet = {};
+    for (var ci = 0; ci < apt.cells.length; ci++) {
+      var c = apt.cells[ci];
+      if (typeof c === 'number') aptCellSet[c] = true;
+    }
+    for (var cni = 0; cni < sortedCorrNears.length; cni++) {
+      var nearC = sortedCorrNears[cni];
+      var farC = 2 * N - 1 - nearC;
+      if (aptCellSet[nearC] && aptCellSet[farC]) {
+        var corrLabel = nearC + '-' + farC;
+        apt.cells.push(corrLabel);
+        if (!apt.corridorLabel) apt.corridorLabel = corrLabel;
+      }
+    }
   }
 
   // Recount torec types after possible cell changes
@@ -431,6 +452,18 @@ function isPathClear(c, wz, barrierSet) {
     if (barrierSet[x]) return false;
   }
   return true;
+}
+
+/**
+ * Check if cell c is adjacent (±1) to the WZ itself or any cell in its group.
+ * Guarantees contiguity even when barriers block the direct path.
+ */
+function isAdjacentToGroup(c, wz, group) {
+  if (Math.abs(c - wz) === 1) return true;
+  for (var i = 0; i < group.length; i++) {
+    if (Math.abs(c - group[i]) === 1) return true;
+  }
+  return false;
 }
 
 export function computeQuota(totalApts, mix) {

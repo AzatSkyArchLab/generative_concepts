@@ -8,20 +8,29 @@
 
 import { planFloor, computeQuota } from './FloorPlanner.js';
 
+var PROFILE_GEN_LIMIT = 50000;
+var PROFILE_EVAL_LIMIT = 5000;
+
 /**
  * Generate all monotonic profiles: each floor can reduce by 0..maxStep from previous.
+ * Early-exits if generation exceeds PROFILE_GEN_LIMIT.
+ * Uses stratified sampling (by total WZ) when reducing to PROFILE_EVAL_LIMIT.
  */
 function generateAllProfiles(maxWZ, minWZ, numFloors) {
   var profiles = [];
   var current = [maxWZ];
+  var overflow = false;
 
   function recurse(depth, prev) {
+    if (overflow) return;
     if (depth === numFloors) {
       profiles.push(current.slice());
+      if (profiles.length >= PROFILE_GEN_LIMIT) overflow = true;
       return;
     }
     var maxStep = Math.min(4, prev - minWZ);
     for (var step = 0; step <= maxStep; step++) {
+      if (overflow) return;
       var val = prev - step;
       if (val < minWZ) break;
       current.push(val);
@@ -32,14 +41,45 @@ function generateAllProfiles(maxWZ, minWZ, numFloors) {
 
   recurse(1, maxWZ);
 
-  // Limit: if too many profiles, sample evenly
-  if (profiles.length > 5000) {
-    var sampled = [];
-    var step = Math.ceil(profiles.length / 5000);
-    for (var i = 0; i < profiles.length; i += step) sampled.push(profiles[i]);
-    return sampled;
+  if (profiles.length <= PROFILE_EVAL_LIMIT) return profiles;
+
+  // Stratified sampling: group by totalWZ, sample from each stratum
+  var byTotal = {};
+  var totalMin = Infinity;
+  var totalMax = -Infinity;
+  for (var i = 0; i < profiles.length; i++) {
+    var sum = 0;
+    for (var j = 0; j < profiles[i].length; j++) sum += profiles[i][j];
+    if (sum < totalMin) totalMin = sum;
+    if (sum > totalMax) totalMax = sum;
+    if (!byTotal[sum]) byTotal[sum] = [];
+    byTotal[sum].push(profiles[i]);
   }
-  return profiles;
+
+  // Collect all strata keys sorted
+  var strata = [];
+  for (var k in byTotal) {
+    if (byTotal.hasOwnProperty(k)) strata.push(parseInt(k));
+  }
+  strata.sort(function (a, b) { return a - b; });
+
+  // Allocate budget proportionally to stratum size, min 1 per stratum
+  var sampled = [];
+  var budgetLeft = PROFILE_EVAL_LIMIT;
+  for (var si = 0; si < strata.length; si++) {
+    var bucket = byTotal[strata[si]];
+    var share = Math.max(1, Math.round(bucket.length / profiles.length * PROFILE_EVAL_LIMIT));
+    share = Math.min(share, budgetLeft, bucket.length);
+    // Uniform sample within stratum
+    var step = bucket.length <= share ? 1 : Math.floor(bucket.length / share);
+    for (var bi = 0; bi < bucket.length && sampled.length < PROFILE_EVAL_LIMIT; bi += step) {
+      sampled.push(bucket[bi]);
+    }
+    budgetLeft = PROFILE_EVAL_LIMIT - sampled.length;
+    if (budgetLeft <= 0) break;
+  }
+
+  return sampled;
 }
 
 /**
@@ -107,6 +147,8 @@ function selectActiveWZ(prevActive, targetCount, insolMap, N) {
 
 /**
  * Build per-floor target types from remaining quota.
+ * Uses round (not ceil) and caps each type at its actual remaining count
+ * to prevent systematic over-allocation across floors.
  */
 function buildFloorPlan(wzCount, remaining, fl, totalFloors) {
   var progress = (fl - 1) / Math.max(totalFloors - 1, 1);
@@ -117,21 +159,28 @@ function buildFloorPlan(wzCount, remaining, fl, totalFloors) {
     : ['4K', '3K', '2K', '1K'];
 
   var plan = [];
-  var share = {};
-  for (var ti = 0; ti < types.length; ti++) {
-    share[types[ti]] = Math.ceil((remaining[types[ti]] || 0) / floorsLeft);
-  }
-
+  var consumed = {};
   for (var ti = 0; ti < types.length; ti++) {
     var t = types[ti];
-    var count = Math.min(share[t] || 0, wzCount - plan.length);
+    var rem = remaining[t] || 0;
+    var share = Math.round(rem / floorsLeft);
+    // Cap: never plan more than what actually remains for this type
+    share = Math.min(share, rem);
+    var count = Math.min(share, wzCount - plan.length);
     for (var i = 0; i < count; i++) plan.push(t);
+    consumed[t] = count;
   }
 
   while (plan.length < wzCount) {
     var filled = false;
     for (var ti = types.length - 1; ti >= 0; ti--) {
-      if ((remaining[types[ti]] || 0) > 0) { plan.push(types[ti]); filled = true; break; }
+      var t = types[ti];
+      if ((remaining[t] || 0) - (consumed[t] || 0) > 0) {
+        plan.push(t);
+        consumed[t] = (consumed[t] || 0) + 1;
+        filled = true;
+        break;
+      }
     }
     if (!filled) plan.push('1K');
   }
