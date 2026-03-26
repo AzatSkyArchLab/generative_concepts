@@ -85,32 +85,40 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     // If stranded: will steal in Phase 1b
   }
 
-  // Phase 1b: STEAL — stranded WZ steals from largest neighbor in same row
+  // Phase 1b: STEAL — stranded WZ steals ADJACENT cell from neighbor
+  // Critical: stolen cell must be adjacent (±1) to the WZ itself
   for (var i = 0; i < midWZ.length; i++) {
     var wz = midWZ[i];
     if (allocated[wz].length > 0) continue;
 
     var isNear = wz < N;
-    // Find nearest mid WZ in same row with 2+ allocated cells
+    // Find nearest mid WZ in same row with 2+ cells AND adjacent cell
     var bestDonor = null;
+    var bestCell = null;
     var bestDist = Infinity;
     for (var j = 0; j < midWZ.length; j++) {
       if (j === i) continue;
       var dWZ = midWZ[j];
-      if ((dWZ < N) !== isNear) continue; // different row
+      if ((dWZ < N) !== isNear) continue;
       if (allocated[dWZ].length < 2) continue;
-      var d = Math.abs(wz - dWZ);
-      if (d < bestDist) { bestDist = d; bestDonor = dWZ; }
+      // Find a cell in donor's group adjacent to wz
+      var donorGroup = allocated[dWZ];
+      for (var gi = 0; gi < donorGroup.length; gi++) {
+        if (Math.abs(donorGroup[gi] - wz) === 1) {
+          var d = Math.abs(wz - dWZ);
+          if (d < bestDist) { bestDist = d; bestDonor = dWZ; bestCell = donorGroup[gi]; }
+          break;
+        }
+      }
     }
 
-    if (bestDonor !== null) {
-      // Steal the cell closest to stranded WZ
-      var donorCells = allocated[bestDonor];
-      donorCells.sort(function (a, b) { return Math.abs(a - wz) - Math.abs(b - wz); });
-      var stolen = donorCells.shift();
-      allocated[wz].push(stolen);
+    if (bestDonor !== null && bestCell !== null) {
+      var donorGroup = allocated[bestDonor];
+      var ci = donorGroup.indexOf(bestCell);
+      if (ci >= 0) donorGroup.splice(ci, 1);
+      allocated[wz].push(bestCell);
     } else {
-      // Try stealing from torec
+      // Try stealing from torec — only adjacent cells
       for (var ai = 0; ai < apartments.length; ai++) {
         if (!apartments[ai].torec) continue;
         var tCells = apartments[ai].cells;
@@ -119,7 +127,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
           if (typeof tc !== 'number') continue;
           if (tc === apartments[ai].wetCell) continue;
           if ((tc < N) !== isNear) continue;
-          // Steal this cell
+          if (Math.abs(tc - wz) !== 1) continue; // must be adjacent
           tCells.splice(ci, 1);
           allocated[wz].push(tc);
           break;
@@ -343,26 +351,47 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     }
   }
 
-  // Phase 4: BUILD — ALL allocated cells in apartment (type = min(living, 4))
+  // Phase 4: BUILD — apartments from allocated cells, split if >4 living
   for (var i = 0; i < midWZ.length; i++) {
     var wz = midWZ[i];
     var group = allocated[wz] || [];
     group.sort(function (a, b) { return Math.abs(a - wz) - Math.abs(b - wz); });
 
-    // ALL cells belong to this apartment
-    var cells = [wz];
-    for (var ci = 0; ci < group.length; ci++) cells.push(group[ci]);
+    if (group.length === 0) continue; // absorbed WZ, skip
 
-    // Type determined by living count (capped at 4K)
-    var livingCount = Math.min(group.length, 4);
-    var flags = [];
-    for (var fi = 0; fi < livingCount; fi++) flags.push(getFlag(insolMap, group[fi]));
-    var v = validateApartment(flags);
+    if (group.length <= 4) {
+      // Normal: wz + up to 4 living
+      var cells = [wz];
+      for (var ci = 0; ci < group.length; ci++) cells.push(group[ci]);
+      var flags = [];
+      for (var fi = 0; fi < group.length; fi++) flags.push(getFlag(insolMap, group[fi]));
+      var v = validateApartment(flags);
+      var type = v.valid ? v.type : (group.length >= 4 ? '4K' : group.length >= 3 ? '3K' : group.length >= 2 ? '2K' : '1K');
+      apartments.push({ cells: cells, wetCell: wz, type: type, valid: v.valid, torec: false, corridorLabel: null });
+      if (placed[type] !== undefined) placed[type]++;
+    } else {
+      // 5+ living cells: main apartment gets wz + closest 3, remainder gets split off
+      var mainLiving = group.slice(0, 3);
+      var mainCells = [wz];
+      for (var ci = 0; ci < mainLiving.length; ci++) mainCells.push(mainLiving[ci]);
+      var mainFlags = [];
+      for (var fi = 0; fi < mainLiving.length; fi++) mainFlags.push(getFlag(insolMap, mainLiving[fi]));
+      var mv = validateApartment(mainFlags);
+      var mainType = mv.valid ? mv.type : '3K';
+      apartments.push({ cells: mainCells, wetCell: wz, type: mainType, valid: mv.valid, torec: false, corridorLabel: null });
+      if (placed[mainType] !== undefined) placed[mainType]++;
 
-    var type = v.valid ? v.type : (livingCount >= 4 ? '4K' : livingCount >= 3 ? '3K' : livingCount >= 2 ? '2K' : '1K');
-
-    apartments.push({ cells: cells, wetCell: wz, type: type, valid: v.valid, torec: false, corridorLabel: null });
-    if (placed[type] !== undefined) placed[type]++;
+      // Remainder: split into apartments of 2-5 cells each
+      var remainder = group.slice(3);
+      while (remainder.length > 0) {
+        var chunkSize = Math.min(remainder.length, 5); // max 5 cells = wz+4living
+        if (remainder.length - chunkSize === 1) chunkSize = Math.min(chunkSize + 1, remainder.length); // avoid orphan single
+        var chunk = remainder.splice(0, chunkSize);
+        var newApt = createOrphanApartment(chunk, insolMap);
+        apartments.push(newApt);
+        if (placed[newApt.type] !== undefined) placed[newApt.type]++;
+      }
+    }
   }
 
   // Phase 4b: CORRIDOR ASSIGNMENT — corridors belong to apartment owning both ends
@@ -617,20 +646,21 @@ function createOrphanApartment(cells, insolMap) {
  * Returns true if absorbed.
  */
 function absorbSingleCell(c, apartments, allocated, midWZ, N) {
-  // Try mid WZ apartments: find one where c is adjacent to allocated group
+  // Try mid WZ apartments: find one where c is adjacent, with <4 living
   for (var wi = 0; wi < midWZ.length; wi++) {
     var wz = midWZ[wi];
     var group = allocated[wz];
-    if (!group) continue;
+    if (!group || group.length >= 4) continue;
     if (isAdjacentToGroup(c, wz, group)) {
       group.push(c);
       return true;
     }
   }
-  // Try torec: adjacent to any numeric cell
+  // Try torec: adjacent + cap 5 numeric cells
   for (var ai = 0; ai < apartments.length; ai++) {
     var apt = apartments[ai];
     if (!apt.torec) continue;
+    if (torecNumericCount(apt) >= 5) continue;
     var cells = apt.cells;
     for (var ci = 0; ci < cells.length; ci++) {
       if (typeof cells[ci] === 'number' && Math.abs(cells[ci] - c) === 1) {

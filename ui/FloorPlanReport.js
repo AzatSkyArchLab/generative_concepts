@@ -172,10 +172,10 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
     var corrId = cid + '-' + (2 * N - 1 - cid);
     var corrApt = aptIdx(corrId);
     var borders = {
-      left: i === 0 || myApt !== prevApt || myApt < 0,
-      right: i === nearCells.length - 1 || myApt !== nextApt || myApt < 0,
+      left: i === 0 || myApt !== prevApt || myApt === -1,
+      right: i === nearCells.length - 1 || myApt !== nextApt || myApt === -1,
       top: true,  // exterior facade
-      bottom: myApt < 0 || myApt !== corrApt
+      bottom: myApt === -1 || myApt !== corrApt
     };
     h += renderCell(cid, cellMap, cellW, nearH, nearCells[i].type, insolMap, borders);
   }
@@ -196,10 +196,10 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
     var prevApt = prevCorrId ? aptIdx(prevCorrId) : -2;
     var nextApt = nextCorrId ? aptIdx(nextCorrId) : -2;
     var borders = {
-      left: i === 0 || myApt !== prevApt || myApt < 0,
-      right: i === corrCells.length - 1 || myApt !== nextApt || myApt < 0,
-      top: myApt < 0 || myApt !== nearApt,
-      bottom: myApt < 0 || myApt !== farApt
+      left: i === 0 || myApt !== prevApt || myApt === -1,
+      right: i === corrCells.length - 1 || myApt !== nextApt || myApt === -1,
+      top: myApt === -1 || myApt !== nearApt,
+      bottom: myApt === -1 || myApt !== farApt
     };
     h += renderCell(cid, cellMap, cellW, corrH, 'corridor', insolMap, borders);
   }
@@ -217,9 +217,9 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
     var corrId = nearC + '-' + cid;
     var corrApt = aptIdx(corrId);
     var borders = {
-      left: i === farCells.length - 1 || myApt !== prevApt || myApt < 0,
-      right: i === 0 || myApt !== nextApt || myApt < 0,
-      top: myApt < 0 || myApt !== corrApt,
+      left: i === farCells.length - 1 || myApt !== prevApt || myApt === -1,
+      right: i === 0 || myApt !== nextApt || myApt === -1,
+      top: myApt === -1 || myApt !== corrApt,
       bottom: true  // exterior facade
     };
     h += renderCell(cid, cellMap, cellW, farH, farCells[i].type, insolMap, borders);

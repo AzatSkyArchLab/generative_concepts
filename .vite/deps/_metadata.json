@@ -1,0 +1,25 @@
+{
+  "hash": "fa689208",
+  "configHash": "8cc1dcd4",
+  "lockfileHash": "8744efe9",
+  "browserHash": "a231bbd9",
+  "optimized": {
+    "maplibre-gl": {
+      "src": "../../node_modules/maplibre-gl/dist/maplibre-gl.js",
+      "file": "maplibre-gl.js",
+      "fileHash": "17a1171b",
+      "needsInterop": true
+    },
+    "three": {
+      "src": "../../node_modules/three/build/three.module.js",
+      "file": "three.js",
+      "fileHash": "1f812d94",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "chunk-BUSYA2B4": {
+      "file": "chunk-BUSYA2B4.js"
+    }
+  }
+}

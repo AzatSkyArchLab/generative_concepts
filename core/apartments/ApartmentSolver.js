@@ -98,8 +98,8 @@ export function buildSection(graphNodes, N, targetFloor) {
 
   var nearSegments = splitContiguous(nearAll);
 
-  // LLU cells (far side)
-  for (var cid = N; cid < 2 * N; cid++) {
+  // LLU cells (both near and far sides)
+  for (var cid = 0; cid < 2 * N; cid++) {
     var key = cid + ':' + targetFloor;
     if (graphNodes[key] && graphNodes[key].type === 'llu') {
       llu.push(cid);
@@ -588,104 +588,133 @@ function solveTorecForced(section, insolMap, targetFloor, orientation) {
       continue;
     }
 
-    // ── Latitudinal: expand torec to 3K/4K ──
+    // ── Latitudinal: expand torec to 3K, 4K only if 3K fails ──
     var dir = directions[gi];
     var nearCells = [anchorNear];
     var farCells = [anchorFar];
     var corrLabels = [];
     if (corridorKeys[anchorNear]) corrLabels.push(corridorKeys[anchorNear]);
 
-    // Expand inward up to 4 pairs total (enough for 4K)
+    // Expand inward up to 3 more pairs
     for (var step = 1; step <= 3; step++) {
       var nextNear = anchorNear + dir * step;
       if (nextNear < 0 || nextNear >= N) break;
-      // Check node exists and is apartment type
-      var nKey = nextNear + ':' + targetFloor;
-      if (!section.nearAll || section.nearAll.indexOf(nextNear) < 0) {
-        // Check if it's at least not LLU
-        var isLLU = false;
-        for (var li = 0; li < section.llu.length; li++) {
-          if (section.llu[li] === nextNear || section.llu[li] === (2 * N - 1 - nextNear)) { isLLU = true; break; }
-        }
-        if (isLLU) break;
+      var isLLU = false;
+      for (var li = 0; li < section.llu.length; li++) {
+        if (section.llu[li] === nextNear || section.llu[li] === (2 * N - 1 - nextNear)) { isLLU = true; break; }
       }
+      if (isLLU) break;
       var nextFar = corridors[nextNear];
-      if (nextFar === undefined) {
-        // Compute mirror far
-        nextFar = 2 * N - 1 - nextNear;
-      }
+      if (nextFar === undefined) nextFar = 2 * N - 1 - nextNear;
       if (nextFar < N || nextFar >= 2 * N) break;
       nearCells.push(nextNear);
       farCells.push(nextFar);
       if (corridorKeys[nextNear]) corrLabels.push(corridorKeys[nextNear]);
     }
 
-    // All cells: near + far
-    var allCells = [];
-    for (var ci = 0; ci < nearCells.length; ci++) allCells.push(nearCells[ci]);
-    for (var ci = 0; ci < farCells.length; ci++) allCells.push(farCells[ci]);
+    // Collect all available cells
+    var allAvail = [];
+    for (var ci = 0; ci < nearCells.length; ci++) allAvail.push(nearCells[ci]);
+    for (var ci = 0; ci < farCells.length; ci++) allAvail.push(farCells[ci]);
 
-    // Determine target size: 3K default, 4K if f-cells present
-    var fCount = 0;
-    for (var ci = 0; ci < allCells.length; ci++) {
-      if (getFlag(insolMap, allCells[ci]) === 'f') fCount++;
-    }
-    var targetLiving = fCount > 0 ? 4 : 3;
-
-    // Trim to target size: WZ + targetLiving = targetLiving+1 total cells
-    var totalNeeded = targetLiving + 1;
-    while (allCells.length > totalNeeded && nearCells.length > 1) {
-      // Remove furthest pair
-      var removedNear = nearCells.pop();
-      var removedFar = farCells.pop();
-      allCells = [];
-      for (var ci = 0; ci < nearCells.length; ci++) allCells.push(nearCells[ci]);
-      for (var ci = 0; ci < farCells.length; ci++) allCells.push(farCells[ci]);
-    }
-
-    // Pick worst-insol cell as WZ
+    // Try 3K first (4 cells: 1 wz + 3 living)
     var FLAG_SCORE = { 'f': 0, 'w': 1, 'p': 2 };
-    var worstIdx = 0;
-    var worstScore = 3;
-    for (var ci = 0; ci < allCells.length; ci++) {
-      var f = getFlag(insolMap, allCells[ci]);
-      var s = FLAG_SCORE[f] !== undefined ? FLAG_SCORE[f] : 2;
-      if (s < worstScore) { worstScore = s; worstIdx = ci; }
-    }
-    var wetCell = allCells[worstIdx];
-    var livingCells = [];
-    for (var ci = 0; ci < allCells.length; ci++) {
-      if (ci !== worstIdx) livingCells.push(allCells[ci]);
-    }
+    var bestApt = null;
 
-    var flags = [];
-    for (var ci = 0; ci < livingCells.length; ci++) flags.push(getFlag(insolMap, livingCells[ci]));
-    var v = validateApartment(flags);
+    // Try with 2 pairs (4 cells) for 3K
+    var sizes = [4, 6, 8]; // 2 pairs, 3 pairs, 4 pairs
+    for (var si = 0; si < sizes.length; si++) {
+      var trySize = Math.min(sizes[si], allAvail.length);
+      if (trySize < 4) continue;
+      var tryCells = allAvail.slice(0, trySize);
 
-    // Build cells array: all numeric + corridor labels
-    var aptCells = allCells.slice();
-    for (var ci = 0; ci < corrLabels.length; ci++) {
-      // Only include corridor if both ends are in apartment
-      var parts = corrLabels[ci].split('-');
-      var cNear = parseInt(parts[0]);
-      var cFar = parseInt(parts[1]);
-      var hasNear = false; var hasFar = false;
-      for (var ai = 0; ai < allCells.length; ai++) {
-        if (allCells[ai] === cNear) hasNear = true;
-        if (allCells[ai] === cFar) hasFar = true;
+      // Pick worst-insol cell as WZ
+      var worstIdx = 0;
+      var worstScore = 3;
+      for (var ci = 0; ci < tryCells.length; ci++) {
+        var f = getFlag(insolMap, tryCells[ci]);
+        var s = FLAG_SCORE[f] !== undefined ? FLAG_SCORE[f] : 2;
+        if (s < worstScore) { worstScore = s; worstIdx = ci; }
       }
-      if (hasNear && hasFar) aptCells.push(corrLabels[ci]);
+      var tryWZ = tryCells[worstIdx];
+
+      // Living cells sorted by quality (best first), capped at 3 for 3K attempt
+      var tryLiving = [];
+      for (var ci = 0; ci < tryCells.length; ci++) {
+        if (ci !== worstIdx) tryLiving.push(tryCells[ci]);
+      }
+      tryLiving.sort(function (a, b) {
+        var fa = FLAG_SCORE[getFlag(insolMap, a)] || 0;
+        var fb = FLAG_SCORE[getFlag(insolMap, b)] || 0;
+        return fb - fa; // best first
+      });
+
+      // Try 3K (3 living)
+      var living3 = tryLiving.slice(0, 3);
+      var flags3 = [];
+      for (var fi = 0; fi < living3.length; fi++) flags3.push(getFlag(insolMap, living3[fi]));
+      var v3 = validateApartment(flags3);
+      if (v3.valid) {
+        bestApt = { wz: tryWZ, living: living3, allUsed: [tryWZ].concat(living3), type: v3.type, valid: true };
+        break;
+      }
+
+      // Try 4K (4 living) if we have enough cells
+      if (tryLiving.length >= 4) {
+        var living4 = tryLiving.slice(0, 4);
+        var flags4 = [];
+        for (var fi = 0; fi < living4.length; fi++) flags4.push(getFlag(insolMap, living4[fi]));
+        var v4 = validateApartment(flags4);
+        if (v4.valid) {
+          bestApt = { wz: tryWZ, living: living4, allUsed: [tryWZ].concat(living4), type: v4.type, valid: true };
+          break;
+        }
+      }
     }
 
-    var type = v.valid ? v.type : (livingCells.length >= 4 ? '4K' : livingCells.length >= 3 ? '3K' : livingCells.length >= 2 ? '2K' : '1K');
+    // Fallback: take first 4 cells, force 3K
+    if (!bestApt) {
+      var fallCells = allAvail.slice(0, Math.min(4, allAvail.length));
+      var fwIdx = 0;
+      var fwScore = 3;
+      for (var ci = 0; ci < fallCells.length; ci++) {
+        var f = getFlag(insolMap, fallCells[ci]);
+        var s = FLAG_SCORE[f] !== undefined ? FLAG_SCORE[f] : 2;
+        if (s < fwScore) { fwScore = s; fwIdx = ci; }
+      }
+      var fwz = fallCells[fwIdx];
+      var fliv = [];
+      for (var ci = 0; ci < fallCells.length; ci++) { if (ci !== fwIdx) fliv.push(fallCells[ci]); }
+      var ff = [];
+      for (var fi = 0; fi < fliv.length; fi++) ff.push(getFlag(insolMap, fliv[fi]));
+      var fv = validateApartment(ff);
+      bestApt = { wz: fwz, living: fliv, allUsed: [fwz].concat(fliv),
+        type: fv.valid ? fv.type : (fliv.length >= 3 ? '3K' : fliv.length >= 2 ? '2K' : '1K'), valid: fv.valid };
+    }
+
+    // Build apartment cells with corridors
+    var aptCells = bestApt.allUsed.slice();
+    var aptCellSet = {};
+    for (var ci = 0; ci < aptCells.length; ci++) aptCellSet[aptCells[ci]] = true;
+    for (var ci = 0; ci < corrLabels.length; ci++) {
+      var parts = corrLabels[ci].split('-');
+      if (aptCellSet[parseInt(parts[0])] && aptCellSet[parseInt(parts[1])]) {
+        aptCells.push(corrLabels[ci]);
+      }
+    }
+
     torecApts.push({
       cells: aptCells, corridorLabel: corrLabels[0] || null,
-      wetCell: wetCell, livingCells: livingCells,
-      type: type, torec: true, valid: v.valid
+      wetCell: bestApt.wz, livingCells: bestApt.living,
+      type: bestApt.type, torec: true, valid: bestApt.valid
     });
 
-    for (var ci = 0; ci < nearCells.length; ci++) nearUsed[nearCells[ci]] = true;
-    for (var ci = 0; ci < farCells.length; ci++) farUsed[farCells[ci]] = true;
+    for (var ci = 0; ci < nearCells.length; ci++) {
+      if (aptCellSet[nearCells[ci]]) nearUsed[nearCells[ci]] = true;
+    }
+    for (var ci = 0; ci < farCells.length; ci++) {
+      if (aptCellSet[farCells[ci]]) farUsed[farCells[ci]] = true;
+    }
   }
 
   return { apartments: torecApts, nearUsed: nearUsed, farUsed: farUsed };

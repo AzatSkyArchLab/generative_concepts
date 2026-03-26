@@ -141,13 +141,13 @@ export function processAllSections() {
       var aptResult = null;
       var wzPlan = null;
       if (renderFloors >= 2) {
-        insolMap = buildInsolMap(lineId, fi, 1, N);
+        insolMap = buildInsolMap(lineId, fi, 1, N, graph.nodes);
 
         // Backward compat: old format had no floor key
         if (!insolMap && state.insolCellMap && state.insolCellMap[lineId] && state.insolCellMap[lineId][fi]) {
           var raw = state.insolCellMap[lineId][fi];
           if (raw.points) {
-            insolMap = pointsToInsolMap(raw.points, N);
+            insolMap = pointsToInsolMap(raw.points, N, graph.nodes, 1);
           }
         }
 
@@ -259,7 +259,7 @@ export function processAllSections() {
         if (state.distributed && floorCount > 2 && wzPlan && wzPlan.wzStacks.length > 0) {
           var planKey = lineId + '_' + fi;
           if (!state.buildingPlans[planKey]) {
-            var perFloorInsol = buildPerFloorInsol(lineId, fi, N, floorCount - 1);
+            var perFloorInsol = buildPerFloorInsol(lineId, fi, N, floorCount - 1, graph.nodes);
             // Compute LLU cell IDs as barriers
             var lluCellIds = [];
             for (var li = 0; li < lluIndices.length; li++) {
