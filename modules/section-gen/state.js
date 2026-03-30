@@ -26,7 +26,8 @@ export var state = {
   distributed: false,    // true after "Distribute apartments" button
   aptMix: { '1K': 40, '2K': 30, '3K': 20, '4K': 10 },
   buildingPlans: {},     // { lineId_fi: buildingPlanResult }
-  graphDataMap: {}       // { lineId_fi: { nodes, N, params, floorCount } }
+  graphDataMap: {},      // { lineId_fi: { nodes, N, params, floorCount } }
+  sectionMixes: null     // { lineId_fi: adjustedMix } — computed by QuotaAllocator
 };
 
 /**
@@ -54,4 +55,5 @@ export function resetState() {
   state.aptMix = { '1K': 40, '2K': 30, '3K': 20, '4K': 10 };
   state.buildingPlans = {};
   state.graphDataMap = {};
+  state.sectionMixes = null;
 }

@@ -350,6 +350,7 @@ function sliceWBlock(blockIndices, segment, insolMap, segLen, used) {
 
   var pos = 0;
 
+  // Python: leftWet = wet, first w-cell = living
   if (leftWet !== null && L >= 1) {
     var flags = [getFlag(insolMap, segment[blockIndices[0]])];
     var v = validateApartment(flags);
@@ -382,20 +383,24 @@ function sliceWBlock(blockIndices, segment, insolMap, segLen, used) {
     }
   }
 
-  // Remaining — matches Python exactly
+  // Remaining — exact Python v4.6.1
   var rem = [];
   for (var ri = pos; ri < L; ri++) rem.push(blockIndices[ri]);
 
   if (rem.length === 2) {
     var f1 = getFlag(insolMap, segment[rem[1]]);
+    var remV;
     if (f1 !== 'f') {
-      results.push({ indices: [rem[0], rem[1]], wetIdx: rem[0], livingIndices: [rem[1]], type: '1K', valid: true });
+      remV = validateApartment([getFlag(insolMap, segment[rem[1]])]);
+      results.push({ indices: [rem[0], rem[1]], wetIdx: rem[0], livingIndices: [rem[1]], type: remV.type, valid: remV.valid });
     } else {
-      results.push({ indices: [rem[0], rem[1]], wetIdx: rem[1], livingIndices: [rem[0]], type: '1K', valid: true });
+      remV = validateApartment([getFlag(insolMap, segment[rem[0]])]);
+      results.push({ indices: [rem[0], rem[1]], wetIdx: rem[1], livingIndices: [rem[0]], type: remV.type, valid: remV.valid });
     }
   } else if (rem.length === 1) {
     if (rightWet !== null) {
-      results.push({ indices: [rem[0], rightWet], wetIdx: rightWet, livingIndices: [rem[0]], type: '1K', valid: true });
+      var rwV = validateApartment([getFlag(insolMap, segment[rem[0]])]);
+      results.push({ indices: [rem[0], rightWet], wetIdx: rightWet, livingIndices: [rem[0]], type: rwV.type, valid: rwV.valid });
     } else if (results.length > 0) {
       var prev = results[results.length - 1];
       prev.indices.push(rem[0]);
@@ -487,11 +492,11 @@ function greedySolveSegment(segment, insolMap) {
   }
 
   // Phase 3b: orphan cells → absorb into neighboring apartments if valid, else orphan
+  // Exact Python v4.6.1 logic
   for (var i = 0; i < n; i++) {
     if (used[i]) continue;
     var absorbed = false;
 
-    // Try absorb into adjacent apartment (validation required)
     for (var di = 0; di < 2; di++) {
       var nb = i + (di === 0 ? 1 : -1);
       if (nb < 0 || nb >= n) continue;
@@ -515,6 +520,184 @@ function greedySolveSegment(segment, insolMap) {
     if (!absorbed) {
       apartments.push({ indices: [i], wetIdx: i, livingIndices: [], type: 'orphan', valid: false });
       used[i] = true;
+    }
+  }
+
+  // Phase 3c: REGROUP — dissolve invalid apartments, redistribute cells
+  // Example: invalid 1K [w,w] next to 2K [p,wz,p] → merge w into 2K → 3K
+  var regrouped = true;
+  while (regrouped) {
+    regrouped = false;
+    for (var ai = apartments.length - 1; ai >= 0; ai--) {
+      var apt = apartments[ai];
+      if (apt.valid !== false || apt.type === 'orphan') continue;
+
+      // Dissolve: free all cells
+      for (var ii = 0; ii < apt.indices.length; ii++) {
+        used[apt.indices[ii]] = false;
+      }
+      var freedCells = apt.indices.slice();
+      apartments.splice(ai, 1);
+
+      // Try absorb each freed cell into adjacent valid apartment
+      for (var fi = 0; fi < freedCells.length; fi++) {
+        var fc = freedCells[fi];
+        if (used[fc]) continue;
+        var absorbed = false;
+        for (var di = 0; di < 2; di++) {
+          var nb = fc + (di === 0 ? 1 : -1);
+          if (nb < 0 || nb >= n) continue;
+          for (var bi = 0; bi < apartments.length; bi++) {
+            if (apartments[bi].indices.indexOf(nb) < 0) continue;
+            if (apartments[bi].type === 'orphan') continue;
+            var testLiving = apartments[bi].livingIndices.slice();
+            testLiving.push(fc);
+            var testFlags = [];
+            for (var ti = 0; ti < testLiving.length; ti++) testFlags.push(getFlag(insolMap, segment[testLiving[ti]]));
+            var tv = validateApartment(testFlags);
+            if (tv.valid) {
+              apartments[bi].indices.push(fc);
+              apartments[bi].livingIndices = testLiving;
+              apartments[bi].type = tv.type;
+              apartments[bi].valid = true;
+              used[fc] = true;
+              absorbed = true;
+              break;
+            }
+          }
+          if (absorbed) break;
+        }
+        if (!absorbed) {
+          // Try as WZ for adjacent apartment (swap wet if better)
+          for (var di = 0; di < 2; di++) {
+            var nb = fc + (di === 0 ? 1 : -1);
+            if (nb < 0 || nb >= n) continue;
+            for (var bi = 0; bi < apartments.length; bi++) {
+              if (apartments[bi].indices.indexOf(nb) < 0) continue;
+              if (apartments[bi].type === 'orphan') continue;
+              // Try: fc becomes new WZ, old WZ becomes living
+              var oldWet = apartments[bi].wetIdx;
+              var newLiving = [];
+              for (var k = 0; k < apartments[bi].indices.length; k++) {
+                newLiving.push(apartments[bi].indices[k]);
+              }
+              // old wet now living, fc is new wet
+              var newFlags = [];
+              for (var k = 0; k < newLiving.length; k++) newFlags.push(getFlag(insolMap, segment[newLiving[k]]));
+              var nv = validateApartment(newFlags);
+              if (nv.valid) {
+                apartments[bi].indices.push(fc);
+                apartments[bi].wetIdx = fc;
+                apartments[bi].livingIndices = newLiving;
+                apartments[bi].type = nv.type;
+                apartments[bi].valid = true;
+                used[fc] = true;
+                absorbed = true;
+                break;
+              }
+            }
+            if (absorbed) break;
+          }
+        }
+        if (!absorbed) {
+          apartments.push({ indices: [fc], wetIdx: fc, livingIndices: [], type: 'orphan', valid: false });
+          used[fc] = true;
+        }
+      }
+      regrouped = true;
+      break; // restart scan after dissolve
+    }
+  }
+
+  // Phase 3d: DOWNSIZE — transfer 1 boundary living cell from larger to smaller neighbor
+  // Goal: maximize small apartments. Gap >= 2 prevents ping-pong.
+  // After transfer, try WZ reassignment in donor for better insol placement.
+  var dsChanged = true;
+  var dsMaxIter = 20;
+  while (dsChanged && dsMaxIter > 0) {
+    dsChanged = false;
+    dsMaxIter--;
+    for (var ai = 0; ai < apartments.length; ai++) {
+      var donor = apartments[ai];
+      if (donor.type === 'orphan' || !donor.valid) continue;
+      if (donor.livingIndices.length < 2) continue;
+
+      for (var bi = 0; bi < apartments.length; bi++) {
+        if (bi === ai) continue;
+        var recv = apartments[bi];
+        if (recv.type === 'orphan' || !recv.valid) continue;
+        // Gap >= 2: donor must have at least 2 more living than receiver
+        if (recv.livingIndices.length >= donor.livingIndices.length - 1) continue;
+
+        // Find boundary cell: donor living cell adjacent to recv cell
+        for (var li = donor.livingIndices.length - 1; li >= 0; li--) {
+          var dCell = donor.livingIndices[li];
+          var isAdj = false;
+          for (var ri = 0; ri < recv.indices.length; ri++) {
+            if (Math.abs(dCell - recv.indices[ri]) === 1) { isAdj = true; break; }
+          }
+          if (!isAdj) continue;
+
+          // Test receiver with added cell
+          var newRecvLiving = recv.livingIndices.slice();
+          newRecvLiving.push(dCell);
+          var rfFlags = [];
+          for (var k = 0; k < newRecvLiving.length; k++) rfFlags.push(getFlag(insolMap, segment[newRecvLiving[k]]));
+          var rv = validateApartment(rfFlags);
+          if (!rv.valid) continue;
+
+          // Test donor without cell — try all possible WZ positions
+          var newDonorIndices = [];
+          for (var k = 0; k < donor.indices.length; k++) {
+            if (donor.indices[k] !== dCell) newDonorIndices.push(donor.indices[k]);
+          }
+          if (newDonorIndices.length < 2) continue;
+
+          var bestDonorWZ = -1;
+          var bestDonorType = null;
+          var bestDonorLiving = null;
+          var bestDonorWZScore = 99;
+          var FLAG_DS = { 'f': 0, 'w': 1, 'p': 2 };
+          for (var wi = 0; wi < newDonorIndices.length; wi++) {
+            var tryWZ = newDonorIndices[wi];
+            var tryLiving = [];
+            for (var k = 0; k < newDonorIndices.length; k++) {
+              if (k !== wi) tryLiving.push(newDonorIndices[k]);
+            }
+            var dfFlags = [];
+            for (var k = 0; k < tryLiving.length; k++) dfFlags.push(getFlag(insolMap, segment[tryLiving[k]]));
+            var dv = validateApartment(dfFlags);
+            if (dv.valid) {
+              // Prefer worst-insol cell as WZ (keep best for living)
+              var wzScore = FLAG_DS[getFlag(insolMap, segment[tryWZ])] || 0;
+              if (bestDonorWZ < 0 || wzScore < bestDonorWZScore) {
+                bestDonorWZScore = wzScore;
+                bestDonorWZ = tryWZ;
+                bestDonorType = dv.type;
+                bestDonorLiving = tryLiving;
+              }
+            }
+          }
+          if (bestDonorWZ < 0) continue;
+
+          // Execute transfer
+          donor.indices = newDonorIndices;
+          donor.wetIdx = bestDonorWZ;
+          donor.livingIndices = bestDonorLiving;
+          donor.type = bestDonorType;
+          donor.valid = true;
+
+          recv.indices.push(dCell);
+          recv.livingIndices = newRecvLiving;
+          recv.type = rv.type;
+          recv.valid = true;
+
+          dsChanged = true;
+          break;
+        }
+        if (dsChanged) break;
+      }
+      if (dsChanged) break;
     }
   }
 
@@ -588,44 +771,70 @@ function solveTorecForced(section, insolMap, targetFloor, orientation) {
       continue;
     }
 
-    // ── Latitudinal: expand torec to 3K, 4K only if 3K fails ──
+    // ── Latitudinal: torec expands along side WITHOUT LLU ──
     var dir = directions[gi];
-    var nearCells = [anchorNear];
-    var farCells = [anchorFar];
     var corrLabels = [];
     if (corridorKeys[anchorNear]) corrLabels.push(corridorKeys[anchorNear]);
 
-    // Expand inward up to 3 more pairs
-    for (var step = 1; step <= 3; step++) {
-      var nextNear = anchorNear + dir * step;
-      if (nextNear < 0 || nextNear >= N) break;
-      var isLLU = false;
-      for (var li = 0; li < section.llu.length; li++) {
-        if (section.llu[li] === nextNear || section.llu[li] === (2 * N - 1 - nextNear)) { isLLU = true; break; }
-      }
-      if (isLLU) break;
-      var nextFar = corridors[nextNear];
-      if (nextFar === undefined) nextFar = 2 * N - 1 - nextNear;
-      if (nextFar < N || nextFar >= 2 * N) break;
-      nearCells.push(nextNear);
-      farCells.push(nextFar);
-      if (corridorKeys[nextNear]) corrLabels.push(corridorKeys[nextNear]);
+    // Determine which side has LLU
+    var lluOnNear = false;
+    var lluOnFar = false;
+    var lluSet = {};
+    for (var li = 0; li < section.llu.length; li++) {
+      lluSet[section.llu[li]] = true;
+      if (section.llu[li] < N) lluOnNear = true;
+      else lluOnFar = true;
     }
 
-    // Collect all available cells
-    var allAvail = [];
-    for (var ci = 0; ci < nearCells.length; ci++) allAvail.push(nearCells[ci]);
-    for (var ci = 0; ci < farCells.length; ci++) allAvail.push(farCells[ci]);
+    // Build cell pool: anchor pair + near extra (f/w → WZ candidates) + far expansion
+    var nearExtra = [];
+    var farExpansion = [];
+    if (!lluOnFar) {
+      // LLU on near → main expansion along far, near extra toward LLU
+      var farDir = -dir;
+      for (var step = 1; step <= 3; step++) {
+        var nextFar = anchorFar + farDir * step;
+        if (nextFar < N || nextFar >= 2 * N) break;
+        if (lluSet[nextFar]) break;
+        farExpansion.push(nextFar);
+      }
+      // Near cells between anchor and LLU — f/w cells, natural WZ
+      for (var step = 1; step <= 3; step++) {
+        var nextNear = anchorNear + dir * step;
+        if (nextNear < 0 || nextNear >= N) break;
+        if (lluSet[nextNear]) break;
+        nearExtra.push(nextNear);
+      }
+    } else {
+      // LLU on far → main expansion along near, far extra toward LLU
+      for (var step = 1; step <= 3; step++) {
+        var nextNear = anchorNear + dir * step;
+        if (nextNear < 0 || nextNear >= N) break;
+        if (lluSet[nextNear]) break;
+        farExpansion.push(nextNear);
+      }
+      var farDir = -dir;
+      for (var step = 1; step <= 3; step++) {
+        var nextFar = anchorFar + farDir * step;
+        if (nextFar < N || nextFar >= 2 * N) break;
+        if (lluSet[nextFar]) break;
+        nearExtra.push(nextFar);
+      }
+    }
+    // Priority: anchor pair → near extra (f/w WZ candidates) → far expansion (p cells)
+    // This ensures f-cells get included in torec, freeing far p-cells for 1K pairs
+    var allAvail = [anchorNear, anchorFar];
+    for (var ei = 0; ei < nearExtra.length; ei++) allAvail.push(nearExtra[ei]);
+    for (var ei = 0; ei < farExpansion.length; ei++) allAvail.push(farExpansion[ei]);
 
-    // Try 3K first (4 cells: 1 wz + 3 living)
     var FLAG_SCORE = { 'f': 0, 'w': 1, 'p': 2 };
     var bestApt = null;
 
-    // Try with 2 pairs (4 cells) for 3K
-    var sizes = [4, 6, 8]; // 2 pairs, 3 pairs, 4 pairs
+    // Try sizes: 3 cells (2K), 4 cells (3K), 6 cells (3K/4K), 8 cells (4K)
+    var sizes = [4, 6, 8, 3]; // prefer 3K first, then larger, then 2K fallback
     for (var si = 0; si < sizes.length; si++) {
       var trySize = Math.min(sizes[si], allAvail.length);
-      if (trySize < 4) continue;
+      if (trySize < 3) continue; // minimum 2K = 3 cells
       var tryCells = allAvail.slice(0, trySize);
 
       // Pick worst-insol cell as WZ
@@ -638,7 +847,7 @@ function solveTorecForced(section, insolMap, targetFloor, orientation) {
       }
       var tryWZ = tryCells[worstIdx];
 
-      // Living cells sorted by quality (best first), capped at 3 for 3K attempt
+      // Living cells sorted by quality (best first)
       var tryLiving = [];
       for (var ci = 0; ci < tryCells.length; ci++) {
         if (ci !== worstIdx) tryLiving.push(tryCells[ci]);
@@ -646,20 +855,22 @@ function solveTorecForced(section, insolMap, targetFloor, orientation) {
       tryLiving.sort(function (a, b) {
         var fa = FLAG_SCORE[getFlag(insolMap, a)] || 0;
         var fb = FLAG_SCORE[getFlag(insolMap, b)] || 0;
-        return fb - fa; // best first
+        return fb - fa;
       });
 
-      // Try 3K (3 living)
-      var living3 = tryLiving.slice(0, 3);
-      var flags3 = [];
-      for (var fi = 0; fi < living3.length; fi++) flags3.push(getFlag(insolMap, living3[fi]));
-      var v3 = validateApartment(flags3);
-      if (v3.valid) {
-        bestApt = { wz: tryWZ, living: living3, allUsed: [tryWZ].concat(living3), type: v3.type, valid: true };
-        break;
+      // Try 3K (3 living) — preferred for lat torec
+      if (tryLiving.length >= 3) {
+        var living3 = tryLiving.slice(0, 3);
+        var flags3 = [];
+        for (var fi = 0; fi < living3.length; fi++) flags3.push(getFlag(insolMap, living3[fi]));
+        var v3 = validateApartment(flags3);
+        if (v3.valid) {
+          bestApt = { wz: tryWZ, living: living3, allUsed: [tryWZ].concat(living3), type: v3.type, valid: true };
+          break;
+        }
       }
 
-      // Try 4K (4 living) if we have enough cells
+      // Try 4K (4 living)
       if (tryLiving.length >= 4) {
         var living4 = tryLiving.slice(0, 4);
         var flags4 = [];
@@ -670,11 +881,25 @@ function solveTorecForced(section, insolMap, targetFloor, orientation) {
           break;
         }
       }
+
+      // Try 2K (2 living) — minimum for lat torec
+      if (tryLiving.length >= 2) {
+        var living2 = tryLiving.slice(0, 2);
+        var flags2 = [];
+        for (var fi = 0; fi < living2.length; fi++) flags2.push(getFlag(insolMap, living2[fi]));
+        var v2 = validateApartment(flags2);
+        if (v2.valid) {
+          bestApt = { wz: tryWZ, living: living2, allUsed: [tryWZ].concat(living2), type: v2.type, valid: true };
+          break;
+        }
+      }
     }
 
-    // Fallback: take first 4 cells, force 3K
+    // Fallback: force minimum 2K (never 1K for lat torec)
     if (!bestApt) {
-      var fallCells = allAvail.slice(0, Math.min(4, allAvail.length));
+      var fallSize = Math.min(allAvail.length, 4);
+      if (fallSize < 3) fallSize = Math.min(allAvail.length, 3); // try at least 3 cells
+      var fallCells = allAvail.slice(0, fallSize);
       var fwIdx = 0;
       var fwScore = 3;
       for (var ci = 0; ci < fallCells.length; ci++) {
@@ -689,7 +914,7 @@ function solveTorecForced(section, insolMap, targetFloor, orientation) {
       for (var fi = 0; fi < fliv.length; fi++) ff.push(getFlag(insolMap, fliv[fi]));
       var fv = validateApartment(ff);
       bestApt = { wz: fwz, living: fliv, allUsed: [fwz].concat(fliv),
-        type: fv.valid ? fv.type : (fliv.length >= 3 ? '3K' : fliv.length >= 2 ? '2K' : '1K'), valid: fv.valid };
+        type: fv.valid ? fv.type : (fliv.length >= 3 ? '3K' : '2K'), valid: fv.valid };
     }
 
     // Build apartment cells with corridors
@@ -709,11 +934,11 @@ function solveTorecForced(section, insolMap, targetFloor, orientation) {
       type: bestApt.type, torec: true, valid: bestApt.valid
     });
 
-    for (var ci = 0; ci < nearCells.length; ci++) {
-      if (aptCellSet[nearCells[ci]]) nearUsed[nearCells[ci]] = true;
-    }
-    for (var ci = 0; ci < farCells.length; ci++) {
-      if (aptCellSet[farCells[ci]]) farUsed[farCells[ci]] = true;
+    for (var cid in aptCellSet) {
+      if (!aptCellSet.hasOwnProperty(cid)) continue;
+      var c = parseInt(cid);
+      if (c < N) nearUsed[c] = true;
+      else farUsed[c] = true;
     }
   }
 
@@ -991,7 +1216,7 @@ export function solveFloor(graphNodes, N, targetFloor, insolMap, orientation) {
     for (var ai = 0; ai < farApts.length; ai++) allApartments.push(farApts[ai]);
   }
 
-  // Step 3: global orphan resolution (matches Python solve_floor exactly)
+  // Step 3: global orphan resolution (exact Python v4.6.1)
   var orphanResolved = 0;
   var changed = true;
   while (changed) {
@@ -1062,6 +1287,250 @@ export function solveFloor(graphNodes, N, targetFloor, insolMap, orientation) {
     }
   }
   allApartments = allApartments.filter(function (a) { return a.type !== '_absorbed'; });
+
+  // Step 3b: global REGROUP — dissolve invalid apartments, redistribute cells
+  // Handles: invalid 1K [w,w] next to torec → merge into torec (2K)
+  // Or invalid 1K next to 2K → merge into 3K
+  var regroupChanged = true;
+  while (regroupChanged) {
+    regroupChanged = false;
+    for (var ai = allApartments.length - 1; ai >= 0; ai--) {
+      var apt = allApartments[ai];
+      if (apt.valid !== false || apt.type === 'orphan') continue;
+
+      var freedCells = [];
+      var aptCells = apt.cells || [];
+      for (var ci = 0; ci < aptCells.length; ci++) {
+        if (typeof aptCells[ci] === 'number') freedCells.push(aptCells[ci]);
+      }
+      allApartments.splice(ai, 1);
+
+      // Build adjacency map
+      var cellToApt2 = {};
+      for (var bi = 0; bi < allApartments.length; bi++) {
+        var bCells = allApartments[bi].cells || [];
+        for (var ci = 0; ci < bCells.length; ci++) {
+          if (typeof bCells[ci] === 'number') cellToApt2[bCells[ci]] = bi;
+        }
+      }
+
+      for (var fi = 0; fi < freedCells.length; fi++) {
+        var fc = freedCells[fi];
+        var absorbed = false;
+
+        // Try absorb as living into adjacent apartment
+        for (var delta = -1; delta <= 1; delta += 2) {
+          var nb = fc + delta;
+          if (cellToApt2[nb] === undefined) continue;
+          var bi = cellToApt2[nb];
+          var target = allApartments[bi];
+          var tCells = target.cells || [];
+          var oldWet = target.wetCell;
+
+          var newLiving = [];
+          for (var ci = 0; ci < tCells.length; ci++) {
+            if (tCells[ci] !== oldWet && typeof tCells[ci] === 'number')
+              newLiving.push(tCells[ci]);
+          }
+          newLiving.push(fc);
+          var flags = [];
+          for (var k = 0; k < newLiving.length; k++) flags.push(getFlag(insolMap, newLiving[k]));
+          var nv = validateApartment(flags);
+          if (nv.valid) {
+            target.cells.push(fc);
+            target.type = nv.type;
+            target.valid = true;
+            cellToApt2[fc] = bi;
+            absorbed = true;
+            break;
+          }
+        }
+
+        if (!absorbed) {
+          // Try as WZ: fc becomes wet, free up old wet as living
+          for (var delta = -1; delta <= 1; delta += 2) {
+            var nb = fc + delta;
+            if (cellToApt2[nb] === undefined) continue;
+            var bi = cellToApt2[nb];
+            var target = allApartments[bi];
+            var tCells = target.cells || [];
+
+            // All existing numeric cells become living, fc is new wet
+            var allLiving = [];
+            for (var ci = 0; ci < tCells.length; ci++) {
+              if (typeof tCells[ci] === 'number') allLiving.push(tCells[ci]);
+            }
+            var flags = [];
+            for (var k = 0; k < allLiving.length; k++) flags.push(getFlag(insolMap, allLiving[k]));
+            var nv = validateApartment(flags);
+            if (nv.valid) {
+              target.cells.push(fc);
+              target.wetCell = fc;
+              target.type = nv.type;
+              target.valid = true;
+              cellToApt2[fc] = bi;
+              absorbed = true;
+              break;
+            }
+          }
+        }
+
+        if (!absorbed) {
+          allApartments.push({ cells: [fc], wetCell: fc, type: 'orphan', valid: false, torec: false });
+        }
+      }
+      regroupChanged = true;
+      break;
+    }
+  }
+
+  // Step 3c: global DOWNSIZE — transfer 1 boundary living cell from larger to smaller
+  // Operates on cell IDs (cross-segment, including torecs).
+  // After transfer, reassign WZ in donor to worst-insol cell.
+  var gdChanged = true;
+  var gdMaxIter = 30;
+  while (gdChanged && gdMaxIter > 0) {
+    gdChanged = false;
+    gdMaxIter--;
+
+    // Build cell→apt index and compute living counts
+    var gdCellToApt = {};
+    for (var ai = 0; ai < allApartments.length; ai++) {
+      var cs = allApartments[ai].cells || [];
+      for (var ci = 0; ci < cs.length; ci++) {
+        if (typeof cs[ci] === 'number') gdCellToApt[cs[ci]] = ai;
+      }
+    }
+
+    // Helper: get living cell IDs for an apartment
+    function gdLiving(apt) {
+      var liv = [];
+      var cs = apt.cells || [];
+      var wc = apt.wetCell;
+      for (var i = 0; i < cs.length; i++) {
+        if (typeof cs[i] === 'number' && cs[i] !== wc) liv.push(cs[i]);
+      }
+      return liv;
+    }
+
+    // Sort donors: largest living count first
+    var gdOrder = [];
+    for (var ai = 0; ai < allApartments.length; ai++) {
+      var apt = allApartments[ai];
+      if (!apt.valid || apt.type === 'orphan') continue;
+      var lc = gdLiving(apt).length;
+      if (lc >= 2) gdOrder.push({ idx: ai, lc: lc });
+    }
+    gdOrder.sort(function (a, b) { return b.lc - a.lc; });
+
+    for (var di = 0; di < gdOrder.length; di++) {
+      var donorIdx = gdOrder[di].idx;
+      var donor = allApartments[donorIdx];
+      var donorLiv = gdLiving(donor);
+      if (donorLiv.length < 2) continue;
+
+      var found = false;
+
+      // Search for adjacent smaller receiver
+      for (var li = donorLiv.length - 1; li >= 0; li--) {
+        var dCid = donorLiv[li];
+
+        for (var delta = -1; delta <= 1; delta += 2) {
+          var nbCid = dCid + delta;
+          if (gdCellToApt[nbCid] === undefined) continue;
+          var recvIdx = gdCellToApt[nbCid];
+          if (recvIdx === donorIdx) continue;
+          var recv = allApartments[recvIdx];
+          if (!recv.valid || recv.type === 'orphan') continue;
+          var recvLiv = gdLiving(recv);
+
+          // Gap >= 2
+          if (recvLiv.length >= donorLiv.length - 1) continue;
+
+          // Validate receiver with added cell
+          var newRecvLiv = recvLiv.slice();
+          newRecvLiv.push(dCid);
+          var rfFlags = [];
+          for (var k = 0; k < newRecvLiv.length; k++) rfFlags.push(getFlag(insolMap, newRecvLiv[k]));
+          var rv = validateApartment(rfFlags);
+          if (!rv.valid) continue;
+
+          // Validate donor without cell — try all WZ positions, prefer worst-insol
+          var newDonorCells = [];
+          var donorCs = donor.cells || [];
+          for (var k = 0; k < donorCs.length; k++) {
+            if (typeof donorCs[k] === 'number' && donorCs[k] !== dCid) newDonorCells.push(donorCs[k]);
+          }
+          if (newDonorCells.length < 2) continue;
+
+          var FLAG_GD = { 'f': 0, 'w': 1, 'p': 2 };
+          var bestWZ = -1;
+          var bestWZScore = 99;
+          var bestDType = null;
+          for (var wi = 0; wi < newDonorCells.length; wi++) {
+            var tryWZ = newDonorCells[wi];
+            var tryLiv = [];
+            for (var k = 0; k < newDonorCells.length; k++) {
+              if (k !== wi) tryLiv.push(newDonorCells[k]);
+            }
+            var dfFlags = [];
+            for (var k = 0; k < tryLiv.length; k++) dfFlags.push(getFlag(insolMap, tryLiv[k]));
+            var dv = validateApartment(dfFlags);
+            if (dv.valid) {
+              var wzScore = FLAG_GD[getFlag(insolMap, tryWZ)] || 0;
+              if (bestWZ < 0 || wzScore < bestWZScore) {
+                bestWZScore = wzScore;
+                bestWZ = tryWZ;
+                bestDType = dv.type;
+              }
+            }
+          }
+          if (bestWZ < 0) continue;
+
+          // Execute transfer
+          // Remove dCid from donor
+          var newDCells = [];
+          for (var k = 0; k < donorCs.length; k++) {
+            if (donorCs[k] !== dCid) newDCells.push(donorCs[k]);
+          }
+          // Also remove corridor labels that reference dCid
+          var finalDCells = [];
+          for (var k = 0; k < newDCells.length; k++) {
+            if (typeof newDCells[k] === 'string') {
+              var parts = newDCells[k].split('-');
+              if (parseInt(parts[0]) === dCid || parseInt(parts[1]) === dCid) continue;
+            }
+            finalDCells.push(newDCells[k]);
+          }
+          donor.cells = finalDCells;
+          donor.wetCell = bestWZ;
+          donor.type = bestDType;
+          donor.valid = true;
+          if (donor.livingCells) {
+            var nl = [];
+            for (var k = 0; k < finalDCells.length; k++) {
+              if (typeof finalDCells[k] === 'number' && finalDCells[k] !== bestWZ) nl.push(finalDCells[k]);
+            }
+            donor.livingCells = nl;
+          }
+
+          // Add dCid to receiver
+          recv.cells.push(dCid);
+          recv.type = rv.type;
+          recv.valid = true;
+          if (recv.livingCells) {
+            recv.livingCells.push(dCid);
+          }
+
+          gdChanged = true;
+          found = true;
+          break;
+        }
+        if (found) break;
+      }
+      if (found) break;
+    }
+  }
 
   // Step 4: split 5K+
   allApartments = splitLargeApartments(allApartments, insolMap);

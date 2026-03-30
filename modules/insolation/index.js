@@ -29,6 +29,16 @@ var RAY_FREE_LENGTH = 80;
 var COLORS = { PASS: 0x22c55e, WARNING: 0xf59e0b, FAIL: 0xef4444 };
 var RAY_COLORS = { free: 0xfbbf24, blocked: 0xef4444 };
 
+/**
+ * Build fpM from stored polygon.
+ */
+function buildFpM(fp, proj) {
+  var fpM = [];
+  for (var j = 0; j < fp.polygon.length; j++)
+    fpM.push(proj.toMeters(fp.polygon[j][0], fp.polygon[j][1]));
+  return fpM;
+}
+
 // ── State ──────────────────────────────────────────────
 
 var _mapManager, _featureStore, _eventBus, _threeOverlay;
@@ -152,13 +162,13 @@ function addPierBox(meshes, p1, p2, on, sillZ, winTopZ) {
  * Build collision pieces for one facade edge. Per-cell: LLU = solid, apartment = piers around window.
  * N is passed in (from near edge) to match section-gen cell count.
  */
-function addFacadeCollision(meshes, edgeP1, edgeP2, outN, N, sillZ, winTopZ, lluSide, side, secH) {
+function addFacadeCollision(meshes, edgeP1, edgeP2, outN, N, sillZ, winTopZ, lluSide, side, secH, realLluIdx) {
   var dx = edgeP2[0] - edgeP1[0];
   var dy = edgeP2[1] - edgeP1[1];
   var edgeLen = Math.sqrt(dx * dx + dy * dy);
   var ax = dx / edgeLen;
   var ay = dy / edgeLen;
-  var lluIdx = computeLLUIndices(N, secH);
+  var lluIdx = realLluIdx || computeLLUIndices(N, secH);
 
   for (var ci = 0; ci < N; ci++) {
     var tL = ci * edgeLen / N;
@@ -245,9 +255,7 @@ function buildAllCollisionMeshes(sections, proj) {
       var secH = getSectionHeight(fp, params);
       var buildingH = computeBuildingHeight(secH, params.firstFloorHeight, params.typicalFloorHeight);
       var fc = computeFloorCount(secH, params.firstFloorHeight, params.typicalFloorHeight);
-      var fpM = [];
-      for (var j = 0; j < fp.polygon.length; j++)
-        fpM.push(proj.toMeters(fp.polygon[j][0], fp.polygon[j][1]));
+      var fpM = buildFpM(fp, proj);
 
       // Floor 0 (commercial): solid
       meshes.push(buildCollisionBoxRange(fpM, 0, params.firstFloorHeight));
@@ -295,6 +303,7 @@ function buildAllCollisionMeshes(sections, proj) {
       var nCD = outN(c, d);
       var nAD = outN(a, d);
       var nBC = outN(b, c);
+      var colFlipped = fp.axisFlipped;
 
       // Each residential floor: solid zones + per-cell piers in window zone
       for (var fl = 1; fl < fc; fl++) {
@@ -317,15 +326,28 @@ function buildAllCollisionMeshes(sections, proj) {
         }
 
         // Per-cell piers in window zone — facades
-        addFacadeCollision(meshes, a, b, nAB, N, sillZ, winTopZ, lluSide, 'near', secH);
-        addFacadeCollision(meshes, c, d, nCD, N, sillZ, winTopZ, lluSide, 'far', secH);
+        // When axis flipped, reverse edge direction so cellIdx matches graph numbering
+        var nearP1 = colFlipped ? b : a;
+        var nearP2 = colFlipped ? a : b;
+        var farP1 = colFlipped ? d : c;
+        var farP2 = colFlipped ? c : d;
+        addFacadeCollision(meshes, nearP1, nearP2, nAB, N, sillZ, winTopZ, lluSide, 'near', secH, lluIdx);
+        addFacadeCollision(meshes, farP1, farP2, nCD, N, sillZ, winTopZ, lluSide, 'far', secH, lluIdx);
 
         // End walls with niches
+        // When flipped: left end = graph rightmost (N-1), right end = graph leftmost (0)
+        var endLeftNearLLU = colFlipped ? nearLLUN : nearLLU0;
+        var endLeftFarLLU = colFlipped ? farLLUatC : farLLUatD;
+        var endRightNearLLU = colFlipped ? nearLLU0 : nearLLUN;
+        var endRightFarLLU = colFlipped ? farLLUatD : farLLUatC;
         addEndWallCollision(meshes, a, d, nAD, aptDepth, params.corridorWidth,
-          sillZ, winTopZ, lluSide, nearLLU0, farLLUatD);
+          sillZ, winTopZ, lluSide, endLeftNearLLU, endLeftFarLLU);
         addEndWallCollision(meshes, b, c, nBC, aptDepth, params.corridorWidth,
-          sillZ, winTopZ, lluSide, nearLLUN, farLLUatC);
+          sillZ, winTopZ, lluSide, endRightNearLLU, endRightFarLLU);
       }
+
+      // Roof cap: solid slab at building top — prevents rays from passing through
+      meshes.push(buildCollisionBoxRange(fpM, buildingH - 0.3, buildingH));
     }
   }
   return meshes;
@@ -368,10 +390,22 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
   var cx = (fpM[0][0] + fpM[1][0] + fpM[2][0] + fpM[3][0]) / 4;
   var cy = (fpM[0][1] + fpM[1][1] + fpM[2][1] + fpM[3][1]) / 4;
 
-  var facades = [
-    { p1: fpM[0], p2: fpM[1], side: 'near' },
-    { p1: fpM[2], p2: fpM[3], side: 'far' }
-  ];
+  // When section-gen flipped the axis (orientAxis), cellIdx must match
+  // the graph numbering. Reverse facade directions so cellIdx 0 = graph cell 0.
+  var axisFlipped = sectionData && sectionData.axisFlipped;
+
+  var facades;
+  if (axisFlipped) {
+    facades = [
+      { p1: fpM[1], p2: fpM[0], side: 'near' },
+      { p1: fpM[3], p2: fpM[2], side: 'far' }
+    ];
+  } else {
+    facades = [
+      { p1: fpM[0], p2: fpM[1], side: 'near' },
+      { p1: fpM[2], p2: fpM[3], side: 'far' }
+    ];
+  }
 
   // Z at window sill for given floor: baseZ + slab(0.3) + sill(1.2) + 0.1
   if (!floorNum) floorNum = 1;
@@ -421,10 +455,18 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
   var aptDepth = (params.sectionWidth - params.corridorWidth) / 2.0;
   var endEdges = [];
   if (!hasLeftNeighbor) {
-    endEdges.push({ p1: fpM[0], p2: fpM[3], nearIdx: 0, farIdx: cellCount - 1 });
+    if (axisFlipped) {
+      endEdges.push({ p1: fpM[0], p2: fpM[3], nearIdx: cellCount - 1, farIdx: 0 });
+    } else {
+      endEdges.push({ p1: fpM[0], p2: fpM[3], nearIdx: 0, farIdx: cellCount - 1 });
+    }
   }
   if (!hasRightNeighbor) {
-    endEdges.push({ p1: fpM[1], p2: fpM[2], nearIdx: cellCount - 1, farIdx: 0 });
+    if (axisFlipped) {
+      endEdges.push({ p1: fpM[1], p2: fpM[2], nearIdx: 0, farIdx: cellCount - 1 });
+    } else {
+      endEdges.push({ p1: fpM[1], p2: fpM[2], nearIdx: cellCount - 1, farIdx: 0 });
+    }
   }
   for (var ei = 0; ei < endEdges.length; ei++) {
     var e = endEdges[ei];
@@ -594,9 +636,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
       if (level === 'section' && fi !== sectionIdx) continue;
       var fp = storedFP[fi];
       var secH = getSectionHeight(fp, params);
-      var fpM = [];
-      for (var j = 0; j < fp.polygon.length; j++)
-        fpM.push(proj.toMeters(fp.polygon[j][0], fp.polygon[j][1]));
+      var fpM = buildFpM(fp, proj);
 
       var hasLeftNeighbor = fi > 0;
       var hasRightNeighbor = fi < storedFP.length - 1;

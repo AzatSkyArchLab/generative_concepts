@@ -15,6 +15,7 @@ import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloor
 import { solveFloor } from '../../core/apartments/ApartmentSolver.js';
 import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
+import { allocateQuotas } from '../../core/apartments/QuotaAllocator.js';
 import { generateReport } from '../../ui/FloorPlanReport.js';
 
 import { state } from './state.js';
@@ -76,6 +77,7 @@ export function processAllSections() {
   var AREA_COEFF = 0.65;
   var M2_PER_PERSON = 50;
   var allStats = { axes: [], totalFootprint: 0, totalAptArea: 0, totalPopulation: 0, sections: [] };
+  var sectionProfiles = []; // for QuotaAllocator
 
   for (var si = 0; si < sects.length; si++) {
     var feature = sects[si];
@@ -123,6 +125,7 @@ export function processAllSections() {
       });
 
       var sectionAxis = orientAxis(fpM);
+      var axisFlipped = (sectionAxis[0] !== fpM[0]);
       var nearCells = createNearCells(sectionAxis, params.cellWidth, apartmentDepth);
       var farCells = createFarCells(sectionAxis, params.cellWidth, apartmentDepth, apartmentDepth + params.corridorWidth);
       var corridorCells = createCorridorCells(sectionAxis, params.cellWidth, params.corridorWidth, apartmentDepth);
@@ -137,6 +140,7 @@ export function processAllSections() {
       fp.N = N;
       fp.northSide = northSide;
       fp.lluIndices = lluIndices;
+      fp.axisFlipped = axisFlipped;
 
       var graph = buildSectionGraph(N, nearCells, farCells, corridorCells,
         northSide, lluIndices, lluParams.tag, renderFloors);
@@ -172,7 +176,8 @@ export function processAllSections() {
             farFlags.push(ci + ':' + (f || '-'));
           }
           console.log('[InsolMap] sec=' + fi + ' ori=' + sectionOri + ' N=' + N +
-            ' north=' + northSide + ' LLU=[' + lluIndices.join(',') + ']');
+            ' north=' + northSide + ' LLU=[' + lluIndices.join(',') + ']' +
+            (axisFlipped ? ' FLIPPED' : ''));
           console.log('  near: ' + nearFlags.join(' '));
           console.log('  far:  ' + farFlags.join(' '));
         } else {
@@ -192,6 +197,23 @@ export function processAllSections() {
           totalOrphans: wzPlan.totalOrphanCount,
           report: wzPlan.report
         };
+
+        // Collect profile for QuotaAllocator
+        if (aptResult && aptResult.apartments) {
+          var fl1Placed = { '1K': 0, '2K': 0, '3K': 0, '4K': 0 };
+          for (var ai = 0; ai < aptResult.apartments.length; ai++) {
+            var t = aptResult.apartments[ai].type;
+            if (fl1Placed[t] !== undefined) fl1Placed[t]++;
+          }
+          var residFloors = Math.max(0, floorCount - 1);
+          sectionProfiles.push({
+            key: lineId + '_' + fi,
+            orientation: sectionOri,
+            floor1Placed: fl1Placed,
+            totalEstimate: wzPlan.wzStacks.length * residFloors,
+            floorCount: floorCount
+          });
+        }
 
         if (aptResult && aptResult.apartments) {
           for (var ai = 0; ai < aptResult.apartments.length; ai++) {
@@ -282,109 +304,29 @@ export function processAllSections() {
             detailMap, 0.08));
         }
 
-        // Floors 2..N — only after Distribute
+        // Floors 2..N — defer to Pass 2 (after QuotaAllocator)
+        // Save data needed for planBuilding
         if (state.distributed && floorCount > 2 && wzPlan && wzPlan.wzStacks.length > 0) {
           var planKey = lineId + '_' + fi;
           if (!state.buildingPlans[planKey]) {
-            var perFloorInsol = buildPerFloorInsol(lineId, fi, N, floorCount - 1, graph.nodes);
-            // Compute LLU cell IDs as barriers
-            var lluCellIds = [];
-            for (var li = 0; li < lluIndices.length; li++) {
-              if (northSide === 'near') {
-                lluCellIds.push(lluIndices[li]);
-              } else {
-                lluCellIds.push(N + lluIndices[li]);
-              }
-            }
-            // Compute corridor near positions
-            var corrNears = [];
-            for (var gk in graph.nodes) {
-              if (!graph.nodes.hasOwnProperty(gk)) continue;
-              var gn = graph.nodes[gk];
-              if (gn.floor === 1 && gn.type === 'corridor') {
-                var gnCid = String(gn.cellId);
-                if (gnCid.indexOf('-') >= 0) corrNears.push(parseInt(gnCid.split('-')[0]));
-              }
-            }
-            corrNears.sort(function (a, b) { return a - b; });
-
-            console.log('[section-gen] planBuilding input:', planKey,
-              'wzStacks:', wzPlan.wzStacks.length,
-              'fl1Apts:', (aptResult ? aptResult.apartments.length : 0),
-              'lluCells:', lluCellIds.join(','),
-              'corrNears:', corrNears.join(','),
-              'mix:', JSON.stringify(state.aptMix));
-            state.buildingPlans[planKey] = planBuilding({
+            // Store deferred data for Pass 2
+            if (!state._deferredPlans) state._deferredPlans = [];
+            state._deferredPlans.push({
+              planKey: planKey,
               graphNodes: graph.nodes,
               N: N,
               floorCount: floorCount,
               wzStacks: wzPlan.wzStacks,
               floor1Apartments: aptResult ? aptResult.apartments : [],
-              mix: state.aptMix,
-              perFloorInsol: perFloorInsol,
-              lluCells: lluCellIds,
-              sortedCorrNears: corrNears,
-              orientation: sectionOri
+              lluIndices: lluIndices,
+              northSide: northSide,
+              orientation: sectionOri,
+              params: params,
+              fpM: fpM,
+              buildingH: buildingH,
+              detailMap: detailMap
             });
-            state.graphDataMap[planKey] = { nodes: graph.nodes, N: N, params: params, floorCount: floorCount, perFloorInsol: perFloorInsol };
           }
-          var bPlan = state.buildingPlans[planKey];
-          console.log('[section-gen] building plan:', planKey,
-            'floors:', bPlan.floors.length,
-            'placed:', JSON.stringify(bPlan.totalPlaced));
-
-          // Render floors 2..N with per-floor apartments
-          for (var fl = 2; fl < floorCount; fl++) {
-            var flBaseZ = params.firstFloorHeight + (fl - 1) * params.typicalFloorHeight;
-            var flTopZ = flBaseZ + params.typicalFloorHeight;
-
-            var floorData = null;
-            for (var bfi = 0; bfi < bPlan.floors.length; bfi++) {
-              if (bPlan.floors[bfi].floor === fl) { floorData = bPlan.floors[bfi]; break; }
-            }
-
-            var flDetailMap = {};
-            if (floorData) {
-              for (var fai = 0; fai < floorData.apartments.length; fai++) {
-                var fapt = floorData.apartments[fai];
-                var faCells = fapt.cells || [];
-                var faPal = APT_COLORS[fapt.type] || APT_COLORS['orphan'];
-                for (var fci = 0; fci < faCells.length; fci++) {
-                  var fcid = faCells[fci];
-                  var faRole;
-                  var faColor;
-                  if (typeof fcid === 'string') {
-                    // Corridor label (e.g. "3-12") — assigned by FloorPlanner Phase 4b
-                    faRole = 'corridor';
-                    faColor = faPal.wet;
-                  } else if (fapt.type === 'orphan') {
-                    faRole = 'orphan';
-                    faColor = faPal.living;
-                  } else if (fcid === fapt.wetCell) {
-                    faRole = 'wet';
-                    faColor = faPal.wet;
-                  } else {
-                    faRole = 'living';
-                    faColor = faPal.living;
-                  }
-                  flDetailMap[fcid] = {
-                    aptIdx: fai, type: fapt.type, role: faRole, color: faColor,
-                    label: 'A' + fai + ' ' + fapt.type
-                  };
-                }
-              }
-            } else {
-              flDetailMap = detailMap; // fallback
-            }
-
-            state.threeOverlay.addMesh(buildDetailedFloor1(graph.nodes, N,
-              flBaseZ, flTopZ, flDetailMap, 0.08, false, false, false));
-          }
-
-          // Emit building plan results
-          state.eventBus.emit('building:plan:result', {
-            sectionKey: planKey, plan: bPlan
-          });
         }
 
         state.threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
@@ -394,6 +336,133 @@ export function processAllSections() {
         state.threeOverlay.addMesh(buildDividerWall(fpM[3], fpM[0], 0, renderH + 0.05, 0.12));
     }
     state.lineFootprints[lineId] = lineFPsLL;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // Pass 2: Building Plans with cross-section QuotaAllocator
+  // All floor 1 profiles collected → compute adjusted mixes → planBuilding
+  // ══════════════════════════════════════════════════════════
+  if (state.distributed && state._deferredPlans && state._deferredPlans.length > 0) {
+    // Compute adjusted mixes from all section profiles
+    if (!state.sectionMixes) {
+      state.sectionMixes = allocateQuotas(sectionProfiles, state.aptMix);
+    }
+
+    for (var dpi = 0; dpi < state._deferredPlans.length; dpi++) {
+      var dp = state._deferredPlans[dpi];
+      if (state.buildingPlans[dp.planKey]) continue;
+
+      var sectionMix = state.sectionMixes[dp.planKey] || state.aptMix;
+      var perFloorInsol = buildPerFloorInsol(
+        dp.planKey.split('_')[0], parseInt(dp.planKey.split('_')[1]),
+        dp.N, dp.floorCount - 1, dp.graphNodes);
+
+      // Compute LLU cell IDs
+      var lluCellIds = [];
+      for (var li = 0; li < dp.lluIndices.length; li++) {
+        if (dp.northSide === 'near') {
+          lluCellIds.push(dp.lluIndices[li]);
+        } else {
+          lluCellIds.push(dp.N + dp.lluIndices[li]);
+        }
+      }
+
+      // Compute corridor near positions
+      var corrNears = [];
+      for (var gk in dp.graphNodes) {
+        if (!dp.graphNodes.hasOwnProperty(gk)) continue;
+        var gn = dp.graphNodes[gk];
+        if (gn.floor === 1 && gn.type === 'corridor') {
+          var gnCid = String(gn.cellId);
+          if (gnCid.indexOf('-') >= 0) corrNears.push(parseInt(gnCid.split('-')[0]));
+        }
+      }
+      corrNears.sort(function (a, b) { return a - b; });
+
+      console.log('[section-gen] planBuilding input:', dp.planKey,
+        'wzStacks:', dp.wzStacks.length,
+        'fl1Apts:', dp.floor1Apartments.length,
+        'lluCells:', lluCellIds.join(','),
+        'corrNears:', corrNears.join(','),
+        'mix:', JSON.stringify(sectionMix),
+        '(global:', JSON.stringify(state.aptMix) + ')');
+
+      state.buildingPlans[dp.planKey] = planBuilding({
+        graphNodes: dp.graphNodes,
+        N: dp.N,
+        floorCount: dp.floorCount,
+        wzStacks: dp.wzStacks,
+        floor1Apartments: dp.floor1Apartments,
+        mix: sectionMix,
+        perFloorInsol: perFloorInsol,
+        lluCells: lluCellIds,
+        sortedCorrNears: corrNears,
+        orientation: dp.orientation
+      });
+      state.graphDataMap[dp.planKey] = {
+        nodes: dp.graphNodes, N: dp.N, params: dp.params,
+        floorCount: dp.floorCount, perFloorInsol: perFloorInsol
+      };
+
+      // Render floors 2..N
+      var bPlan = state.buildingPlans[dp.planKey];
+      console.log('[section-gen] building plan:', dp.planKey,
+        'floors:', bPlan.floors.length,
+        'placed:', JSON.stringify(bPlan.totalPlaced));
+
+      if (state.threeOverlay) {
+        for (var fl = 2; fl < dp.floorCount; fl++) {
+          var flBaseZ = dp.params.firstFloorHeight + (fl - 1) * dp.params.typicalFloorHeight;
+          var flTopZ = flBaseZ + dp.params.typicalFloorHeight;
+
+          var floorData = null;
+          for (var bfi = 0; bfi < bPlan.floors.length; bfi++) {
+            if (bPlan.floors[bfi].floor === fl) { floorData = bPlan.floors[bfi]; break; }
+          }
+
+          var flDetailMap = {};
+          if (floorData) {
+            for (var fai = 0; fai < floorData.apartments.length; fai++) {
+              var fapt = floorData.apartments[fai];
+              var faCells = fapt.cells || [];
+              var faPal = APT_COLORS[fapt.type] || APT_COLORS['orphan'];
+              for (var fci = 0; fci < faCells.length; fci++) {
+                var fcid = faCells[fci];
+                var faRole;
+                var faColor;
+                if (typeof fcid === 'string') {
+                  faRole = 'corridor';
+                  faColor = faPal.wet;
+                } else if (fapt.type === 'orphan') {
+                  faRole = 'orphan';
+                  faColor = faPal.living;
+                } else if (fcid === fapt.wetCell) {
+                  faRole = 'wet';
+                  faColor = faPal.wet;
+                } else {
+                  faRole = 'living';
+                  faColor = faPal.living;
+                }
+                flDetailMap[fcid] = {
+                  aptIdx: fai, type: fapt.type, role: faRole, color: faColor,
+                  label: 'A' + fai + ' ' + fapt.type
+                };
+              }
+            }
+          } else {
+            flDetailMap = dp.detailMap;
+          }
+
+          state.threeOverlay.addMesh(buildDetailedFloor1(dp.graphNodes, dp.N,
+            flBaseZ, flTopZ, flDetailMap, 0.08, false, false, false));
+        }
+      }
+
+      state.eventBus.emit('building:plan:result', {
+        sectionKey: dp.planKey, plan: bPlan
+      });
+    }
+    state._deferredPlans = null;
   }
 
   state.layer.update(allCellsLL, allFootLL);

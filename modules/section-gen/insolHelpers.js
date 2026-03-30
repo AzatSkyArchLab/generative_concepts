@@ -18,13 +18,13 @@ export function pointsToInsolMap(pts, N, graphNodes, floor) {
   if (!pts || pts.length === 0) return null;
   if (!floor) floor = 1;
 
-  // Build LLU exclusion set from actual graph
+  // Build LLU exclusion set — always from floor 1 (graph may not have upper floor nodes)
   var lluSet = {};
   if (graphNodes) {
     for (var key in graphNodes) {
       if (!graphNodes.hasOwnProperty(key)) continue;
       var node = graphNodes[key];
-      if (node.floor === floor && node.type === 'llu') {
+      if (node.type === 'llu' && (node.floor === floor || node.floor === 1)) {
         lluSet[node.cellId] = true;
       }
     }

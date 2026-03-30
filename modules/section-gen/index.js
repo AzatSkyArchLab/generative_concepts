@@ -28,7 +28,7 @@ function onSelected(d) {
 
 function onInsolCellMap(cellMap) {
   state.insolCellMap = cellMap;
-  state.buildingPlans = {};  // force rebuild with new insol data
+  state.buildingPlans = {}; state.sectionMixes = null;  // force rebuild with new insol data
   processAllSections();
 }
 
@@ -47,7 +47,7 @@ function onDeselected() {
 
 function onChanged() {
   state.distributed = false;
-  state.buildingPlans = {};
+  state.buildingPlans = {}; state.sectionMixes = null;
   state.graphDataMap = {};
   processAllSections();
 }
@@ -118,7 +118,7 @@ var sectionGenModule = {
     state.unsubs.push(state.eventBus.on('apt-mix:distribute', function (mix) {
       state.aptMix = mix || state.aptMix;
       state.distributed = true;
-      state.buildingPlans = {};
+      state.buildingPlans = {}; state.sectionMixes = null;
       state.eventBus.emit('insolation:run-multi-floor');
     }));
     state.unsubs.push(state.eventBus.on('apt-mix:changed', function (mix) {
@@ -126,7 +126,7 @@ var sectionGenModule = {
     }));
     state.unsubs.push(state.eventBus.on('apt-mix:reset', function () {
       state.distributed = false;
-      state.buildingPlans = {};
+      state.buildingPlans = {}; state.sectionMixes = null;
       state.graphDataMap = {};
       state.eventBus.emit('insolation:analyze:global');
     }));
