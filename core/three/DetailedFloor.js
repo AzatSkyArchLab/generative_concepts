@@ -12,7 +12,7 @@ import {
   MATERIALS, WALL_MAT, EXT_WALL_MAT, GLASS_MAT, WIN_EDGE_MAT, TOP_CAP_MAT,
   darkenColor
 } from './materials.js';
-import { buildBoxGeometry, buildBoxEdges, insetPoly } from './BoxGeometry.js';
+import { buildBoxGeometry, buildBoxEdges, insetPoly, insetPolyPerEdge } from './BoxGeometry.js';
 import { buildDetailLabel } from './Labels.js';
 
 // ── Internal helpers ──────────────────────────────────
@@ -157,14 +157,22 @@ export function buildDetailedFloor1(graphNodes, N, baseZ, topZ, cellAptMap, inse
     else corrCells[node.cellId] = node;
   }
 
-  // ── 1. Cell boxes: 0.3m colored slab from baseZ ──
-  var cellTopZ = baseZ + 0.3;
-  for (var cid in numCells) {
-    if (!numCells.hasOwnProperty(cid)) continue;
-    var node = numCells[cid];
+  // ── 1. Cell boxes: full-height, per-edge inset ──
+  var cellTopZ = topZ;
+  var GAP = 0.05;
+  var EXT_T = 0.6; // facade/end wall thickness
+
+  // Near cells: edge0=facade, edge1=right, edge2=corridor, edge3=left
+  for (var i = 0; i < N; i++) {
+    if (!numCells[i]) continue;
+    var node = numCells[i];
     var poly = node.polygon;
     if (!poly || poly.length < 4) continue;
-    var ip = insetPoly(poly, inset);
+    var m0 = EXT_T; // facade
+    var m1 = (i === N - 1) ? EXT_T : GAP; // right end wall or gap
+    var m2 = GAP; // corridor
+    var m3 = (i === 0) ? EXT_T : GAP; // left end wall or gap
+    var ip = insetPolyPerEdge(poly, [m0, m1, m2, m3]);
     var info = cellAptMap ? cellAptMap[node.cellId] : null;
     var matl;
     if (info && info.color) {
@@ -173,110 +181,61 @@ export function buildDetailedFloor1(graphNodes, N, baseZ, topZ, cellAptMap, inse
       matl = MATERIALS[node.type] || MATERIALS.apartment;
     }
     group.add(new THREE.Mesh(buildBoxGeometry(ip, baseZ, cellTopZ), matl));
-    group.add(buildBoxEdges(ip, baseZ, cellTopZ));
+    if (node.type !== 'llu') {
+      group.add(buildTopCap(ip, cellTopZ));
+    }
     if (showLabels && info && info.label) {
-      group.add(buildDetailLabel(info.label, poly, cellTopZ + 0.1, inset));
+      group.add(buildDetailLabel(info.label, poly, cellTopZ + 0.1, GAP));
     }
   }
-
-  // Corridor cells
-  for (var cid in corrCells) {
-    if (!corrCells.hasOwnProperty(cid)) continue;
-    var node = corrCells[cid];
+  // Far cells: edge0=corridor, edge1=right, edge2=facade, edge3=left
+  for (var i = N; i < 2 * N; i++) {
+    if (!numCells[i]) continue;
+    var node = numCells[i];
     var poly = node.polygon;
     if (!poly || poly.length < 4) continue;
-    var ip = insetPoly(poly, inset);
+    var m0 = GAP; // corridor
+    var m1 = (i === N) ? EXT_T : GAP; // right end wall or gap
+    var m2 = EXT_T; // facade
+    var m3 = (i === 2 * N - 1) ? EXT_T : GAP; // left end wall or gap
+    var ip = insetPolyPerEdge(poly, [m0, m1, m2, m3]);
     var info = cellAptMap ? cellAptMap[node.cellId] : null;
     var matl;
     if (info && info.color) {
       matl = new THREE.MeshLambertMaterial({ color: new THREE.Color(info.color), side: THREE.DoubleSide });
     } else {
+      matl = MATERIALS[node.type] || MATERIALS.apartment;
+    }
+    group.add(new THREE.Mesh(buildBoxGeometry(ip, baseZ, cellTopZ), matl));
+    if (node.type !== 'llu') {
+      group.add(buildTopCap(ip, cellTopZ));
+    }
+    if (showLabels && info && info.label) {
+      group.add(buildDetailLabel(info.label, poly, cellTopZ + 0.1, GAP));
+    }
+  }
+
+  // Corridor cells — render individually
+  var corrLeftId = '0-' + (2 * N - 1);
+  var corrRightId = (N - 1) + '-' + N;
+  for (var cid in corrCells) {
+    if (!corrCells.hasOwnProperty(cid)) continue;
+    var node = corrCells[cid];
+    var poly = node.polygon;
+    if (!poly || poly.length < 4) continue;
+    var ip = insetPoly(poly, GAP);
+    var info = cellAptMap ? cellAptMap[node.cellId] : null;
+    var matl;
+    // End corridor cells: use apartment color if available
+    if ((cid === corrLeftId || cid === corrRightId) && info && info.color) {
+      matl = new THREE.MeshLambertMaterial({ color: new THREE.Color(info.color), side: THREE.DoubleSide });
+    } else {
       matl = MATERIALS.corridor;
     }
     group.add(new THREE.Mesh(buildBoxGeometry(ip, baseZ, cellTopZ), matl));
-    group.add(buildBoxEdges(ip, baseZ, cellTopZ));
   }
 
-  // ── 2. Partition walls ──
-  function isLLU(cid) { return numCells[cid] && numCells[cid].type === 'llu'; }
-
-  // Near side partitions
-  for (var i = 0; i < N - 1; i++) {
-    if (!numCells[i] || !numCells[i + 1]) continue;
-    var p1 = numCells[i].polygon[1];
-    var p2 = numCells[i].polygon[2];
-    var lluA = isLLU(i); var lluB = isLLU(i + 1);
-    if (lluA && lluB) continue;
-    if (lluA || lluB) {
-      group.add(buildPartitionWall(p1, p2, floorZ, topZ, 0.3));
-      continue;
-    }
-    var infoA = cellAptMap ? cellAptMap[i] : null;
-    var infoB = cellAptMap ? cellAptMap[i + 1] : null;
-    var same = infoA && infoB && infoA.aptIdx !== undefined && infoA.aptIdx === infoB.aptIdx;
-    group.add(buildPartitionWall(p1, p2, floorZ, topZ, same ? 0.10 : 0.3));
-  }
-  // Far side partitions
-  for (var i = N; i < 2 * N - 1; i++) {
-    if (!numCells[i] || !numCells[i + 1]) continue;
-    var p1 = numCells[i].polygon[0];
-    var p2 = numCells[i].polygon[3];
-    var lluA = isLLU(i); var lluB = isLLU(i + 1);
-    if (lluA && lluB) continue;
-    if (lluA || lluB) {
-      group.add(buildPartitionWall(p1, p2, floorZ, topZ, 0.3));
-      continue;
-    }
-    var infoA = cellAptMap ? cellAptMap[i] : null;
-    var infoB = cellAptMap ? cellAptMap[i + 1] : null;
-    var same = infoA && infoB && infoA.aptIdx !== undefined && infoA.aptIdx === infoB.aptIdx;
-    group.add(buildPartitionWall(p1, p2, floorZ, topZ, same ? 0.10 : 0.3));
-  }
-
-  // ── 2b. Corridor-to-apartment walls ──
-  for (var i = 0; i < N; i++) {
-    if (!numCells[i]) continue;
-    var poly = numCells[i].polygon;
-    group.add(buildPartitionWall(poly[3], poly[2], floorZ, topZ, 0.3));
-  }
-  for (var i = N; i < 2 * N; i++) {
-    if (!numCells[i]) continue;
-    var poly = numCells[i].polygon;
-    group.add(buildPartitionWall(poly[0], poly[1], floorZ, topZ, 0.3));
-  }
-
-  // ── 2c. Corridor end walls ──
-  function _corrEndNormal(cp, ep1, ep2) {
-    var ccx = (cp[0][0]+cp[1][0]+cp[2][0]+cp[3][0]) / 4;
-    var ccy = (cp[0][1]+cp[1][1]+cp[2][1]+cp[3][1]) / 4;
-    var mx = (ep1[0]+ep2[0]) / 2; var my = (ep1[1]+ep2[1]) / 2;
-    var ox = mx - ccx; var oy = my - ccy;
-    var ol = Math.sqrt(ox*ox + oy*oy);
-    if (ol < 0.001) return null;
-    return [ox/ol, oy/ol];
-  }
-  var corrLeftId = '0-' + (2 * N - 1);
-  if (corrCells[corrLeftId]) {
-    var cp = corrCells[corrLeftId].polygon;
-    var en = _corrEndNormal(cp, cp[0], cp[3]);
-    if (en) group.add(buildSolidExtWall(cp[0], cp[3], en[0], en[1], floorZ, topZ, '#c8c8c8'));
-  }
-  var corrRightId = (N - 1) + '-' + N;
-  if (corrCells[corrRightId]) {
-    var cp = corrCells[corrRightId].polygon;
-    var en = _corrEndNormal(cp, cp[1], cp[2]);
-    if (en) group.add(buildSolidExtWall(cp[1], cp[2], en[0], en[1], floorZ, topZ, '#c8c8c8'));
-  }
-
-  // ── 2d. Torec corridor walls ──
-  if (corrCells[corrLeftId]) {
-    var cp = corrCells[corrLeftId].polygon;
-    group.add(buildPartitionWall(cp[1], cp[2], floorZ, topZ, 0.3));
-  }
-  if (corrCells[corrRightId]) {
-    var cp = corrCells[corrRightId].polygon;
-    group.add(buildPartitionWall(cp[0], cp[3], floorZ, topZ, 0.3));
-  }
+  // Internal walls removed — gaps between inset boxes serve as visual separators
 
   // ── 3. Facade walls + windows ──
   function outwardNormal(poly, fp1, fp2) {
@@ -343,6 +302,49 @@ export function buildDetailedFloor1(graphNodes, N, baseZ, topZ, cellAptMap, inse
   // Right end
   renderEndWall(N - 1, 1, 2, hasRightNeighbor);
   renderEndWall(N, 1, 2, hasRightNeighbor);
+
+  return group;
+}
+
+/**
+ * Build LLU rooftop extension — stairwell/elevator shaft above roof.
+ * Visual mesh matching the LLU cell footprint, extruded upward.
+ */
+export function buildLLURoof(graphNodes, N, buildingH, lluHeight) {
+  var group = new THREE.Group();
+  if (!lluHeight) lluHeight = 2.5;
+
+  // Find LLU cells from floor 1
+  var lluCells = [];
+  for (var key in graphNodes) {
+    if (!graphNodes.hasOwnProperty(key)) continue;
+    var node = graphNodes[key];
+    if (node.floor === 1 && node.type === 'llu' && typeof node.cellId === 'number') {
+      lluCells.push(node);
+    }
+  }
+  if (lluCells.length === 0) return group;
+
+  // Render each LLU cell as a box above the roof
+  var roofZ = buildingH;
+  var topZ = buildingH + lluHeight;
+  var lluMat = MATERIALS.llu || new THREE.MeshLambertMaterial({ color: 0x4f81bd, side: THREE.DoubleSide });
+
+  for (var i = 0; i < lluCells.length; i++) {
+    var poly = lluCells[i].polygon;
+    if (!poly || poly.length < 4) continue;
+    group.add(new THREE.Mesh(buildBoxGeometry(poly, roofZ, topZ), lluMat));
+    // Top cap same color as LLU
+    var tv = new Float32Array([
+      poly[0][0],poly[0][1],topZ, poly[1][0],poly[1][1],topZ,
+      poly[2][0],poly[2][1],topZ, poly[3][0],poly[3][1],topZ
+    ]);
+    var tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.Float32BufferAttribute(tv, 3));
+    tg.setIndex(new THREE.BufferAttribute(new Uint16Array([0,1,2, 0,2,3]), 1));
+    tg.computeVertexNormals();
+    group.add(new THREE.Mesh(tg, lluMat));
+  }
 
   return group;
 }

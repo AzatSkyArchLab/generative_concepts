@@ -22,4 +22,4 @@ export {
   buildSectionMeshes,
   buildUpperFloors
 } from './SectionMeshes.js';
-export { buildDetailedFloor1 } from './DetailedFloor.js';
+export { buildDetailedFloor1, buildLLURoof } from './DetailedFloor.js';

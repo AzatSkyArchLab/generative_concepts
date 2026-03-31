@@ -11,7 +11,7 @@ import {
   getNorthSide, getLLUParams, getCentralIndices
 } from './cells.js';
 import { buildSectionGraph } from './graph.js';
-import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1 } from '../../core/three/MeshBuilder.js';
+import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1, buildLLURoof } from '../../core/three/MeshBuilder.js';
 import { solveFloor } from '../../core/apartments/ApartmentSolver.js';
 import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
@@ -354,52 +354,7 @@ export function processAllSections() {
     state.lineFootprints[lineId] = lineFPsLL;
   }
 
-  // ── Phase 0: QuotaResolver — always runs after floor 1 ──
-  if (quotaInputs.length > 0) {
-    var quotaEventData = { sections: [] };
-    for (var qi = 0; qi < quotaInputs.length; qi++) {
-      var qIn = quotaInputs[qi];
-      var cellsPerFloor = 2 * qIn.N - qIn.lluCount;
-      var residentialFloors = qIn.floorCount - 1;
-      var totalCells = cellsPerFloor * residentialFloors;
-
-      var qResult = resolveQuota(totalCells, state.aptMix);
-      var remainResult = computeRemainder(
-        qResult.best ? qResult.best.counts : { '1K': 0, '2K': 0, '3K': 0, '4K': 0 },
-        qIn.fl1Placed, 1
-      );
-
-      console.log('[QuotaResolver] section:', qIn.key,
-        'cells/floor:', cellsPerFloor,
-        'floors:', residentialFloors,
-        'totalCells:', totalCells);
-      console.log(formatQuotaReport(qResult));
-      console.log('[QuotaResolver] Floor 2 placed:', JSON.stringify(qIn.fl1Placed));
-      console.log('[QuotaResolver] Remainder for floors 3..K:', JSON.stringify(remainResult.remainder),
-        remainResult.feasible ? '(feasible)' : '(SHORTFALL: ' + JSON.stringify(remainResult.shortfall) + ')');
-
-      quotaEventData.sections.push({
-        key: qIn.key,
-        cellsPerFloor: cellsPerFloor,
-        residentialFloors: residentialFloors,
-        totalCells: totalCells,
-        best: qResult.best,
-        candidates: qResult.candidates,
-        floor2Placed: qIn.fl1Placed,
-        remainder: remainResult,
-        feasible: remainResult.feasible,
-        debug: qResult.debug
-      });
-    }
-    state.eventBus.emit('quota:resolved', quotaEventData);
-    // Save for Pass 2
-    state._quotaResults = {};
-    for (var qi2 = 0; qi2 < quotaEventData.sections.length; qi2++) {
-      var qs = quotaEventData.sections[qi2];
-      state._quotaResults[qs.key] = qs;
-    }
-  }
-  // ── End Phase 0 ──────────────────────────────────────
+  // Phase 0 moved into Pass 2 (after QuotaAllocator computes section mixes)
 
   // ══════════════════════════════════════════════════════════
   // Pass 2: Building Plans with cross-section QuotaAllocator
@@ -450,12 +405,45 @@ export function processAllSections() {
         'mix:', JSON.stringify(sectionMix),
         '(global:', JSON.stringify(state.aptMix) + ')');
 
-      // Phase 0 quota (if available)
+      // ── Phase 0: QuotaResolver with section-specific mix ──
+      var cellsPerFloor = 2 * dp.N - dp.lluIndices.length;
+      var residentialFloors = dp.floorCount - 1;
+      var totalCells = cellsPerFloor * residentialFloors;
+
+      var qResult = resolveQuota(totalCells, sectionMix);
+      var fl1Placed = { '1K': 0, '2K': 0, '3K': 0, '4K': 0 };
+      for (var fai = 0; fai < dp.floor1Apartments.length; fai++) {
+        var fat = dp.floor1Apartments[fai].type;
+        if (fl1Placed[fat] !== undefined) fl1Placed[fat]++;
+      }
+      var remainResult = computeRemainder(
+        qResult.best ? qResult.best.counts : { '1K': 0, '2K': 0, '3K': 0, '4K': 0 },
+        fl1Placed, 1
+      );
+
+      console.log('[QuotaResolver] section:', dp.planKey,
+        'cells/floor:', cellsPerFloor, 'floors:', residentialFloors, 'totalCells:', totalCells);
+      console.log(formatQuotaReport(qResult));
+      console.log('[QuotaResolver] Floor 2 placed:', JSON.stringify(fl1Placed));
+      console.log('[QuotaResolver] Remainder for floors 3..K:', JSON.stringify(remainResult.remainder),
+        remainResult.feasible ? '(feasible)' : '(SHORTFALL: ' + JSON.stringify(remainResult.shortfall) + ')');
+
       var phase0Quota = null;
-      if (state._quotaResults && state._quotaResults[dp.planKey] && state._quotaResults[dp.planKey].best) {
-        phase0Quota = state._quotaResults[dp.planKey].best.counts;
+      if (qResult.best) {
+        phase0Quota = qResult.best.counts;
         console.log('[section-gen] using Phase 0 quota:', JSON.stringify(phase0Quota));
       }
+
+      // Save for UI panel
+      if (!state._quotaResults) state._quotaResults = {};
+      state._quotaResults[dp.planKey] = {
+        key: dp.planKey, cellsPerFloor: cellsPerFloor,
+        residentialFloors: residentialFloors, totalCells: totalCells,
+        best: qResult.best, candidates: qResult.candidates,
+        floor2Placed: fl1Placed, remainder: remainResult,
+        feasible: remainResult.feasible
+      };
+      // ── End Phase 0 ──
 
       state.buildingPlans[dp.planKey] = planBuilding({
         graphNodes: dp.graphNodes,
@@ -528,12 +516,29 @@ export function processAllSections() {
           state.threeOverlay.addMesh(buildDetailedFloor1(dp.graphNodes, dp.N,
             flBaseZ, flTopZ, flDetailMap, 0.08, false, false, false));
         }
+
+        // LLU rooftop extension above last floor
+        state.threeOverlay.addMesh(buildLLURoof(dp.graphNodes, dp.N, dp.buildingH, 2.5));
       }
 
       state.eventBus.emit('building:plan:result', {
         sectionKey: dp.planKey, plan: bPlan
       });
     }
+
+    // Emit quota results for UI panel
+    if (state._quotaResults) {
+      var quotaEventData = { sections: [] };
+      for (var qrKey in state._quotaResults) {
+        if (state._quotaResults.hasOwnProperty(qrKey)) {
+          quotaEventData.sections.push(state._quotaResults[qrKey]);
+        }
+      }
+      if (quotaEventData.sections.length > 0) {
+        state.eventBus.emit('quota:resolved', quotaEventData);
+      }
+    }
+
     state._deferredPlans = null;
   }
 

@@ -348,6 +348,34 @@ function buildAllCollisionMeshes(sections, proj) {
 
       // Roof cap: solid slab at building top — prevents rays from passing through
       meshes.push(buildCollisionBoxRange(fpM, buildingH - 0.3, buildingH));
+
+      // LLU rooftop extension: stairwell/elevator shaft above roof (2.5m)
+      var LLU_ABOVE = 2.5;
+      var lluMin = N; var lluMax = -1;
+      for (var lidx in lluIdx) {
+        if (!lluIdx.hasOwnProperty(lidx)) continue;
+        var ci = parseInt(lidx);
+        if (ci < lluMin) lluMin = ci;
+        if (ci > lluMax) lluMax = ci;
+      }
+      if (lluMax >= 0) {
+        var nearP1 = colFlipped ? b : a;
+        var nearP2 = colFlipped ? a : b;
+        var farP1 = colFlipped ? d : c;
+        var farP2 = colFlipped ? c : d;
+        var ndx = nearP2[0] - nearP1[0]; var ndy = nearP2[1] - nearP1[1];
+        var nLen = Math.sqrt(ndx*ndx + ndy*ndy);
+        var fdx = farP2[0] - farP1[0]; var fdy = farP2[1] - farP1[1];
+        var fLen = Math.sqrt(fdx*fdx + fdy*fdy);
+        var tL = lluMin / N; var tR = (lluMax + 1) / N;
+        var lluPoly = [
+          [nearP1[0] + ndx * tL, nearP1[1] + ndy * tL],
+          [nearP1[0] + ndx * tR, nearP1[1] + ndy * tR],
+          [farP1[0] + fdx * tR, farP1[1] + fdy * tR],
+          [farP1[0] + fdx * tL, farP1[1] + fdy * tL]
+        ];
+        meshes.push(buildCollisionBoxRange(lluPoly, buildingH, buildingH + LLU_ABOVE));
+      }
     }
   }
   return meshes;

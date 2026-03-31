@@ -234,7 +234,21 @@ function runWithProfile(profile, allWZ, floor1Apartments, perFloorInsol, N, lluC
     }
 
     floors.push({ floor: fl, apartments: result.apartments, placed: result.placed, activeWZ: active.length });
-    prevActive = active;
+
+    // WZ stacking enforcement: find which active WZ actually became WZ on this floor.
+    // Any active WZ that ended up as living (stranded) must be removed for higher floors.
+    var actualWZ = {};
+    for (var ai = 0; ai < result.apartments.length; ai++) {
+      var wc = result.apartments[ai].wetCell;
+      if (typeof wc === 'number') actualWZ[wc] = true;
+    }
+    var filteredActive = [];
+    for (var ai2 = 0; ai2 < active.length; ai2++) {
+      if (actualWZ[active[ai2]]) {
+        filteredActive.push(active[ai2]);
+      }
+    }
+    prevActive = filteredActive;
   }
 
   // Compute score

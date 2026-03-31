@@ -82,3 +82,51 @@ export function insetPoly(poly, margin) {
   }
   return result;
 }
+
+/**
+ * Inset polygon with per-edge margins.
+ * margins[i] = inset for edge i (vertex i → vertex (i+1)%n).
+ */
+export function insetPolyPerEdge(poly, margins) {
+  if (poly.length < 3) return poly;
+  var n = poly.length;
+
+  // Detect winding via signed area: CW < 0, CCW > 0
+  var signedArea = 0;
+  for (var i = 0; i < n; i++) {
+    var a = poly[i]; var b = poly[(i+1)%n];
+    signedArea += (a[0] * b[1] - b[0] * a[1]);
+  }
+  // flip = 1 if CW (normals already inward), -1 if CCW (need to reverse)
+  var flip = signedArea < 0 ? 1 : -1;
+
+  var inNormals = [];
+  for (var i = 0; i < n; i++) {
+    var a = poly[i]; var b = poly[(i+1)%n];
+    var dx = b[0]-a[0]; var dy = b[1]-a[1];
+    var len = Math.sqrt(dx*dx+dy*dy);
+    if (len < 1e-10) { inNormals.push([0,0]); continue; }
+    inNormals.push([dy/len * flip, -dx/len * flip]);
+  }
+  var result = [];
+  for (var i = 0; i < n; i++) {
+    var prev = (i-1+n)%n;
+    var m0 = margins[prev] || 0;
+    var m1 = margins[i] || 0;
+    var p0=poly[prev]; var p1=poly[i]; var n0=inNormals[prev];
+    var a1x=p0[0]+n0[0]*m0; var a1y=p0[1]+n0[1]*m0;
+    var a2x=p1[0]+n0[0]*m0; var a2y=p1[1]+n0[1]*m0;
+    var p2=poly[i]; var p3=poly[(i+1)%n]; var n1=inNormals[i];
+    var b1x=p2[0]+n1[0]*m1; var b1y=p2[1]+n1[1]*m1;
+    var b2x=p3[0]+n1[0]*m1; var b2y=p3[1]+n1[1]*m1;
+    var dax=a2x-a1x; var day=a2y-a1y;
+    var dbx=b2x-b1x; var dby=b2y-b1y;
+    var denom=dax*dby-day*dbx;
+    if (Math.abs(denom)<1e-10) { result.push([a2x,a2y]); }
+    else {
+      var t=((b1x-a1x)*dby-(b1y-a1y)*dbx)/denom;
+      result.push([a1x+dax*t,a1y+day*t]);
+    }
+  }
+  return result;
+}
