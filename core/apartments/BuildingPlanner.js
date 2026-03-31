@@ -191,7 +191,7 @@ function buildFloorPlan(wzCount, remaining, fl, totalFloors) {
 /**
  * Run one building plan with given profile.
  */
-function runWithProfile(profile, allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears, orientation) {
+function runWithProfile(profile, allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears, orientation, quota) {
   var residentialFloors = profile.length;
   var floors = [];
 
@@ -202,9 +202,17 @@ function runWithProfile(profile, allWZ, floor1Apartments, perFloorInsol, N, lluC
   }
   floors.push({ floor: 1, apartments: floor1Apartments, placed: floor1Placed, activeWZ: allWZ.length });
 
-  var totalAptEstimate = allWZ.length; // floor 1
-  for (var pi = 1; pi < profile.length; pi++) totalAptEstimate += profile[pi];
-  var totalQuota = computeQuota(totalAptEstimate, mix);
+  // Use Phase 0 Diophantine quota if available, else fall back to percentage-based
+  var totalQuota;
+  var totalAptEstimate;
+  if (quota) {
+    totalQuota = { '1K': quota['1K'] || 0, '2K': quota['2K'] || 0, '3K': quota['3K'] || 0, '4K': quota['4K'] || 0 };
+    totalAptEstimate = totalQuota['1K'] + totalQuota['2K'] + totalQuota['3K'] + totalQuota['4K'];
+  } else {
+    totalAptEstimate = allWZ.length;
+    for (var pi = 1; pi < profile.length; pi++) totalAptEstimate += profile[pi];
+    totalQuota = computeQuota(totalAptEstimate, mix);
+  }
 
   var remaining = {
     '1K': Math.max(0, totalQuota['1K'] - floor1Placed['1K']),
@@ -288,6 +296,7 @@ export function planBuilding(params) {
   var lluCells = params.lluCells || [];
   var sortedCorrNears = params.sortedCorrNears || [];
   var orientation = params.orientation || 'lon';
+  var quota = params.quota || null;  // Phase 0 Diophantine target
 
   var residentialFloors = floorCount - 1;
   if (residentialFloors < 1 || allWZ.length === 0) {
@@ -308,7 +317,7 @@ export function planBuilding(params) {
   var bestScore = Infinity;
 
   for (var pi = 0; pi < profiles.length; pi++) {
-    var result = runWithProfile(profiles[pi], allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears, orientation);
+    var result = runWithProfile(profiles[pi], allWZ, floor1Apartments, perFloorInsol, N, lluCells, mix, sortedCorrNears, orientation, quota);
     if (result.deviationScore < bestScore) {
       bestScore = result.deviationScore;
       bestResult = result;

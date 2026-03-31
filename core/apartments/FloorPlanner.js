@@ -207,12 +207,13 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
   midWZ = activeMidWZ;
 
   // Phase 3: SWEEP — every remaining cell must be assigned
-  // Build barrier set for path: LLU + active mid WZ
+  // Build barrier set for path: LLU + active mid WZ + torec cells (occupied)
   var sweepBarriers = {};
   if (lluCells) {
     for (var i = 0; i < lluCells.length; i++) sweepBarriers[lluCells[i]] = true;
   }
   for (var i = 0; i < midWZ.length; i++) sweepBarriers[midWZ[i]] = true;
+  for (var k in torecCells) sweepBarriers[k] = true;
 
   // Pass 1: same-row, nearest WZ with <4 cells, no barrier crossing
   for (var row = 0; row < 2; row++) {
@@ -245,15 +246,20 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
           if (d < bestDist) { bestDist = d; bestWZ = awz; }
         }
       }
-      // Last resort same-row: nearest torec (capped at 5 numeric cells = 4K)
+      // Last resort same-row: nearest torec, must be adjacent to existing cells
       if (bestWZ === null) {
-        bestDist = Infinity;
         var bestTi = -1;
         for (var ai = 0; ai < apartments.length; ai++) {
           if (!apartments[ai].torec) continue;
           if (torecNumericCount(apartments[ai]) >= 5) continue;
-          var d = Math.abs(c - apartments[ai].wetCell);
-          if (d < bestDist) { bestDist = d; bestTi = ai; }
+          var tCells = apartments[ai].cells;
+          var adjFound = false;
+          for (var tci = 0; tci < tCells.length; tci++) {
+            if (typeof tCells[tci] === 'number' && Math.abs(tCells[tci] - c) === 1) {
+              adjFound = true; break;
+            }
+          }
+          if (adjFound) { bestTi = ai; break; }
         }
         if (bestTi >= 0) {
           apartments[bestTi].cells.push(c);
@@ -297,15 +303,20 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         if (d < bestDist) { bestDist = d; bestWZ = awz; }
       }
     }
-    // Torec fallback (capped at 5 numeric cells)
+    // Torec fallback (must be adjacent to existing cells, cap 5)
     if (bestWZ === null) {
       var bestTorec = -1;
-      bestDist = Infinity;
       for (var ai = 0; ai < apartments.length; ai++) {
         if (!apartments[ai].torec) continue;
         if (torecNumericCount(apartments[ai]) >= 5) continue;
-        var d = Math.abs(c - apartments[ai].wetCell);
-        if (d < bestDist) { bestDist = d; bestTorec = ai; }
+        var tCells = apartments[ai].cells;
+        var adjFound = false;
+        for (var tci = 0; tci < tCells.length; tci++) {
+          if (typeof tCells[tci] === 'number' && Math.abs(tCells[tci] - c) === 1) {
+            adjFound = true; break;
+          }
+        }
+        if (adjFound) { bestTorec = ai; break; }
       }
       if (bestTorec >= 0) {
         apartments[bestTorec].cells.push(c);
@@ -406,8 +417,6 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
   }
 
   // Phase 4a: REGROUP — dissolve invalid apartments, redistribute cells
-  // Same principle as ApartmentSolver's Phase 3c: if apartment is invalid
-  // (e.g. 2K with [f,f,w]), dissolve and merge cells into valid neighbors.
   var fpRegrouped = true;
   var fpRegroupMax = 10;
   while (fpRegrouped && fpRegroupMax > 0) {
@@ -417,18 +426,15 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
       var apt = apartments[ai];
       if (apt.valid !== false || apt.type === 'orphan') continue;
 
-      // Dissolve: collect numeric cells
       var freedCells = [];
       for (var ci = 0; ci < apt.cells.length; ci++) {
         if (typeof apt.cells[ci] === 'number') freedCells.push(apt.cells[ci]);
       }
       if (freedCells.length === 0) continue;
 
-      // Remove from placed count
       if (placed[apt.type] !== undefined && placed[apt.type] > 0) placed[apt.type]--;
       apartments.splice(ai, 1);
 
-      // Build adjacency map
       var cellToAptFP = {};
       for (var bi = 0; bi < apartments.length; bi++) {
         var bCells = apartments[bi].cells || [];
@@ -437,7 +443,6 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         }
       }
 
-      // Try absorb each freed cell into adjacent valid apartment
       for (var fi = 0; fi < freedCells.length; fi++) {
         var fc = freedCells[fi];
         var absorbed = false;
@@ -446,18 +451,16 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
           if (cellToAptFP[nb] === undefined) continue;
           var bi = cellToAptFP[nb];
           var target = apartments[bi];
-          if (!target.valid && target.type !== 'orphan') continue; // skip other invalids
+          if (!target.valid && target.type !== 'orphan') continue;
 
-          // Count current living
           var tLiving = [];
           var tCells = target.cells || [];
           for (var ci = 0; ci < tCells.length; ci++) {
             if (typeof tCells[ci] === 'number' && tCells[ci] !== target.wetCell)
               tLiving.push(tCells[ci]);
           }
-          if (tLiving.length >= 4) continue; // cap 4 living
+          if (tLiving.length >= 4) continue;
 
-          // Test: add fc as living
           tLiving.push(fc);
           var flags = [];
           for (var k = 0; k < tLiving.length; k++) flags.push(getFlag(insolMap, tLiving[k]));
@@ -467,7 +470,6 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
             target.cells.push(fc);
             target.type = nv.type;
             target.valid = true;
-            // Update placed count
             if (oldType !== nv.type) {
               if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
               if (placed[nv.type] !== undefined) placed[nv.type]++;
@@ -478,12 +480,11 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
           }
         }
         if (!absorbed) {
-          // Orphan single cell
           apartments.push({ cells: [fc], wetCell: fc, type: 'orphan', valid: false, torec: false, corridorLabel: null });
         }
       }
       fpRegrouped = true;
-      break; // restart scan
+      break;
     }
   }
 

@@ -1169,10 +1169,22 @@ export function solveFloor(graphNodes, N, targetFloor, insolMap, orientation) {
   if (!orientation) orientation = 'lon';
 
   var section = buildSection(graphNodes, N, targetFloor);
+  return solveWithSection(section, insolMap, orientation);
+}
+
+/**
+ * Core solver: run full pipeline on a pre-built section.
+ * Used by floor 1 (via solveFloor) and upper floors (directly).
+ */
+export function solveWithSection(section, insolMap, orientation) {
+  if (!insolMap) insolMap = {};
+  if (!orientation) orientation = 'lon';
+
+  var N = section.N;
   var allApartments = [];
 
   // Step 0: forced torecs
-  var torecResult = solveTorecForced(section, insolMap, targetFloor, orientation);
+  var torecResult = solveTorecForced(section, insolMap, 1, orientation);
   var torecApts = torecResult.apartments;
   var torecNearUsed = torecResult.nearUsed;
   var torecFarUsed = torecResult.farUsed;
@@ -1558,7 +1570,7 @@ export function solveFloor(graphNodes, N, targetFloor, insolMap, orientation) {
   var feasible = orphanCount === 0;
 
   return {
-    floor: targetFloor,
+    floor: 0,
     apartments: allApartments,
     section: section,
     typeCounts: typeCounts,

@@ -16,6 +16,7 @@ import { solveFloor } from '../../core/apartments/ApartmentSolver.js';
 import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
 import { allocateQuotas } from '../../core/apartments/QuotaAllocator.js';
+import { resolveQuota, computeRemainder, formatReport as formatQuotaReport } from '../../core/apartments/QuotaResolver.js';
 import { generateReport } from '../../ui/FloorPlanReport.js';
 
 import { state } from './state.js';
@@ -78,6 +79,7 @@ export function processAllSections() {
   var M2_PER_PERSON = 50;
   var allStats = { axes: [], totalFootprint: 0, totalAptArea: 0, totalPopulation: 0, sections: [] };
   var sectionProfiles = []; // for QuotaAllocator
+  var quotaInputs = [];    // for Phase 0 QuotaResolver
 
   for (var si = 0; si < sects.length; si++) {
     var feature = sects[si];
@@ -213,6 +215,20 @@ export function processAllSections() {
             totalEstimate: wzPlan.wzStacks.length * residFloors,
             floorCount: floorCount
           });
+
+          // Collect for Phase 0 QuotaResolver
+          var lluCntQ = 0;
+          for (var qk in graph.nodes) {
+            if (!graph.nodes.hasOwnProperty(qk)) continue;
+            if (graph.nodes[qk].floor === 1 && graph.nodes[qk].type === 'llu') lluCntQ++;
+          }
+          quotaInputs.push({
+            key: lineId + '_' + fi,
+            N: N,
+            lluCount: lluCntQ,
+            floorCount: floorCount,
+            fl1Placed: fl1Placed
+          });
         }
 
         if (aptResult && aptResult.apartments) {
@@ -338,6 +354,53 @@ export function processAllSections() {
     state.lineFootprints[lineId] = lineFPsLL;
   }
 
+  // ── Phase 0: QuotaResolver — always runs after floor 1 ──
+  if (quotaInputs.length > 0) {
+    var quotaEventData = { sections: [] };
+    for (var qi = 0; qi < quotaInputs.length; qi++) {
+      var qIn = quotaInputs[qi];
+      var cellsPerFloor = 2 * qIn.N - qIn.lluCount;
+      var residentialFloors = qIn.floorCount - 1;
+      var totalCells = cellsPerFloor * residentialFloors;
+
+      var qResult = resolveQuota(totalCells, state.aptMix);
+      var remainResult = computeRemainder(
+        qResult.best ? qResult.best.counts : { '1K': 0, '2K': 0, '3K': 0, '4K': 0 },
+        qIn.fl1Placed, 1
+      );
+
+      console.log('[QuotaResolver] section:', qIn.key,
+        'cells/floor:', cellsPerFloor,
+        'floors:', residentialFloors,
+        'totalCells:', totalCells);
+      console.log(formatQuotaReport(qResult));
+      console.log('[QuotaResolver] Floor 2 placed:', JSON.stringify(qIn.fl1Placed));
+      console.log('[QuotaResolver] Remainder for floors 3..K:', JSON.stringify(remainResult.remainder),
+        remainResult.feasible ? '(feasible)' : '(SHORTFALL: ' + JSON.stringify(remainResult.shortfall) + ')');
+
+      quotaEventData.sections.push({
+        key: qIn.key,
+        cellsPerFloor: cellsPerFloor,
+        residentialFloors: residentialFloors,
+        totalCells: totalCells,
+        best: qResult.best,
+        candidates: qResult.candidates,
+        floor2Placed: qIn.fl1Placed,
+        remainder: remainResult,
+        feasible: remainResult.feasible,
+        debug: qResult.debug
+      });
+    }
+    state.eventBus.emit('quota:resolved', quotaEventData);
+    // Save for Pass 2
+    state._quotaResults = {};
+    for (var qi2 = 0; qi2 < quotaEventData.sections.length; qi2++) {
+      var qs = quotaEventData.sections[qi2];
+      state._quotaResults[qs.key] = qs;
+    }
+  }
+  // ── End Phase 0 ──────────────────────────────────────
+
   // ══════════════════════════════════════════════════════════
   // Pass 2: Building Plans with cross-section QuotaAllocator
   // All floor 1 profiles collected → compute adjusted mixes → planBuilding
@@ -387,6 +450,13 @@ export function processAllSections() {
         'mix:', JSON.stringify(sectionMix),
         '(global:', JSON.stringify(state.aptMix) + ')');
 
+      // Phase 0 quota (if available)
+      var phase0Quota = null;
+      if (state._quotaResults && state._quotaResults[dp.planKey] && state._quotaResults[dp.planKey].best) {
+        phase0Quota = state._quotaResults[dp.planKey].best.counts;
+        console.log('[section-gen] using Phase 0 quota:', JSON.stringify(phase0Quota));
+      }
+
       state.buildingPlans[dp.planKey] = planBuilding({
         graphNodes: dp.graphNodes,
         N: dp.N,
@@ -397,8 +467,10 @@ export function processAllSections() {
         perFloorInsol: perFloorInsol,
         lluCells: lluCellIds,
         sortedCorrNears: corrNears,
-        orientation: dp.orientation
+        orientation: dp.orientation,
+        quota: phase0Quota
       });
+
       state.graphDataMap[dp.planKey] = {
         nodes: dp.graphNodes, N: dp.N, params: dp.params,
         floorCount: dp.floorCount, perFloorInsol: perFloorInsol

@@ -18,6 +18,7 @@ import { DEFAULT_PARAMS, getParams, computeFloorCount, computeBuildingHeight, au
 import { renderBufferSection, onBuffersVisibility } from './panels/BufferPanel.js';
 import { renderInsolSection, updateInsolButton, showInsolResults, onInsolClear, onRaysVisibility } from './panels/InsolPanel.js';
 import { renderAptMixSection, showBuildingPlan, updateAptMixVisibility, resetDistributeState } from './panels/AptMixPanel.js';
+import { renderQuotaSection, updateQuotaResults, injectQuotaStyles } from './panels/QuotaPanel.js';
 import { updateStats } from './panels/StatsPanel.js';
 
 var PARAM_DEFS = [
@@ -52,10 +53,13 @@ export class FeaturePanel {
       '<div class="panel-body"><div id="feature-list"></div><div id="section-props"></div>' +
       '<div id="buffer-section"></div><div id="insol-section"></div>' +
       '<div id="apt-mix-section"></div>' +
+      '<div id="quota-section"></div>' +
       '<div id="stats-section"></div></div>';
     renderBufferSection();
     renderInsolSection();
     renderAptMixSection();
+    renderQuotaSection();
+    injectQuotaStyles();
   }
 
   // ── Insol button helper ─────────────────────────────
@@ -142,6 +146,7 @@ export class FeaturePanel {
     // Stats + building plan
     eventBus.on('section-gen:stats', function (stats) { updateStats(stats); });
     eventBus.on('building:plan:result', function (data) { showBuildingPlan(data.plan); });
+    eventBus.on('quota:resolved', function (data) { updateQuotaResults(data); });
   }
 
   // ── Feature list ────────────────────────────────────
