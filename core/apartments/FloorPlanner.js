@@ -686,125 +686,194 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     }
   }
 
-  // Phase 5: FINAL VALIDATION — fix cross-row, single-cell, and WZ stacking violations
-  var valChanged = true;
-  var valMax = 5;
-  while (valChanged && valMax > 0) {
-    valChanged = false;
-    valMax--;
+  // ══════════════════════════════════════════════════════════
+  // Phase FINAL: NORMALIZE — single pass that fixes ALL remaining issues
+  // Runs AFTER all construction phases. Checks every apartment.
+  // ══════════════════════════════════════════════════════════
+  var normChanged = true;
+  var normMax = 10;
+  while (normChanged && normMax > 0) {
+    normChanged = false;
+    normMax--;
 
     for (var ai = apartments.length - 1; ai >= 0; ai--) {
       var apt = apartments[ai];
-      if (apt.torec) continue; // torecs span rows via corridor — OK
 
-      // Collect numeric cells and their rows
-      var numCells = [];
-      var corrLabels = [];
+      // Count numeric cells and living
+      var aNumCells = [];
+      var aCorrLabels = [];
       for (var ci = 0; ci < apt.cells.length; ci++) {
-        if (typeof apt.cells[ci] === 'number') numCells.push(apt.cells[ci]);
-        else corrLabels.push(apt.cells[ci]);
+        if (typeof apt.cells[ci] === 'number') aNumCells.push(apt.cells[ci]);
+        else aCorrLabels.push(apt.cells[ci]);
       }
-      if (numCells.length === 0) continue;
-
-      // Check 1: WZ must be in activeSet (stacking + deactivation constraint)
-      var wzValid = activeSet[apt.wetCell] ? true : false;
-
-      // Check 2: all numeric cells must be same row as WZ (cross-row)
-      var wzRow = apt.wetCell < N ? 0 : 1;
-      var crossRow = false;
-      for (var ci = 0; ci < numCells.length; ci++) {
-        var cRow = numCells[ci] < N ? 0 : 1;
-        if (cRow !== wzRow) { crossRow = true; break; }
+      var aLiving = [];
+      for (var ci = 0; ci < aNumCells.length; ci++) {
+        if (aNumCells[ci] !== apt.wetCell) aLiving.push(aNumCells[ci]);
       }
 
-      // Check 3: must have at least 2 numeric cells (WZ + 1 living)
-      var tooSmall = numCells.length < 2;
+      // ── Check A: oversized (>4 living) — split ──
+      if (aLiving.length > 4) {
+        // Keep WZ + closest 3 living + corridors
+        aLiving.sort(function (a, b) {
+          return Math.abs(a - apt.wetCell) - Math.abs(b - apt.wetCell);
+        });
+        var keepLiving = aLiving.slice(0, 3);
+        var splitOff = aLiving.slice(3);
 
-      if (!wzValid || crossRow || tooSmall) {
-        // Dissolve this apartment: free all cells, absorb into neighbors
+        var newCells = [apt.wetCell];
+        for (var ci = 0; ci < keepLiving.length; ci++) newCells.push(keepLiving[ci]);
+        for (var ci = 0; ci < aCorrLabels.length; ci++) newCells.push(aCorrLabels[ci]);
+
+        var kFlags = [];
+        for (var ci = 0; ci < keepLiving.length; ci++) kFlags.push(getFlag(insolMap, keepLiving[ci]));
+        var kv = validateApartment(kFlags);
+
         var oldType = apt.type;
         if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
-        apartments.splice(ai, 1);
+        apt.cells = newCells;
+        apt.type = kv.valid ? kv.type : '3K';
+        apt.valid = kv.valid;
+        if (placed[apt.type] !== undefined) placed[apt.type]++;
 
-        // Try to absorb each cell into adjacent apartment
-        for (var ci = 0; ci < numCells.length; ci++) {
-          var fc = numCells[ci];
-          var fcRow = fc < N ? 0 : 1;
-          var absorbed = false;
-
-          // Try torec first (can cross rows)
+        // Split-off: absorb into adjacent apartments or create new
+        for (var si = 0; si < splitOff.length; si++) {
+          var sc = splitOff[si];
+          var sAbsorbed = false;
+          // Try same-row mid apartment with <4 living
           for (var bi = 0; bi < apartments.length; bi++) {
-            if (!apartments[bi].torec) continue;
-            if (torecNumericCount(apartments[bi]) >= 7) continue;
+            if (bi === ai) continue;
             var bCells = apartments[bi].cells;
+            var bLiv = 0;
             for (var bci = 0; bci < bCells.length; bci++) {
-              if (typeof bCells[bci] === 'number' && Math.abs(bCells[bci] - fc) === 1) {
-                apartments[bi].cells.push(fc);
-                absorbed = true;
+              if (typeof bCells[bci] === 'number' && bCells[bci] !== apartments[bi].wetCell) bLiv++;
+            }
+            if (bLiv >= 4) continue;
+            for (var bci = 0; bci < bCells.length; bci++) {
+              if (typeof bCells[bci] === 'number' && Math.abs(bCells[bci] - sc) === 1) {
+                apartments[bi].cells.push(sc);
+                bLiv++;
+                var bOld = apartments[bi].type;
+                apartments[bi].type = bLiv >= 4 ? '4K' : bLiv >= 3 ? '3K' : bLiv >= 2 ? '2K' : '1K';
+                if (apartments[bi].type !== bOld) {
+                  if (placed[bOld] !== undefined) placed[bOld]--;
+                  if (placed[apartments[bi].type] !== undefined) placed[apartments[bi].type]++;
+                }
+                sAbsorbed = true;
                 break;
               }
             }
-            if (absorbed) break;
+            if (sAbsorbed) break;
           }
+          if (!sAbsorbed) {
+            apartments.push({ cells: [sc], wetCell: sc, type: 'orphan', valid: false, torec: false, corridorLabel: null });
+          }
+        }
+        normChanged = true;
+        break; // restart
+      }
 
-          // Try same-row regular apartment
-          if (!absorbed) {
+      // ── Check B: non-torec with invalid WZ position ──
+      if (!apt.torec && !activeSet[apt.wetCell]) {
+        // Dissolve: push cells into adjacent apartments
+        var oldType = apt.type;
+        if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
+        apartments.splice(ai, 1);
+        for (var ci = 0; ci < aNumCells.length; ci++) {
+          var fc = aNumCells[ci];
+          var fcRow = fc < N ? 0 : 1;
+          var abs2 = false;
+          // Torec first
+          for (var bi = 0; bi < apartments.length; bi++) {
+            if (!apartments[bi].torec) continue;
+            var bNC = 0;
+            for (var bci = 0; bci < apartments[bi].cells.length; bci++) {
+              if (typeof apartments[bi].cells[bci] === 'number') bNC++;
+            }
+            if (bNC >= 7) continue;
+            for (var bci = 0; bci < apartments[bi].cells.length; bci++) {
+              if (typeof apartments[bi].cells[bci] === 'number' && Math.abs(apartments[bi].cells[bci] - fc) === 1) {
+                apartments[bi].cells.push(fc);
+                abs2 = true; break;
+              }
+            }
+            if (abs2) break;
+          }
+          // Same-row regular
+          if (!abs2) {
             for (var bi = 0; bi < apartments.length; bi++) {
               if (apartments[bi].torec) continue;
-              var bCells = apartments[bi].cells;
-              // Count living
-              var bLiv = 0;
-              for (var bci = 0; bci < bCells.length; bci++) {
-                if (typeof bCells[bci] === 'number' && bCells[bci] !== apartments[bi].wetCell) bLiv++;
+              var bLiv2 = 0;
+              for (var bci = 0; bci < apartments[bi].cells.length; bci++) {
+                if (typeof apartments[bi].cells[bci] === 'number' && apartments[bi].cells[bci] !== apartments[bi].wetCell) bLiv2++;
               }
-              if (bLiv >= 4) continue;
-              for (var bci = 0; bci < bCells.length; bci++) {
-                if (typeof bCells[bci] !== 'number') continue;
-                var adjRow = bCells[bci] < N ? 0 : 1;
-                if (adjRow !== fcRow) continue;
-                if (Math.abs(bCells[bci] - fc) === 1) {
+              if (bLiv2 >= 4) continue;
+              for (var bci = 0; bci < apartments[bi].cells.length; bci++) {
+                if (typeof apartments[bi].cells[bci] !== 'number') continue;
+                if ((apartments[bi].cells[bci] < N ? 0 : 1) !== fcRow) continue;
+                if (Math.abs(apartments[bi].cells[bci] - fc) === 1) {
                   apartments[bi].cells.push(fc);
-                  // Retype
-                  bLiv++;
-                  var bOld = apartments[bi].type;
-                  apartments[bi].type = bLiv >= 4 ? '4K' : bLiv >= 3 ? '3K' : bLiv >= 2 ? '2K' : '1K';
-                  if (apartments[bi].type !== bOld) {
-                    if (placed[bOld] !== undefined) placed[bOld]--;
+                  bLiv2++;
+                  var bOld2 = apartments[bi].type;
+                  apartments[bi].type = bLiv2 >= 4 ? '4K' : bLiv2 >= 3 ? '3K' : bLiv2 >= 2 ? '2K' : '1K';
+                  if (apartments[bi].type !== bOld2) {
+                    if (placed[bOld2] !== undefined) placed[bOld2]--;
                     if (placed[apartments[bi].type] !== undefined) placed[apartments[bi].type]++;
                   }
-                  absorbed = true;
-                  break;
+                  abs2 = true; break;
                 }
               }
-              if (absorbed) break;
+              if (abs2) break;
             }
           }
-
-          if (!absorbed) {
-            // Last resort: orphan (shouldn't happen often)
+          if (!abs2) {
             apartments.push({ cells: [fc], wetCell: fc, type: 'orphan', valid: false, torec: false, corridorLabel: null });
           }
         }
-        valChanged = true;
-        break; // restart scan
+        normChanged = true;
+        break;
       }
-    }
-  }
 
-  // Recount torec types after all validation
-  for (var ai = 0; ai < apartments.length; ai++) {
-    var apt = apartments[ai];
-    if (!apt.torec) continue;
-    var livCount = 0;
-    for (var ci = 0; ci < apt.cells.length; ci++) {
-      var c = apt.cells[ci];
-      if (typeof c === 'number' && c !== apt.wetCell) livCount++;
-    }
-    var oldType = apt.type;
-    apt.type = livCount >= 4 ? '4K' : livCount >= 3 ? '3K' : livCount >= 2 ? '2K' : '1K';
-    if (apt.type !== oldType) {
-      if (placed[oldType] !== undefined) placed[oldType]--;
-      if (placed[apt.type] !== undefined) placed[apt.type]++;
+      // ── Check C: non-torec cross-row ──
+      if (!apt.torec) {
+        var wzRow2 = apt.wetCell < N ? 0 : 1;
+        var hasCross = false;
+        for (var ci = 0; ci < aNumCells.length; ci++) {
+          if ((aNumCells[ci] < N ? 0 : 1) !== wzRow2) { hasCross = true; break; }
+        }
+        if (hasCross) {
+          // Same as Check B: dissolve
+          var oldType = apt.type;
+          if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
+          apartments.splice(ai, 1);
+          for (var ci = 0; ci < aNumCells.length; ci++) {
+            absorbSingleCell(aNumCells[ci], apartments, allocated, midWZ, N);
+          }
+          normChanged = true;
+          break;
+        }
+      }
+
+      // ── Check D: single-cell apartment (not orphan-typed) ──
+      if (aNumCells.length < 2 && apt.type !== 'orphan') {
+        var oldType = apt.type;
+        if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
+        apartments.splice(ai, 1);
+        for (var ci = 0; ci < aNumCells.length; ci++) {
+          absorbSingleCell(aNumCells[ci], apartments, allocated, midWZ, N);
+        }
+        normChanged = true;
+        break;
+      }
+
+      // ── Check E: type mismatch (e.g. type='4K' but only 2 living) ──
+      var correctType = aLiving.length >= 4 ? '4K' : aLiving.length >= 3 ? '3K' : aLiving.length >= 2 ? '2K' : aLiving.length >= 1 ? '1K' : 'orphan';
+      if (apt.type !== correctType && apt.type !== 'orphan') {
+        var oldType = apt.type;
+        apt.type = correctType;
+        if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
+        if (placed[correctType] !== undefined) placed[correctType]++;
+        // Don't restart — just a type fix
+      }
     }
   }
 
