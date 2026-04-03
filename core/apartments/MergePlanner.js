@@ -282,9 +282,12 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
   var targetCount = Math.max(2, Math.round(totalCells / targetAvgWidth));
   var mergesNeeded = Math.max(0, currentCount - targetCount);
 
-  // Scale: don't do all merges at once, spread across floors
-  var mergesThisFloor = Math.min(mergesNeeded, Math.ceil(mergesNeeded / Math.max(floorsLeft, 1)));
-  // At least 1 merge per floor if any are needed
+  // Scale: front-loaded — more merges on lower floors, fewer on upper
+  // sqrt(floorsLeft) gives 2-3 merges early, 1 merge late
+  var mergesThisFloor = Math.max(0, Math.ceil(mergesNeeded / Math.max(1, Math.sqrt(floorsLeft))));
+  // Cap: don't exceed what's actually needed or possible
+  if (mergesThisFloor > mergesNeeded) mergesThisFloor = mergesNeeded;
+  // At least 1 merge if any are needed
   if (mergesNeeded > 0 && mergesThisFloor === 0) mergesThisFloor = 1;
 
   // 3. Find and score all possible merge pairs
