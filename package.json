@@ -5,7 +5,8 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "preview": "vite preview"
+        "preview": "vite preview",
+        "test": "node --test test/apartments.test.js"
     },
     "dependencies": {
         "maplibre-gl": "^4.7.1",

@@ -9,13 +9,18 @@
  * No gap division (boundaries from previous floor).
  * WZ profile emerges naturally (merges = deactivations).
  *
+ * v2: Directed growth scoring — merges that are stepping stones toward
+ * larger needed types (2K→3K→4K chain) score positively even when
+ * the immediate merged type is not in deficit. Fixes chronic 4K under-production.
+ *
  * Algorithm per floor:
  *   1. Deep copy previous floor's apartments
  *   2. Compute merges_needed from remaining quota
- *   3. Select best merge pairs (adjacent, prefer paired WZ, insol-aware)
- *   4. Execute merges (deactivate 1 WZ per merge, cap at 4K)
- *   5. Assign corridors
- *   6. Update remaining
+ *   3. Boost merges when 3K/4K deficit > 25% of remaining
+ *   4. Select best merge pairs (adjacent, direct need OR growth path, insol-aware)
+ *   5. Execute merges (deactivate 1 WZ per merge, cap at 4K)
+ *   6. Rebalance boundary cells between neighbors
+ *   7. Reassign corridors
  */
 
 import { validateApartment, getFlag } from './ApartmentSolver.js';
@@ -150,6 +155,12 @@ function mergeApartments(aptA, aptB, insolMap) {
 /**
  * Score a potential merge pair for priority.
  * Higher score = merge first.
+ *
+ * Three tiers:
+ *   1. Direct need: merged type is in remaining quota → high score
+ *   2. Growth path: merged type is a stepping stone toward a larger
+ *      needed type (2K→3K→4K) → medium score
+ *   3. No benefit → 0
  */
 function scoreMergePair(aptA, aptB, insolMap, remaining) {
   var livingA = countLiving(aptA);
@@ -161,19 +172,47 @@ function scoreMergePair(aptA, aptB, insolMap, remaining) {
 
   var mergedType = aptType(mergedLiving);
 
-  // Prefer merges that produce types we need
+  // Bonuses (applied to both direct need and growth path)
+  var pairBonus = Math.abs(aptA.wetCell - aptB.wetCell) <= 2 ? 10 : 0;
+  var smallBonus = (livingA <= 1 && livingB <= 1) ? 5 : 0;
+
+  // Terminal bonus: 4K is the hardest type to produce (requires 2-floor
+  // growth chain). Scale with deficit — aggressive when many 4K needed,
+  // gentle when close to target. Capped to not dominate over 3K needs.
+  var terminalBonus = 0;
+  if (mergedType === '4K') {
+    var deficit4K = Math.max(0, remaining['4K'] || 0);
+    terminalBonus = Math.min(15, deficit4K * 2);
+  }
+
+  // Tier 1: Direct need — merged type is what we're looking for
   var need = remaining[mergedType] || 0;
-  if (need <= 0) return 0; // don't need this type
+  if (need > 0) {
+    return need + pairBonus + smallBonus + terminalBonus;
+  }
 
-  var score = need; // higher need = higher priority
+  // Tier 2: Growth path — merged type is a stepping stone to a larger needed type
+  // Chain: 1K → 2K → 3K → 4K. If merging to 2K and we need 3K or 4K,
+  // this merge is a valuable growth step.
+  var NEXT = { '1K': '2K', '2K': '3K', '3K': '4K' };
+  var growthNeed = 0;
+  var steps = 0;
+  var nextType = NEXT[mergedType];
+  while (nextType) {
+    steps++;
+    var n = remaining[nextType] || 0;
+    if (n > 0) growthNeed = Math.max(growthNeed, n);
+    nextType = NEXT[nextType];
+  }
 
-  // Bonus: paired WZ (adjacent WZ cells)
-  if (Math.abs(aptA.wetCell - aptB.wetCell) <= 2) score += 10;
+  if (growthNeed > 0) {
+    // Score: lower than direct need, penalized by distance in growth chain.
+    // steps=1: merge to 3K when need 4K (close), steps=2: merge to 2K when need 4K (far)
+    var growthScore = Math.max(1, Math.ceil(growthNeed / (steps + 1)));
+    return growthScore + Math.floor(pairBonus / 2) + Math.floor(smallBonus / 2);
+  }
 
-  // Bonus: both are smallest type (merge small → grow)
-  if (livingA <= 1 && livingB <= 1) score += 5;
-
-  return score;
+  return 0; // no growth benefit
 }
 
 // ── Corridor Assignment ──────────────────────────────
@@ -247,9 +286,10 @@ function reassignCorridors(apartments, sortedCorrNears, N) {
  * @param {number} floorsLeft - for scaling
  * @param {number} N
  * @param {Array<number>} sortedCorrNears
+ * @param {number} [targetMerges] - override merge count from TrajectoryPlanner
  * @returns {Object} { apartments, placed }
  */
-export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears) {
+export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges) {
   // 1. Deep copy
   var apartments = copyApartments(prevApartments);
 
@@ -282,13 +322,25 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
   var targetCount = Math.max(2, Math.round(totalCells / targetAvgWidth));
   var mergesNeeded = Math.max(0, currentCount - targetCount);
 
-  // Scale: front-loaded — more merges on lower floors, fewer on upper
-  // sqrt(floorsLeft) gives 2-3 merges early, 1 merge late
-  var mergesThisFloor = Math.max(0, Math.ceil(mergesNeeded / Math.max(1, Math.sqrt(floorsLeft))));
-  // Cap: don't exceed what's actually needed or possible
-  if (mergesThisFloor > mergesNeeded) mergesThisFloor = mergesNeeded;
-  // At least 1 merge if any are needed
-  if (mergesNeeded > 0 && mergesThisFloor === 0) mergesThisFloor = 1;
+  var mergesThisFloor;
+
+  if (targetMerges !== undefined && targetMerges > 0) {
+    // TrajectoryPlanner override: type-aware merge budget
+    mergesThisFloor = Math.min(targetMerges, currentCount - 2);
+  } else {
+    // Fallback: cell-width heuristic + growth boost
+    // Scale: front-loaded — more merges on lower floors, fewer on upper
+    mergesThisFloor = Math.max(0, Math.ceil(mergesNeeded / Math.max(1, Math.sqrt(floorsLeft))));
+    if (mergesThisFloor > mergesNeeded) mergesThisFloor = mergesNeeded;
+    if (mergesNeeded > 0 && mergesThisFloor === 0) mergesThisFloor = 1;
+
+    // Boost: when 3K/4K are heavily under-represented, allow extra merges
+    var largeDeficit = Math.max(0, remaining['3K'] || 0) + Math.max(0, remaining['4K'] || 0);
+    if (largeDeficit > 0 && sumR > 0 && largeDeficit / sumR > 0.25) {
+      var boost = Math.ceil(largeDeficit / Math.max(1, floorsLeft));
+      mergesThisFloor = Math.min(currentCount - 2, mergesThisFloor + boost);
+    }
+  }
 
   // 3. Find and score all possible merge pairs
   for (var m = 0; m < mergesThisFloor; m++) {
@@ -332,6 +384,11 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
 
   // 5. Rebalance: transfer boundary cells between adjacent apartments
   rebalance(apartments, remaining, insolMap, N);
+
+  // 5b. Growth rebalance: convert 3K+1K → 2K+2K when 4K is needed.
+  // Normal rebalance only fires on overproduction. This pass proactively
+  // creates 2K apartments that enable 2K+1K → 4K merges on next floor.
+  growthRebalance(apartments, remaining, insolMap, N);
 
   return finalize(apartments, remaining, sortedCorrNears, N);
 }
@@ -471,6 +528,77 @@ function transferCell(donor, receiver, N) {
   }
 
   return false;
+}
+
+// ── Growth Rebalance ────────────────────────────────
+
+/**
+ * Proactively convert 3K+1K adjacent pairs into 2K+2K
+ * when 4K apartments are needed in the quota.
+ *
+ * Growth chain: 3K → transfer 1 cell → 2K + 2K.
+ * Then on the next floor: 2K + 1K → merge → 4K.
+ *
+ * Normal rebalance only triggers on overproduction (remaining < 0).
+ * This pass triggers on GROWTH NEED (remaining['4K'] > 0).
+ *
+ * Limit: at most remaining['4K'] conversions per call,
+ * so we don't over-convert 3K into 2K.
+ */
+function growthRebalance(apartments, remaining, insolMap, N) {
+  var need4K = remaining['4K'] || 0;
+  if (need4K <= 0) return;
+
+  // Count current 3K apartments on this floor
+  var current3K = 0;
+  for (var ai = 0; ai < apartments.length; ai++) {
+    if (countLiving(apartments[ai]) === 3) current3K++;
+  }
+  if (current3K === 0) return;
+
+  // Proportional allocation: split 3K between direct quota and 4K growth.
+  // Ratio of 3K that should be converted to 2K for 4K trajectory.
+  var need3K = Math.max(0, remaining['3K'] || 0);
+  var ratio = need4K / Math.max(1, need3K + need4K);
+  var maxConversions = Math.max(need4K > 0 ? 1 : 0, Math.floor(current3K * ratio));
+
+  // Never convert more than we have or need
+  maxConversions = Math.min(maxConversions, current3K, need4K);
+
+  var conversions = 0;
+  var maxIter = 20;
+
+  for (var iter = 0; iter < maxIter && conversions < maxConversions; iter++) {
+    var found = false;
+
+    for (var ai = 0; ai < apartments.length; ai++) {
+      var livA = countLiving(apartments[ai]);
+      if (livA !== 3) continue;
+
+      for (var bi = 0; bi < apartments.length; bi++) {
+        if (bi === ai) continue;
+        var livB = countLiving(apartments[bi]);
+        if (livB !== 1) continue;
+        if (!areAdjacent(apartments[ai], apartments[bi], N)) continue;
+
+        var transferred = transferCell(apartments[ai], apartments[bi], N);
+        if (transferred) {
+          remaining['3K'] = (remaining['3K'] || 0) + 1;
+          remaining['1K'] = (remaining['1K'] || 0) + 1;
+          remaining['2K'] = (remaining['2K'] || 0) - 2;
+
+          apartments[ai].type = aptType(livA - 1);
+          apartments[bi].type = aptType(livB + 1);
+
+          conversions++;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+    if (!found) break;
+  }
 }
 
 function finalize(apartments, remaining, sortedCorrNears, N) {

@@ -1,11 +1,16 @@
 /**
- * FloorPlanner v7 — strict WZ monotonicity + zero unassigned.
+ * FloorPlanner v8 — strict WZ monotonicity + zero unassigned + quota-aware SWEEP.
  *
  * Rules:
  * - Active WZ stays WZ (never deactivated by cleanup)
  * - Stranded WZ steals 1 cell from largest neighbor
  * - ALL allocated cells included in apartment (type = min(living, 4))
- * - Final sweep guarantees every cell 0..2N-1 is assigned
+ * - SWEEP tier 1: respects per-WZ target cap from quota (wzCap)
+ * - SWEEP tier 2: hard cap 4 guarantees every cell 0..2N-1 is assigned
+ * - NORMALIZE: cursor-based scan, O(N × changes) instead of O(N²)
+ *
+ * Currently an alternative strategy to MergePlanner (active in BuildingPlanner v6).
+ * Use when composition-level control over apartment types is needed.
  */
 
 import { validateApartment, getFlag } from './ApartmentSolver.js';
@@ -151,6 +156,13 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
   }
   wzOrder.sort(function (a, b) { return b.targetLiving - a.targetLiving; });
 
+  // Per-WZ target cap from quota — prevents SWEEP from inflating types.
+  // Keyed by cell id, survives midWZ filtering after absorb phase.
+  var wzCap = {};
+  for (var i = 0; i < midWZ.length; i++) {
+    wzCap[midWZ[i]] = TYPE_LIVING[midTargets[i]] || 1;
+  }
+
   for (var wi = 0; wi < wzOrder.length; wi++) {
     var wz = wzOrder[wi].wz;
     var need = wzOrder[wi].targetLiving;
@@ -220,7 +232,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
   }
   for (var i = 0; i < midWZ.length; i++) sweepBarriers[midWZ[i]] = true;
 
-  // Pass 1: same-row, nearest WZ with <4 cells, no barrier crossing
+  // Pass 1: same-row, nearest WZ under TARGET cap, no barrier crossing
   for (var row = 0; row < 2; row++) {
     var rowStart = row === 0 ? 0 : N;
     var rowEnd = row === 0 ? N : 2 * N;
@@ -228,18 +240,18 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
       if (usedCells[c]) continue;
       var bestWZ = null;
       var bestDist = Infinity;
-      // First try: WZ with <4 cells, clear path, adjacent to group
+      // Tier 1: WZ under target cap (wzCap), clear path, adjacent to group
       for (var wi = 0; wi < midWZ.length; wi++) {
         var awz = midWZ[wi];
         var sameRow = (row === 0 && awz < N) || (row === 1 && awz >= N);
         if (!sameRow) continue;
         if (!isPathClear(c, awz, sweepBarriers)) continue;
-        if (allocated[awz].length >= 4) continue;
+        if (allocated[awz].length >= (wzCap[awz] || 4)) continue;
         if (allocated[awz].length > 0 && !isAdjacentToGroup(c, awz, allocated[awz])) continue;
         var d = Math.abs(c - awz);
         if (d < bestDist) { bestDist = d; bestWZ = awz; }
       }
-      // Fallback: same-row WZ with clear path + adjacent, cap 4
+      // Tier 2: same-row WZ under HARD cap 4, clear path + adjacent
       if (bestWZ === null) {
         bestDist = Infinity;
         for (var wi = 0; wi < midWZ.length; wi++) {
@@ -283,23 +295,36 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     }
   }
 
-  // Pass 2: remaining → same-row mid WZ, adjacent to existing allocation, cap 4
+  // Pass 2: remaining → same-row mid WZ, target cap first, then hard cap 4
   for (var c = 0; c < 2 * N; c++) {
     if (usedCells[c]) continue;
     var cRow = c < N ? 0 : 1;
     var bestWZ = null;
     var bestDist = Infinity;
-    // Same-row mid WZ with clear path + cap 4
+    // Tier 1: same-row mid WZ under TARGET cap with clear path
     for (var wi = 0; wi < midWZ.length; wi++) {
       var awz = midWZ[wi];
       var wzRow = awz < N ? 0 : 1;
       if (wzRow !== cRow) continue;
-      if (allocated[awz].length >= 4) continue;
+      if (allocated[awz].length >= (wzCap[awz] || 4)) continue;
       if (!isPathClear(c, awz, sweepBarriers)) continue;
       var d = Math.abs(c - awz);
       if (d < bestDist) { bestDist = d; bestWZ = awz; }
     }
-    // Relaxed: same-row, adjacent to existing group (wz or its cells), cap 4
+    // Tier 2: same-row under HARD cap 4, clear path
+    if (bestWZ === null) {
+      bestDist = Infinity;
+      for (var wi = 0; wi < midWZ.length; wi++) {
+        var awz = midWZ[wi];
+        var wzRow = awz < N ? 0 : 1;
+        if (wzRow !== cRow) continue;
+        if (allocated[awz].length >= 4) continue;
+        if (!isPathClear(c, awz, sweepBarriers)) continue;
+        var d = Math.abs(c - awz);
+        if (d < bestDist) { bestDist = d; bestWZ = awz; }
+      }
+    }
+    // Tier 3: same-row, adjacent to existing group, hard cap 4
     if (bestWZ === null) {
       bestDist = Infinity;
       for (var wi = 0; wi < midWZ.length; wi++) {
@@ -687,17 +712,18 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
   }
 
   // ══════════════════════════════════════════════════════════
-  // Phase FINAL: NORMALIZE — single pass that fixes ALL remaining issues
+  // Phase FINAL: NORMALIZE — cursor-based scan that fixes ALL remaining issues.
   // Runs AFTER all construction phases. Checks every apartment.
+  // On structural change (splice/push), cursor resets to end so new
+  // apartments get checked. Budget bounds total operations to O(N × changes).
   // ══════════════════════════════════════════════════════════
-  var normChanged = true;
-  var normMax = 10;
-  while (normChanged && normMax > 0) {
-    normChanged = false;
-    normMax--;
+  var normCursor = apartments.length - 1;
+  var normBudget = apartments.length * 5;
 
-    for (var ai = apartments.length - 1; ai >= 0; ai--) {
-      var apt = apartments[ai];
+  while (normCursor >= 0 && normBudget > 0) {
+    normBudget--;
+    var ai = normCursor;
+    var apt = apartments[ai];
 
       // Count numeric cells and living
       var aNumCells = [];
@@ -768,8 +794,8 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
             apartments.push({ cells: [sc], wetCell: sc, type: 'orphan', valid: false, torec: false, corridorLabel: null });
           }
         }
-        normChanged = true;
-        break; // restart
+        normCursor = apartments.length - 1; // re-scan from end (new apts may exist)
+        continue;
       }
 
       // ── Check B: non-torec with invalid WZ position ──
@@ -829,8 +855,8 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
             apartments.push({ cells: [fc], wetCell: fc, type: 'orphan', valid: false, torec: false, corridorLabel: null });
           }
         }
-        normChanged = true;
-        break;
+        normCursor = apartments.length - 1;
+        continue;
       }
 
       // ── Check C: non-torec cross-row ──
@@ -848,8 +874,8 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
           for (var ci = 0; ci < aNumCells.length; ci++) {
             absorbSingleCell(aNumCells[ci], apartments, null, null, N);
           }
-          normChanged = true;
-          break;
+          normCursor = apartments.length - 1;
+          continue;
         }
       }
 
@@ -861,8 +887,8 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         for (var ci = 0; ci < aNumCells.length; ci++) {
           absorbSingleCell(aNumCells[ci], apartments, null, null, N);
         }
-        normChanged = true;
-        break;
+        normCursor = apartments.length - 1;
+        continue;
       }
 
       // ── Check E: type mismatch (e.g. type='4K' but only 2 living) ──
@@ -872,9 +898,10 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         apt.type = correctType;
         if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
         if (placed[correctType] !== undefined) placed[correctType]++;
-        // Don't restart — just a type fix
+        // No structural change — no cursor reset
       }
-    }
+
+    normCursor--;
   }
 
   // ══════════════════════════════════════════════════════════

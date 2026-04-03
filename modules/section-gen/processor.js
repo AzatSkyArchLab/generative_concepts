@@ -49,6 +49,37 @@ function orientAxis(fpM) {
   return [b, a];
 }
 
+// ── Detail map builder (shared by floor 1 and upper floors) ──
+
+function buildAptDetailMap(apartments) {
+  var map = {};
+  for (var ai = 0; ai < apartments.length; ai++) {
+    var apt = apartments[ai];
+    var cells = apt.cells || [];
+    var pal = APT_COLORS[apt.type] || APT_COLORS['orphan'];
+    for (var ci = 0; ci < cells.length; ci++) {
+      var cid = cells[ci];
+      var role;
+      var color;
+      if (typeof cid === 'string') {
+        role = 'corridor';
+        color = pal.wet;
+      } else if (apt.type === 'orphan') {
+        role = 'orphan';
+        color = pal.living;
+      } else if (cid === apt.wetCell) {
+        role = 'wet';
+        color = pal.wet;
+      } else {
+        role = 'living';
+        color = pal.living;
+      }
+      map[cid] = { aptIdx: ai, type: apt.type, role: role, color: color, label: 'A' + ai + ' ' + apt.type };
+    }
+  }
+  return map;
+}
+
 // ── Main ──────────────────────────────────────────────
 
 export function processAllSections() {
@@ -482,33 +513,7 @@ export function processAllSections() {
 
           var flDetailMap = {};
           if (floorData) {
-            for (var fai = 0; fai < floorData.apartments.length; fai++) {
-              var fapt = floorData.apartments[fai];
-              var faCells = fapt.cells || [];
-              var faPal = APT_COLORS[fapt.type] || APT_COLORS['orphan'];
-              for (var fci = 0; fci < faCells.length; fci++) {
-                var fcid = faCells[fci];
-                var faRole;
-                var faColor;
-                if (typeof fcid === 'string') {
-                  faRole = 'corridor';
-                  faColor = faPal.wet;
-                } else if (fapt.type === 'orphan') {
-                  faRole = 'orphan';
-                  faColor = faPal.living;
-                } else if (fcid === fapt.wetCell) {
-                  faRole = 'wet';
-                  faColor = faPal.wet;
-                } else {
-                  faRole = 'living';
-                  faColor = faPal.living;
-                }
-                flDetailMap[fcid] = {
-                  aptIdx: fai, type: fapt.type, role: faRole, color: faColor,
-                  label: 'A' + fai + ' ' + fapt.type
-                };
-              }
-            }
+            flDetailMap = buildAptDetailMap(floorData.apartments);
           } else {
             flDetailMap = dp.detailMap;
           }

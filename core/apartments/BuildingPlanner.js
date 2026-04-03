@@ -1,14 +1,16 @@
 /**
- * BuildingPlanner v6 — merge-based architecture.
+ * BuildingPlanner v7 — merge-based architecture + trajectory planning.
  *
  * Floor 1: ApartmentSolver (all 1K, max WZ) — untouched.
- * Floors 2+: copy previous → merge adjacent → grow types.
+ * Floors 2+: TrajectoryPlanner computes type-aware merge budget,
+ *            MergePlanner executes merges with directed growth scoring.
  *
- * No TorecPlanner, no MidPlanner, no WZ profile computation.
- * One mechanism: merge. Everything else emerges.
+ * Growth chain: 1K+1K → 3K (merge) → 2K (rebalance) → 2K+1K → 4K (merge)
+ * Each 4K costs 2 merges across 2 floors. Budget accounts for this.
  */
 
 import { planFloorByMerge, computeGlobalQuota } from './MergePlanner.js';
+import { planMergeSchedule } from './TrajectoryPlanner.js';
 
 /**
  * Main entry point.
@@ -59,6 +61,11 @@ export function planBuilding(params) {
   console.log('[BuildingPlanner v6] floor1 placed:', JSON.stringify(floor1Placed));
   console.log('[BuildingPlanner v6] remaining:', JSON.stringify(remaining));
 
+  // ── Step 3b: Trajectory planning — type-aware merge schedule ──
+  var mergeSchedule = planMergeSchedule(floor1Count, remaining, residentialFloors);
+  console.log('[BuildingPlanner v6] merge budget:', mergeSchedule.budget,
+    'schedule:', JSON.stringify(mergeSchedule.schedule));
+
   // ── Step 4: Floor-by-floor merge ──
   var floors = [];
   floors.push({
@@ -74,8 +81,9 @@ export function planBuilding(params) {
   for (var fl = 2; fl <= residentialFloors; fl++) {
     var insolMap = perFloorInsol[fl] || {};
     var floorsLeft = residentialFloors - fl + 1;
+    var targetMerges = mergeSchedule.schedule[fl] || 0;
 
-    var result = planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears);
+    var result = planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges);
 
     floors.push({
       floor: fl,
