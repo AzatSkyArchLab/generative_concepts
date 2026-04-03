@@ -17,7 +17,7 @@ import { DEFAULT_PARAMS, getParams, computeFloorCount, computeBuildingHeight, au
 
 import { renderBufferSection, onBuffersVisibility } from './panels/BufferPanel.js';
 import { renderInsolSection, updateInsolButton, showInsolResults, onInsolClear, onRaysVisibility } from './panels/InsolPanel.js';
-import { renderAptMixSection, showBuildingPlan, updateAptMixVisibility, resetDistributeState } from './panels/AptMixPanel.js';
+import { renderAptMixSection, showBuildingPlan, resetBuildingPlans, updateAptMixVisibility, resetDistributeState } from './panels/AptMixPanel.js';
 import { renderQuotaSection, updateQuotaResults, injectQuotaStyles } from './panels/QuotaPanel.js';
 import { updateStats } from './panels/StatsPanel.js';
 
@@ -86,6 +86,7 @@ export class FeaturePanel {
       self._updateList(); self._updateProps(); self._refreshInsolButton();
       self._updateAptMixVisibility();
       resetDistributeState();
+      resetBuildingPlans();
     });
     eventBus.on('feature:selected', function (d) {
       self._selectedIds = [d.id]; self._editAxisId = null; self._editSelectedIndices = [];
@@ -145,7 +146,8 @@ export class FeaturePanel {
 
     // Stats + building plan
     eventBus.on('section-gen:stats', function (stats) { updateStats(stats); });
-    eventBus.on('building:plan:result', function (data) { showBuildingPlan(data.plan); });
+    eventBus.on('building:plans:reset', function () { resetBuildingPlans(); });
+    eventBus.on('building:plan:result', function (data) { showBuildingPlan(data.sectionKey, data.plan); });
     eventBus.on('quota:resolved', function (data) { updateQuotaResults(data); });
   }
 

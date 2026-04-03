@@ -779,14 +779,14 @@ html, body {
   color: var(--danger);
 }
 
-/* Reset button */
-.apt-mix-btn--reset {
+/* Reset / Report button — unified secondary */
+.apt-mix-btn--secondary {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
   margin-top: 4px;
 }
 
-.apt-mix-btn--reset:hover {
+.apt-mix-btn--secondary:hover {
   background: var(--border-color);
   color: var(--text-primary);
 }
@@ -794,7 +794,7 @@ html, body {
 /* Building plan results */
 .bplan-card {
   margin: 8px 12px;
-  padding: 8px;
+  padding: 10px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-secondary);
@@ -808,7 +808,15 @@ html, body {
   letter-spacing: 0.05em;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border-color);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+}
+
+.bplan-count {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .bplan-table {
@@ -836,6 +844,7 @@ html, body {
 
 .bplan-row small {
   color: var(--text-muted);
+  margin-left: 2px;
 }
 
 .bplan-type {
@@ -847,6 +856,35 @@ html, body {
 .bplan-over { color: var(--warning); font-weight: 600; }
 .bplan-under { color: var(--danger); font-weight: 600; }
 
+/* Percentage comparison bar */
+.bplan-bar {
+  position: relative;
+  height: 3px;
+  margin: 1px 0 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bplan-bar-target {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: var(--border-color);
+  border-radius: 2px;
+}
+
+.bplan-bar-actual {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: var(--primary);
+  border-radius: 2px;
+  opacity: 0.6;
+}
+
 .bplan-summary {
   padding-top: 6px;
   border-top: 1px solid var(--border-color);
@@ -855,13 +893,11 @@ html, body {
   color: var(--text-secondary);
 }
 
-.apt-mix-btn--report {
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  margin-top: 4px;
-}
+.bplan-sections { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-color); }
+.bplan-sec { padding: 4px 0; border-bottom: 1px solid var(--border-color); }
+.bplan-sec:last-child { border-bottom: none; }
+.bplan-sec-title { font-weight: 600; font-size: 10px; color: var(--text-primary); margin-bottom: 2px; word-break: break-all; }
+.bplan-sec-detail { font-size: 10px; color: var(--text-secondary); line-height: 1.4; }
+.bplan-sec-profile { font-size: 9px; color: var(--text-muted); margin-top: 2px; }
 
-.apt-mix-btn--report:hover {
-  background: var(--primary);
-  color: white;
-}
+/* (report button: uses .apt-mix-btn--secondary) */

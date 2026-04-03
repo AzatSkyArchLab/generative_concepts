@@ -669,13 +669,29 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
       var hasLeftNeighbor = fi > 0;
       var hasRightNeighbor = fi < storedFP.length - 1;
 
+      // Pre-compute neighbor floor counts for height-difference check
+      var leftFC = 0;
+      var rightFC = 0;
+      if (hasLeftNeighbor) {
+        var leftH = getSectionHeight(storedFP[fi - 1], params);
+        leftFC = computeFloorCount(leftH, params.firstFloorHeight, params.typicalFloorHeight);
+      }
+      if (hasRightNeighbor) {
+        var rightH = getSectionHeight(storedFP[fi + 1], params);
+        rightFC = computeFloorCount(rightH, params.firstFloorHeight, params.typicalFloorHeight);
+      }
+
       // Loop over all requested floors
       var buildingH = computeBuildingHeight(secH, params.firstFloorHeight, params.typicalFloorHeight);
       var fc = computeFloorCount(secH, params.firstFloorHeight, params.typicalFloorHeight);
       var actualMaxFloor = Math.min(floorEnd, fc - 1); // fc includes floor 0
 
       for (var fl = floorStart; fl <= actualMaxFloor; fl++) {
-        var points = generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighbor, fl, fp);
+        // Per-floor neighbor check: if this floor is above neighbor's roof → expose end wall
+        var flHasLeft = hasLeftNeighbor && fl < leftFC;
+        var flHasRight = hasRightNeighbor && fl < rightFC;
+
+        var points = generateFacadePoints(fpM, params, secH, flHasLeft, flHasRight, fl, fp);
         for (var pi = 0; pi < points.length; pi++) {
           var pt = points[pi];
           var rayResults = castSunRays(pt.position, sunVectors, _collisionMeshes);

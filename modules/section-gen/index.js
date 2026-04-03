@@ -119,6 +119,7 @@ var sectionGenModule = {
       state.aptMix = mix || state.aptMix;
       state.distributed = true;
       state.buildingPlans = {}; state.sectionMixes = null;
+      state.eventBus.emit('building:plans:reset');
       state.eventBus.emit('insolation:run-multi-floor');
     }));
     state.unsubs.push(state.eventBus.on('apt-mix:changed', function (mix) {

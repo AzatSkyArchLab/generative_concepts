@@ -481,7 +481,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
   for (var c = 0; c < 2 * N; c++) {
     if (usedCells[c]) continue;
     if (blocked[c]) continue;
-    var absorbed = absorbSingleCell(c, apartments, allocated, midWZ, N);
+    var absorbed = absorbSingleCell(c, apartments, null, null, N);
     usedCells[c] = true;
     if (!absorbed) {
       apartments.push({ cells: [c], wetCell: c, type: 'orphan', valid: false, torec: false, corridorLabel: null });
@@ -846,7 +846,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
           if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
           apartments.splice(ai, 1);
           for (var ci = 0; ci < aNumCells.length; ci++) {
-            absorbSingleCell(aNumCells[ci], apartments, allocated, midWZ, N);
+            absorbSingleCell(aNumCells[ci], apartments, null, null, N);
           }
           normChanged = true;
           break;
@@ -859,7 +859,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         if (placed[oldType] !== undefined && placed[oldType] > 0) placed[oldType]--;
         apartments.splice(ai, 1);
         for (var ci = 0; ci < aNumCells.length; ci++) {
-          absorbSingleCell(aNumCells[ci], apartments, allocated, midWZ, N);
+          absorbSingleCell(aNumCells[ci], apartments, null, null, N);
         }
         normChanged = true;
         break;
@@ -875,6 +875,44 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
         // Don't restart — just a type fix
       }
     }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // FINAL RECOUNT: recompute apartment types and placed counter
+  // from actual cell data. This corrects any drift accumulated
+  // through SWEEP, NORMALIZE, absorbSingleCell, and torec pushes.
+  // ══════════════════════════════════════════════════════════
+  placed = { '1K': 0, '2K': 0, '3K': 0, '4K': 0 };
+  for (var ai = 0; ai < apartments.length; ai++) {
+    var apt = apartments[ai];
+    if (apt.type === 'orphan') continue;
+    // Count numeric cells and living
+    var rcNumCells = [];
+    for (var ci = 0; ci < apt.cells.length; ci++) {
+      if (typeof apt.cells[ci] === 'number') rcNumCells.push(apt.cells[ci]);
+    }
+    var rcLivCount = 0;
+    for (var ci = 0; ci < rcNumCells.length; ci++) {
+      if (rcNumCells[ci] !== apt.wetCell) rcLivCount++;
+    }
+    // Fix type
+    var rcType = rcLivCount >= 4 ? '4K' : rcLivCount >= 3 ? '3K' : rcLivCount >= 2 ? '2K' : rcLivCount >= 1 ? '1K' : 'orphan';
+    if (rcType === 'orphan' && rcNumCells.length < 2) {
+      apt.type = 'orphan';
+      apt.valid = false;
+    } else {
+      apt.type = rcType;
+      // Re-validate insolation
+      var rcLiving = [];
+      for (var ci = 0; ci < rcNumCells.length; ci++) {
+        if (rcNumCells[ci] !== apt.wetCell) rcLiving.push(rcNumCells[ci]);
+      }
+      var rcFlags = [];
+      for (var ci = 0; ci < rcLiving.length; ci++) rcFlags.push(getFlag(insolMap, rcLiving[ci]));
+      var rcV = validateApartment(rcFlags);
+      apt.valid = rcV.valid;
+    }
+    if (placed[apt.type] !== undefined) placed[apt.type]++;
   }
 
   return { apartments: apartments, placed: placed, unplaced: [] };
@@ -1134,16 +1172,19 @@ function createOrphanApartment(cells, insolMap, wzStackSet) {
  */
 function absorbSingleCell(c, apartments, allocated, midWZ, N) {
   var cRow = c < N ? 0 : 1;
-  // Try mid WZ apartments: same-row, adjacent, <4 living
-  for (var wi = 0; wi < midWZ.length; wi++) {
-    var wz = midWZ[wi];
-    var wzRow = wz < N ? 0 : 1;
-    if (wzRow !== cRow) continue;
-    var group = allocated[wz];
-    if (!group || group.length >= 4) continue;
-    if (isAdjacentToGroup(c, wz, group)) {
-      group.push(c);
-      return true;
+  // Try mid WZ allocated groups (ONLY valid before Phase 4 BUILD;
+  // after BUILD, callers pass null to skip this dead path)
+  if (midWZ && allocated) {
+    for (var wi = 0; wi < midWZ.length; wi++) {
+      var wz = midWZ[wi];
+      var wzRow = wz < N ? 0 : 1;
+      if (wzRow !== cRow) continue;
+      var group = allocated[wz];
+      if (!group || group.length >= 4) continue;
+      if (isAdjacentToGroup(c, wz, group)) {
+        group.push(c);
+        return true;
+      }
     }
   }
   // Try torec: adjacent, cap 7 numeric (torecs span rows via corridor — OK)
