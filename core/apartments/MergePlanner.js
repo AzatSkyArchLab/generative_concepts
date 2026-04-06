@@ -289,7 +289,7 @@ function reassignCorridors(apartments, sortedCorrNears, N) {
  * @param {number} [targetMerges] - override merge count from TrajectoryPlanner
  * @returns {Object} { apartments, placed }
  */
-export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges) {
+export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges, floorTarget) {
   // 1. Deep copy
   var apartments = copyApartments(prevApartments);
 
@@ -303,38 +303,33 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
     weightedSum += r * TYPE_WIDTH[types[i]];
   }
 
-  if (sumR === 0) {
-    // No quota left — return as-is
+  // Use remaining for merge scoring (stable signal with enough range).
+  // floorTarget is used for a final rebalance pass to fine-tune types.
+  var scoreRef = remaining;
+
+  if (sumR === 0 && !floorTarget) {
     return finalize(apartments, remaining, sortedCorrNears, N);
   }
 
-  var targetAvgWidth = weightedSum / sumR;
   var currentCount = apartments.length;
-
-  // Count total mid cells
-  var totalCells = 0;
-  for (var ai = 0; ai < apartments.length; ai++) {
-    for (var ci = 0; ci < apartments[ai].cells.length; ci++) {
-      if (typeof apartments[ai].cells[ci] === 'number') totalCells++;
-    }
-  }
-
-  var targetCount = Math.max(2, Math.round(totalCells / targetAvgWidth));
-  var mergesNeeded = Math.max(0, currentCount - targetCount);
-
   var mergesThisFloor;
 
-  if (targetMerges !== undefined && targetMerges > 0) {
-    // TrajectoryPlanner override: type-aware merge budget
-    mergesThisFloor = Math.min(targetMerges, currentCount - 2);
+  if (targetMerges !== undefined && targetMerges !== null) {
+    mergesThisFloor = Math.min(Math.max(0, targetMerges), currentCount - 2);
   } else {
-    // Fallback: cell-width heuristic + growth boost
-    // Scale: front-loaded — more merges on lower floors, fewer on upper
+    var totalCells = 0;
+    for (var ai = 0; ai < apartments.length; ai++) {
+      for (var ci = 0; ci < apartments[ai].cells.length; ci++) {
+        if (typeof apartments[ai].cells[ci] === 'number') totalCells++;
+      }
+    }
+    var targetAvgWidth = sumR > 0 ? weightedSum / sumR : 2;
+    var targetCount = Math.max(2, Math.round(totalCells / targetAvgWidth));
+    var mergesNeeded = Math.max(0, currentCount - targetCount);
     mergesThisFloor = Math.max(0, Math.ceil(mergesNeeded / Math.max(1, Math.sqrt(floorsLeft))));
     if (mergesThisFloor > mergesNeeded) mergesThisFloor = mergesNeeded;
     if (mergesNeeded > 0 && mergesThisFloor === 0) mergesThisFloor = 1;
 
-    // Boost: when 3K/4K are heavily under-represented, allow extra merges
     var largeDeficit = Math.max(0, remaining['3K'] || 0) + Math.max(0, remaining['4K'] || 0);
     if (largeDeficit > 0 && sumR > 0 && largeDeficit / sumR > 0.25) {
       var boost = Math.ceil(largeDeficit / Math.max(1, floorsLeft));
@@ -343,20 +338,24 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
   }
 
   // 3. Find and score all possible merge pairs
+  var isScheduled = (targetMerges !== undefined && targetMerges !== null && targetMerges > 0);
+
   for (var m = 0; m < mergesThisFloor; m++) {
     var bestScore = -1;
     var bestI = -1;
     var bestJ = -1;
 
     for (var ai = 0; ai < apartments.length; ai++) {
-      if (countLiving(apartments[ai]) >= 4) continue; // already 4K
+      if (countLiving(apartments[ai]) >= 4) continue;
 
       for (var bi = ai + 1; bi < apartments.length; bi++) {
         if (countLiving(apartments[bi]) >= 4) continue;
-
         if (!areAdjacent(apartments[ai], apartments[bi], N)) continue;
 
-        var score = scoreMergePair(apartments[ai], apartments[bi], insolMap, remaining);
+        var score = scoreMergePair(apartments[ai], apartments[bi], insolMap, scoreRef);
+        // For scheduled merges, any valid merge (score >= 0) is acceptable.
+        // Score 0 just means "no type preference" — still valid for count reduction.
+        if (isScheduled && score === 0) score = 1;
         if (score > bestScore) {
           bestScore = score;
           bestI = ai;
@@ -365,30 +364,37 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
       }
     }
 
-    if (bestI < 0 || bestScore <= 0) break; // no valid merge found
+    if (bestI < 0 || bestScore < 0) break;
 
     // 4. Execute merge
     var oldTypeA = apartments[bestI].type;
     var oldTypeB = apartments[bestJ].type;
     var merged = mergeApartments(apartments[bestI], apartments[bestJ], insolMap);
 
-    // Update remaining: remove old types, add new
+    // Update remaining
     if (remaining[oldTypeA] !== undefined) remaining[oldTypeA]++;
     if (remaining[oldTypeB] !== undefined) remaining[oldTypeB]++;
     if (remaining[merged.type] !== undefined) remaining[merged.type]--;
 
-    // Replace A with merged, remove B
     apartments[bestI] = merged;
     apartments.splice(bestJ, 1);
   }
 
-  // 5. Rebalance: transfer boundary cells between adjacent apartments
+  // 5. Rebalance using global remaining
   rebalance(apartments, remaining, insolMap, N);
 
-  // 5b. Growth rebalance: convert 3K+1K → 2K+2K when 4K is needed.
-  // Normal rebalance only fires on overproduction. This pass proactively
-  // creates 2K apartments that enable 2K+1K → 4K merges on next floor.
-  growthRebalance(apartments, remaining, insolMap, N);
+  // 5b. Growth rebalance for 4K trajectory
+  if ((remaining['4K'] || 0) > 0) {
+    growthRebalance(apartments, remaining, insolMap, N);
+  }
+
+  // 5c. Floor-target rebalance: align this floor with floorTarget.
+  // After merges and global rebalance, fine-tune type distribution
+  // to match the per-floor ideal. Only converts when the floor has
+  // surplus of one type and deficit of a neighbor type (e.g., 3K→2K).
+  if (floorTarget) {
+    floorTargetRebalance(apartments, floorTarget, insolMap, N);
+  }
 
   return finalize(apartments, remaining, sortedCorrNears, N);
 }
@@ -598,6 +604,93 @@ function growthRebalance(apartments, remaining, insolMap, N) {
       if (found) break;
     }
     if (!found) break;
+  }
+}
+
+// ── Floor-Target Rebalance ────────────────────────────
+
+/**
+ * Fine-tune apartment types on this floor to match floorTarget.
+ *
+ * After merges and global rebalance, the floor may have surplus of
+ * one type (e.g., 3K) and deficit of another (e.g., 2K). This pass
+ * transfers cells between adjacent apartments to fix the distribution.
+ *
+ * Only fires when it can produce a net improvement in L1 deviation
+ * from floorTarget. Does not affect global remaining.
+ */
+function floorTargetRebalance(apartments, floorTarget, insolMap, N) {
+  var types = ['1K', '2K', '3K', '4K'];
+  var maxIter = 20;
+
+  for (var iter = 0; iter < maxIter; iter++) {
+    // Compute current floor placement
+    var placed = { '1K': 0, '2K': 0, '3K': 0, '4K': 0 };
+    for (var ai = 0; ai < apartments.length; ai++) {
+      var t = apartments[ai].type;
+      if (placed[t] !== undefined) placed[t]++;
+    }
+
+    // Compute deficit
+    var deficit = {};
+    var totalAbsDev = 0;
+    for (var i = 0; i < types.length; i++) {
+      deficit[types[i]] = (floorTarget[types[i]] || 0) - (placed[types[i]] || 0);
+      totalAbsDev += Math.abs(deficit[types[i]]);
+    }
+
+    if (totalAbsDev <= 1) break; // close enough
+
+    // Find a transfer that reduces total deviation
+    var improved = false;
+
+    for (var ai = 0; ai < apartments.length; ai++) {
+      var livA = countLiving(apartments[ai]);
+      var typeA = apartments[ai].type;
+      if (deficit[typeA] >= 0) continue; // not oversupplied
+
+      for (var bi = 0; bi < apartments.length; bi++) {
+        if (bi === ai) continue;
+        if (!areAdjacent(apartments[ai], apartments[bi], N)) continue;
+
+        var livB = countLiving(apartments[bi]);
+        var typeB = apartments[bi].type;
+
+        // Try shrink A (surplus type), grow B
+        if (livA >= 2 && livB + 1 <= 4) {
+          var newTypeA = aptType(livA - 1);
+          var newTypeB = aptType(livB + 1);
+
+          // Check if this reduces total deviation
+          var oldDev = Math.abs(deficit[typeA]) + Math.abs(deficit[typeB])
+            + Math.abs(deficit[newTypeA] || 0) + Math.abs(deficit[newTypeB] || 0);
+          var dA = (deficit[typeA] || 0) + 1;
+          var dB = (deficit[typeB] || 0) + 1;
+          var dNA = (deficit[newTypeA] || 0) - 1;
+          var dNB = (deficit[newTypeB] || 0) - 1;
+          // Adjust for same-type transitions
+          if (typeA === newTypeA) { dA = deficit[typeA]; dNA = deficit[newTypeA]; }
+          if (typeB === newTypeB) { dB = deficit[typeB]; dNB = deficit[newTypeB]; }
+          if (typeA === newTypeB) { dA = deficit[typeA] + 1; dNB = deficit[newTypeB] - 1; }
+          if (newTypeA === typeB) { dNA = deficit[newTypeA] - 1; dB = deficit[typeB] + 1; }
+
+          var newDev = Math.abs(dA) + Math.abs(dB) + Math.abs(dNA) + Math.abs(dNB);
+
+          if (newDev < oldDev) {
+            var transferred = transferCell(apartments[ai], apartments[bi], N);
+            if (transferred) {
+              apartments[ai].type = newTypeA;
+              apartments[bi].type = newTypeB;
+              improved = true;
+              break;
+            }
+          }
+        }
+      }
+      if (improved) break;
+    }
+
+    if (!improved) break;
   }
 }
 

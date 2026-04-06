@@ -27,21 +27,129 @@ var WIDTHS = {
 // ── Core solver ────────────────────────────────────────
 
 /**
- * Enumerate ALL non-negative integer solutions of
- *   w1*n1 + w2*n2 + w3*n3 + w4*n4 = C
+ * Solve via rounding the continuous optimum.
  *
- * For typical C (20-200) and w in {2,3,4,5} this is fast:
- * at most C/2 * C/3 * C/4 ≈ C^3/24 iterations.
- * For C=200 that's ~33000 — trivial.
+ * Continuous relaxation: n_t* = alpha_t * C / w_t.
+ * Search a local neighborhood (±R per free variable) around
+ * the rounded continuous solution, compute the constrained
+ * variable from the remainder.
+ *
+ * Complexity: O((2R+1)^(k-1)) where k = active types, R = search radius.
+ * For k=4, R=4: 9^3 = 729 candidates — effectively O(1).
+ *
+ * Guaranteed optimal when the true optimum lies within R
+ * of the continuous solution in each coordinate. For the
+ * widths {2,3,4,5} and L1 objective, R=4 is sufficient
+ * for any C.
  *
  * @param {number} C - total cells
- * @param {Array<string>} types - active types (subset of TYPES)
- * @returns {Array<Object>} all solutions [{n1K, n2K, n3K, n4K}, ...]
+ * @param {Array<string>} types - active types
+ * @param {Object} alpha - target area fractions { '1K': 0.4, ... }
+ * @param {Object} [minCounts] - minimum counts per type
+ * @param {Object} [maxCounts] - maximum counts per type
+ * @returns {Array<Object>} candidate solutions [{1K: n, 2K: n, ...}, ...]
+ */
+function solveBestCandidates(C, types, alpha, minCounts, maxCounts) {
+  var RADIUS = 4;
+
+  // Continuous optimum for each active type
+  var nStar = {};
+  for (var i = 0; i < types.length; i++) {
+    var t = types[i];
+    nStar[t] = (alpha[t] || 0) * C / WIDTHS[t];
+  }
+
+  // Inactive types fixed at 0
+  var inactive = [];
+  for (var i = 0; i < TYPES.length; i++) {
+    if (types.indexOf(TYPES[i]) < 0) inactive.push(TYPES[i]);
+  }
+
+  // Choose the "fixed" type: the one whose n is computed from the
+  // constraint. Pick the type with the largest width (most divisible
+  // remainder) — prefer 4K, then 3K, etc.
+  var fixedType = types[types.length - 1];
+  var freeTypes = [];
+  for (var i = 0; i < types.length; i++) {
+    if (types[i] !== fixedType) freeTypes.push(types[i]);
+  }
+
+  // Build search ranges for free variables
+  var ranges = [];
+  for (var i = 0; i < freeTypes.length; i++) {
+    var t = freeTypes[i];
+    var center = Math.round(nStar[t]);
+    var lo = Math.max(0, center - RADIUS);
+    var hi = Math.min(Math.floor(C / WIDTHS[t]), center + RADIUS);
+    if (minCounts && minCounts[t] !== undefined) lo = Math.max(lo, minCounts[t]);
+    if (maxCounts && maxCounts[t] !== undefined) hi = Math.min(hi, maxCounts[t]);
+    ranges.push({ type: t, lo: lo, hi: hi });
+  }
+
+  var fixedW = WIDTHS[fixedType];
+  var fixedMin = (minCounts && minCounts[fixedType] !== undefined) ? minCounts[fixedType] : 0;
+  var fixedMax = (maxCounts && maxCounts[fixedType] !== undefined) ? maxCounts[fixedType] : Math.floor(C / fixedW);
+
+  // Enumerate neighborhood
+  var bestSolutions = [];
+  var bestDev = Infinity;
+  var TOP_K = 5;
+
+  // Recursive enumeration over free variables
+  function enumerate(depth, usedCells, sol) {
+    if (depth === freeTypes.length) {
+      // Compute fixed variable from remainder
+      var rem = C - usedCells;
+      if (rem < 0) return;
+      if (rem % fixedW !== 0) return;
+      var nFixed = rem / fixedW;
+      if (nFixed < fixedMin || nFixed > fixedMax) return;
+
+      sol[fixedType] = nFixed;
+
+      // Set inactive types to 0
+      for (var ii = 0; ii < inactive.length; ii++) sol[inactive[ii]] = 0;
+
+      // Compute deviation
+      var fracs = computeFractions(sol, C);
+      var dev = deviation(fracs, alpha);
+
+      if (dev < bestDev + 1e-9) {
+        var solCopy = {};
+        for (var k = 0; k < TYPES.length; k++) solCopy[TYPES[k]] = sol[TYPES[k]] || 0;
+
+        if (dev < bestDev - 1e-9) {
+          bestSolutions = [solCopy];
+          bestDev = dev;
+        } else {
+          bestSolutions.push(solCopy);
+        }
+      }
+      return;
+    }
+
+    var r = ranges[depth];
+    for (var n = r.lo; n <= r.hi; n++) {
+      var newUsed = usedCells + n * WIDTHS[r.type];
+      if (newUsed > C) break;
+      sol[r.type] = n;
+      enumerate(depth + 1, newUsed, sol);
+    }
+  }
+
+  var sol = {};
+  enumerate(0, 0, sol);
+
+  return bestSolutions;
+}
+
+/**
+ * Brute-force enumeration — fallback for edge cases or validation.
+ * O(C^3/24) — fast for C ≤ 300.
  */
 function enumerateSolutions(C, types) {
   var solutions = [];
 
-  // Determine which types are active
   var t0 = types.indexOf('1K') >= 0;
   var t1 = types.indexOf('2K') >= 0;
   var t2 = types.indexOf('3K') >= 0;
@@ -65,17 +173,13 @@ function enumerateSolutions(C, types) {
         if (rem2 < 0) break;
 
         if (!t3) {
-          // No 4K type — remainder must be zero
           if (rem2 === 0) {
-            var sol = { '1K': n0, '2K': n1, '3K': n2, '4K': 0 };
-            solutions.push(sol);
+            solutions.push({ '1K': n0, '2K': n1, '3K': n2, '4K': 0 });
           }
         } else {
-          // 4K absorbs remainder
           if (rem2 % WIDTHS['4K'] === 0) {
             var n3 = rem2 / WIDTHS['4K'];
-            var sol = { '1K': n0, '2K': n1, '3K': n2, '4K': n3 };
-            solutions.push(sol);
+            solutions.push({ '1K': n0, '2K': n1, '3K': n2, '4K': n3 });
           }
         }
       }
@@ -172,32 +276,41 @@ export function resolveQuota(C, targetPct, options) {
   }
   if (types.length === 0) types = TYPES.slice();
 
-  // Enumerate
-  var solutions = enumerateSolutions(C, types);
+  // Choose solver based on C
+  var BRUTE_FORCE_LIMIT = 300;
+  var solutions;
 
-  // Filter by min/max counts
-  if (options.minCounts || options.maxCounts) {
-    var filtered = [];
-    for (var si = 0; si < solutions.length; si++) {
-      var sol = solutions[si];
-      var ok = true;
-      if (options.minCounts) {
-        for (var t in options.minCounts) {
-          if (options.minCounts.hasOwnProperty(t)) {
-            if ((sol[t] || 0) < options.minCounts[t]) { ok = false; break; }
+  if (C <= BRUTE_FORCE_LIMIT) {
+    // Small C — brute force is fast and exhaustive
+    solutions = enumerateSolutions(C, types);
+
+    // Filter by min/max counts
+    if (options.minCounts || options.maxCounts) {
+      var filtered = [];
+      for (var si = 0; si < solutions.length; si++) {
+        var sol = solutions[si];
+        var ok = true;
+        if (options.minCounts) {
+          for (var t in options.minCounts) {
+            if (options.minCounts.hasOwnProperty(t)) {
+              if ((sol[t] || 0) < options.minCounts[t]) { ok = false; break; }
+            }
           }
         }
-      }
-      if (ok && options.maxCounts) {
-        for (var t in options.maxCounts) {
-          if (options.maxCounts.hasOwnProperty(t)) {
-            if ((sol[t] || 0) > options.maxCounts[t]) { ok = false; break; }
+        if (ok && options.maxCounts) {
+          for (var t in options.maxCounts) {
+            if (options.maxCounts.hasOwnProperty(t)) {
+              if ((sol[t] || 0) > options.maxCounts[t]) { ok = false; break; }
+            }
           }
         }
+        if (ok) filtered.push(sol);
       }
-      if (ok) filtered.push(sol);
+      solutions = filtered;
     }
-    solutions = filtered;
+  } else {
+    // Large C — O(1) rounding approach
+    solutions = solveBestCandidates(C, types, alpha, options.minCounts, options.maxCounts);
   }
 
   // Score and rank

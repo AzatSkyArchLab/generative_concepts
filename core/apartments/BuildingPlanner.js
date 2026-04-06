@@ -7,10 +7,15 @@
  *
  * Growth chain: 1K+1K → 3K (merge) → 2K (rebalance) → 2K+1K → 4K (merge)
  * Each 4K costs 2 merges across 2 floors. Budget accounts for this.
+ *
+ * v7.1: Fixed remaining-tracking bug — each floor's base placement
+ * is now subtracted from remaining before merge scoring.
+ * Area-based quota via QuotaResolver replaces count-based computeGlobalQuota.
  */
 
 import { planFloorByMerge, computeGlobalQuota } from './MergePlanner.js';
 import { planMergeSchedule } from './TrajectoryPlanner.js';
+import { resolveQuota, WIDTHS } from './QuotaResolver.js';
 
 /**
  * Main entry point.
@@ -33,17 +38,39 @@ export function planBuilding(params) {
 
   var types = ['1K', '2K', '3K', '4K'];
 
-  // ── Step 1: Estimate total apartments ──
-  // Start with floor 1 count, assume gradual reduction from merges.
-  // Rough: avg apartments/floor ≈ floor1 count × 0.7 (30% merge over building)
+  // ── Step 1: Estimate total cells across all residential floors ──
+  // Floor 1 has a known cell count. Upper floors lose cells through
+  // WZ deactivation (1 cell lost per merge). Use merge budget to estimate.
   var floor1Count = floor1Apartments.length;
-  var estAvgPerFloor = Math.round(floor1Count * 0.75);
-  var estTotal = floor1Count + estAvgPerFloor * (residentialFloors - 1);
 
-  // ── Step 2: Global quota ──
-  var quota = computeGlobalQuota(estTotal, mix);
+  // Count cells on floor 1
+  var floor1Cells = 0;
+  for (var i = 0; i < floor1Apartments.length; i++) {
+    var apt = floor1Apartments[i];
+    for (var ci = 0; ci < apt.cells.length; ci++) {
+      if (typeof apt.cells[ci] === 'number') floor1Cells++;
+    }
+  }
 
-  console.log('[BuildingPlanner v6] estimated total:', estTotal,
+  // For estimation: total cells ≈ floor1Cells × residentialFloors
+  // (WZ deactivation removes cells but they remain in the floor —
+  //  deactivated WZ just becomes living in the merged apartment)
+  var totalCells = floor1Cells * residentialFloors;
+
+  // ── Step 2: Area-based global quota ──
+  // Use QuotaResolver: find n_t such that Σ n_t·w_t = totalCells
+  // and n_t·w_t/totalCells ≈ alpha_t (area fractions).
+  var quotaResult = resolveQuota(totalCells, mix);
+  var quota;
+  if (quotaResult.best) {
+    quota = quotaResult.best.counts;
+  } else {
+    // Fallback: count-based quota
+    var estTotal = floor1Count + Math.round(floor1Count * 0.75) * (residentialFloors - 1);
+    quota = computeGlobalQuota(estTotal, mix);
+  }
+
+  console.log('[BuildingPlanner v7.1] totalCells:', totalCells,
     'floor1:', floor1Count, 'quota:', JSON.stringify(quota));
 
   // ── Step 3: Initialize remaining ──
@@ -58,13 +85,30 @@ export function planBuilding(params) {
     remaining[types[i]] = (quota[types[i]] || 0) - (floor1Placed[types[i]] || 0);
   }
 
-  console.log('[BuildingPlanner v6] floor1 placed:', JSON.stringify(floor1Placed));
-  console.log('[BuildingPlanner v6] remaining:', JSON.stringify(remaining));
+  console.log('[BuildingPlanner v7.1] floor1 placed:', JSON.stringify(floor1Placed));
+  console.log('[BuildingPlanner v7.1] remaining:', JSON.stringify(remaining));
 
   // ── Step 3b: Trajectory planning — type-aware merge schedule ──
-  var mergeSchedule = planMergeSchedule(floor1Count, remaining, residentialFloors);
-  console.log('[BuildingPlanner v6] merge budget:', mergeSchedule.budget,
+  // targetTotal = total apartments across all residential floors
+  var quotaSum = 0;
+  for (var i = 0; i < types.length; i++) {
+    quotaSum += (quota[types[i]] || 0);
+  }
+  var mergeSchedule = planMergeSchedule(floor1Count, remaining, residentialFloors, quotaSum);
+  console.log('[BuildingPlanner v7.1] merge budget:', mergeSchedule.budget,
     'schedule:', JSON.stringify(mergeSchedule.schedule));
+
+  // ── Step 3c: Per-floor type target ──
+  // Each floor has the same cell count. Use QuotaResolver to compute
+  // the ideal type distribution for one floor's worth of cells.
+  var floorTarget = null;
+  if (floor1Cells > 0) {
+    var ftResult = resolveQuota(floor1Cells, mix);
+    if (ftResult.best) {
+      floorTarget = ftResult.best.counts;
+    }
+  }
+  console.log('[BuildingPlanner v7.1] per-floor target:', JSON.stringify(floorTarget));
 
   // ── Step 4: Floor-by-floor merge ──
   var floors = [];
@@ -81,9 +125,21 @@ export function planBuilding(params) {
   for (var fl = 2; fl <= residentialFloors; fl++) {
     var insolMap = perFloorInsol[fl] || {};
     var floorsLeft = residentialFloors - fl + 1;
-    var targetMerges = mergeSchedule.schedule[fl] || 0;
+    var targetMerges = mergeSchedule.schedule.hasOwnProperty(fl) ? mergeSchedule.schedule[fl] : 0;
 
-    var result = planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges);
+    // ── KEY FIX: subtract base placement BEFORE merging ──
+    // The copied floor's apartments are new placements toward the quota.
+    // MergePlanner only tracks merge DELTAS, so we pre-subtract the base.
+    var basePlaced = { '1K': 0, '2K': 0, '3K': 0, '4K': 0 };
+    for (var pi = 0; pi < prevApartments.length; pi++) {
+      var pt = prevApartments[pi].type;
+      if (basePlaced[pt] !== undefined) basePlaced[pt]++;
+    }
+    for (var ti = 0; ti < types.length; ti++) {
+      remaining[types[ti]] = (remaining[types[ti]] || 0) - (basePlaced[types[ti]] || 0);
+    }
+
+    var result = planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges, floorTarget);
 
     floors.push({
       floor: fl,
@@ -96,7 +152,7 @@ export function planBuilding(params) {
     prevApartments = result.apartments;
   }
 
-  console.log('[BuildingPlanner v6] profile:', profileLog.join(' → '));
+  console.log('[BuildingPlanner v7.1] profile:', profileLog.join(' → '));
 
   // ── Step 5: Recount and compute real quota ──
   var totalPlaced = { '1K': 0, '2K': 0, '3K': 0, '4K': 0, orphan: 0 };
@@ -110,21 +166,39 @@ export function planBuilding(params) {
     }
   }
 
-  // Recompute quota based on actual total (not estimate)
-  var realQuota = computeGlobalQuota(totalAptCount, mix);
+  // Recompute area-based quota from actual cell count
+  var actualTotalCells = 0;
+  for (var fi = 0; fi < floors.length; fi++) {
+    for (var ai = 0; ai < floors[fi].apartments.length; ai++) {
+      var cells = floors[fi].apartments[ai].cells;
+      for (var ci = 0; ci < cells.length; ci++) {
+        if (typeof cells[ci] === 'number') actualTotalCells++;
+      }
+    }
+  }
+
+  var realQuotaResult = resolveQuota(actualTotalCells, mix);
+  var realQuota;
+  if (realQuotaResult.best) {
+    realQuota = realQuotaResult.best.counts;
+  } else {
+    realQuota = computeGlobalQuota(totalAptCount, mix);
+  }
 
   var totalApts = totalPlaced['1K'] + totalPlaced['2K'] + totalPlaced['3K'] + totalPlaced['4K'];
 
-  console.log('[BuildingPlanner v6] total placed:', JSON.stringify(totalPlaced),
+  console.log('[BuildingPlanner v7.1] total placed:', JSON.stringify(totalPlaced),
     'actual apts:', totalApts);
-  console.log('[BuildingPlanner v6] real quota:', JSON.stringify(realQuota));
+  console.log('[BuildingPlanner v7.1] real quota:', JSON.stringify(realQuota));
 
-  // Deviation against real quota
+  // Deviation: area-based (using cell counts, not apartment counts)
   var deviation = {};
   for (var i = 0; i < types.length; i++) {
     var t = types[i];
-    var tPct = totalAptCount > 0 ? Math.round((realQuota[t] || 0) / totalAptCount * 100) : 0;
-    var aPct = totalApts > 0 ? Math.round(totalPlaced[t] / totalApts * 100) : 0;
+    var targetCells = (realQuota[t] || 0) * WIDTHS[t];
+    var actualCells = totalPlaced[t] * WIDTHS[t];
+    var tPct = actualTotalCells > 0 ? Math.round(targetCells / actualTotalCells * 100) : 0;
+    var aPct = actualTotalCells > 0 ? Math.round(actualCells / actualTotalCells * 100) : 0;
     deviation[t] = {
       target: realQuota[t] || 0,
       actual: totalPlaced[t],

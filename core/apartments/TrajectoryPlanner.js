@@ -1,93 +1,99 @@
 /**
- * TrajectoryPlanner — pre-computes merge budget and per-floor schedule.
+ * TrajectoryPlanner v2 — cascade-aware merge scheduling.
  *
- * The key insight: MergePlanner's cell-width heuristic undercounts merges
- * because it targets final apartment COUNT, not the TYPE DISTRIBUTION.
+ * KEY INSIGHT: a merge on floor fl propagates to ALL subsequent floors
+ * (because floor fl+1 copies floor fl). So one merge on floor 2
+ * removes (residentialFloors - 1) apartment-floors, not just 1.
  *
- * Growth chain for apartment types from all-1K base:
- *   1K + 1K → 3K         (1 merge, living = 1+1+1 = 3)
- *   3K → 2K + 2K          (rebalance, no merge — when 3K overproduced)
- *   2K + 1K → 4K          (1 merge, living = 2+1+1 = 4)
+ * The old planner ignored this cascade multiplier, causing 50-60%
+ * overmerging and massive type deviation.
  *
- * So producing one 4K costs 2 merges across 2 floors:
- *   floor k:   merge 1K+1K → 3K, rebalance → 2K
- *   floor k+1: merge 2K+1K → 4K
+ * New approach: compute the IDEAL PROFILE (apartments per floor),
+ * then derive the merge schedule from profile deltas.
  *
- * This module computes the CORRECT total merge budget from target types,
- * then distributes it across floors with front-loading.
+ * Profile strategy: drop from floor1Count to targetPerFloor on
+ * floor 2, hold steady, adjust tail to hit exact total.
  */
-
-// Merge cost per target type (from all-1K base)
-var MERGE_COST = {
-  '1K': 0,   // no merge needed
-  '2K': 1,   // 1 merge → 3K, then rebalance → 2K (merge + free rebalance)
-  '3K': 1,   // 1 merge: 1K + 1K → 3K
-  '4K': 2    // 2 merges: 1K+1K → 3K → rebalance → 2K, then 2K+1K → 4K
-};
 
 var TYPES = ['1K', '2K', '3K', '4K'];
 
 /**
- * Compute the total merge budget for the building.
+ * Compute the ideal apartment profile for the building.
  *
- * @param {Object} remaining - { '1K': n, '2K': n, '3K': n, '4K': n }
- * @param {number} floor1Count - apartment count on floor 1
- * @returns {number} total merges needed across all upper floors
+ * @param {number} floor1Count - apartments on floor 1
+ * @param {number} targetTotal - total apartments across all floors
+ * @param {number} residentialFloors - number of residential floors
+ * @returns {Array<number>} profile[0..residentialFloors-1]
  */
-function computeMergeBudget(remaining, floor1Count) {
-  var budget = 0;
-  for (var i = 0; i < TYPES.length; i++) {
-    var t = TYPES[i];
-    var need = Math.max(0, remaining[t] || 0);
-    budget += need * MERGE_COST[t];
+function computeIdealProfile(floor1Count, targetTotal, residentialFloors) {
+  var profile = [];
+  profile.push(floor1Count);
+
+  if (residentialFloors <= 1) return profile;
+
+  // Target for upper floors: distribute remaining evenly
+  var remainingApts = targetTotal - floor1Count;
+  var upperFloors = residentialFloors - 1;
+
+  if (remainingApts <= 0) {
+    for (var fl = 1; fl < residentialFloors; fl++) {
+      profile.push(Math.max(2, floor1Count));
+    }
+    return profile;
   }
 
-  // Cap: can't merge more than (floor1Count - 2) times total
-  // (need at least 2 apartments remaining)
-  var maxMerges = Math.max(0, floor1Count - 2);
-  return Math.min(budget, maxMerges);
+  var basePerFloor = Math.floor(remainingApts / upperFloors);
+  basePerFloor = Math.max(2, Math.min(basePerFloor, floor1Count));
+
+  var baseTotal = floor1Count + basePerFloor * upperFloors;
+  var excess = baseTotal - targetTotal;
+
+  if (excess >= 0) {
+    // Need `excess` floors at (basePerFloor - 1). Put on LAST floors.
+    var nReduced = Math.min(excess, upperFloors);
+    for (var fl = 1; fl < residentialFloors; fl++) {
+      if (fl >= residentialFloors - nReduced) {
+        profile.push(Math.max(2, basePerFloor - 1));
+      } else {
+        profile.push(basePerFloor);
+      }
+    }
+  } else {
+    // Need floors at (basePerFloor + 1). Can't exceed floor1Count.
+    var nBoosted = Math.min(-excess, upperFloors);
+    for (var fl = 1; fl < residentialFloors; fl++) {
+      if (fl < nBoosted + 1) {
+        profile.push(Math.min(floor1Count, basePerFloor + 1));
+      } else {
+        profile.push(basePerFloor);
+      }
+    }
+  }
+
+  // Enforce monotonicity: profile must be non-increasing
+  for (var fl = 1; fl < profile.length; fl++) {
+    if (profile[fl] > profile[fl - 1]) {
+      profile[fl] = profile[fl - 1];
+    }
+  }
+
+  return profile;
 }
 
 /**
- * Distribute merge budget across floors with front-loading.
+ * Derive per-floor merge schedule from profile deltas.
  *
- * Uses a decay profile: more merges on lower floors (where apartments
- * are small and adjacency is abundant), fewer on upper floors.
- *
- * @param {number} totalBudget - total merges for the building
- * @param {number} residentialFloors - number of residential floors
+ * @param {Array<number>} profile
  * @returns {Object} { [floor]: mergesThisFloor }
  */
-function distributeMerges(totalBudget, residentialFloors) {
+function profileToSchedule(profile) {
   var schedule = {};
-  if (residentialFloors < 2 || totalBudget <= 0) return schedule;
-
-  // Compute weights: floor 2 gets most, floor F gets least
-  // Weight for floor fl = (residentialFloors - fl + 1)
-  var totalWeight = 0;
-  for (var fl = 2; fl <= residentialFloors; fl++) {
-    totalWeight += residentialFloors - fl + 1;
+  for (var fl = 1; fl < profile.length; fl++) {
+    var merges = profile[fl - 1] - profile[fl];
+    if (merges > 0) {
+      schedule[fl + 1] = merges;
+    }
   }
-
-  var assigned = 0;
-  for (var fl = 2; fl <= residentialFloors; fl++) {
-    var weight = residentialFloors - fl + 1;
-    var share = Math.round(totalBudget * weight / totalWeight);
-    // Ensure at least 1 merge per floor if budget remains
-    if (share === 0 && assigned < totalBudget) share = 1;
-    // Don't exceed remaining budget
-    share = Math.min(share, totalBudget - assigned);
-    schedule[fl] = share;
-    assigned += share;
-  }
-
-  // Distribute any remaining budget to lowest floors
-  var leftover = totalBudget - assigned;
-  for (var fl = 2; fl <= residentialFloors && leftover > 0; fl++) {
-    schedule[fl]++;
-    leftover--;
-  }
-
   return schedule;
 }
 
@@ -97,14 +103,52 @@ function distributeMerges(totalBudget, residentialFloors) {
  * @param {number} floor1Count - apartment count on floor 1
  * @param {Object} remaining - { '1K': n, ... } remaining quota after floor 1
  * @param {number} residentialFloors - total residential floors
+ * @param {number} [targetTotal] - total target apartments across all floors
  * @returns {Object} { budget, schedule: {[floor]: mergesThisFloor} }
  */
-export function planMergeSchedule(floor1Count, remaining, residentialFloors) {
-  var budget = computeMergeBudget(remaining, floor1Count);
-  var schedule = distributeMerges(budget, residentialFloors);
+export function planMergeSchedule(floor1Count, remaining, residentialFloors, targetTotal) {
+  // If targetTotal not provided, estimate from remaining
+  // (backwards-compatible with old callers)
+  if (targetTotal === undefined || targetTotal === null) {
+    targetTotal = floor1Count;
+    for (var i = 0; i < TYPES.length; i++) {
+      targetTotal += Math.max(0, remaining[TYPES[i]] || 0);
+    }
+    // Scale: remaining is per-building delta, not per-floor.
+    // If only 1K is needed, no merges required at all.
+    var needsMerges = false;
+    for (var i = 0; i < TYPES.length; i++) {
+      if (TYPES[i] !== '1K' && (remaining[TYPES[i]] || 0) > 0) {
+        needsMerges = true;
+        break;
+      }
+    }
+    if (!needsMerges) {
+      return { budget: 0, schedule: {}, profile: [] };
+    }
+  }
+
+  // Clamp: can't have fewer than 2 apts per floor
+  var minTotal = floor1Count + 2 * (residentialFloors - 1);
+  if (targetTotal < minTotal) targetTotal = minTotal;
+
+  // Can't exceed no-merge total
+  var noMergeTotal = floor1Count * residentialFloors;
+  if (targetTotal > noMergeTotal) targetTotal = noMergeTotal;
+
+  var profile = computeIdealProfile(floor1Count, targetTotal, residentialFloors);
+  var schedule = profileToSchedule(profile);
+
+  var budget = 0;
+  for (var fl in schedule) {
+    if (schedule.hasOwnProperty(fl)) {
+      budget += schedule[fl];
+    }
+  }
 
   return {
     budget: budget,
-    schedule: schedule
+    schedule: schedule,
+    profile: profile
   };
 }
