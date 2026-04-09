@@ -26,6 +26,8 @@ import { planWZStacks } from '../core/apartments/WZPlanner.js';
 
 import { planMergeSchedule } from '../core/apartments/TrajectoryPlanner.js';
 
+import { allocateQuotas } from '../core/apartments/QuotaAllocator.js';
+
 
 // ═══════════════════════════════════════════════════════
 // Test helpers
@@ -652,5 +654,146 @@ describe('BuildingPlanner 4K production', function () {
 
     assert.ok(total4K > 0,
       'trajectory planning should produce 4K apartments (found ' + total4K + ')');
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════
+// 12. QuotaResolver — types sort guarantee
+// ═══════════════════════════════════════════════════════
+
+describe('QuotaResolver sort guarantee', function () {
+  it('works correctly with reversed custom types order', function () {
+    // Pass types in reverse order — solver must still work
+    var r = resolveQuota(20, { '1K': 25, '2K': 25, '3K': 25, '4K': 25 }, {
+      types: ['4K', '3K', '2K', '1K']
+    });
+    assert.ok(r.best, 'should find a solution with reversed types');
+    var c = r.best.counts;
+    var totalCells = (c['1K'] || 0) * 2 + (c['2K'] || 0) * 3 + (c['3K'] || 0) * 4 + (c['4K'] || 0) * 5;
+    assert.equal(totalCells, 20, 'Σ n_t·w_t = C with reversed types');
+  });
+
+  it('O(1) solver handles C>300 with subset types', function () {
+    var r = resolveQuota(400, { '1K': 50, '2K': 50, '3K': 0, '4K': 0 }, {
+      types: ['2K', '1K']
+    });
+    assert.ok(r.best, 'should find solution for C=400 with 2 types');
+    var c = r.best.counts;
+    var totalCells = (c['1K'] || 0) * 2 + (c['2K'] || 0) * 3;
+    assert.equal(totalCells, 400, 'Σ n_t·w_t = 400');
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════
+// 13. MergePlanner — transferCell insol guard
+// ═══════════════════════════════════════════════════════
+
+describe('MergePlanner insol guard', function () {
+  it('merge preserves insol validity under harsh conditions', function () {
+    var N = 8;
+    // 4 apartments, harsh insol: most cells are 'f'
+    var prevApts = [];
+    prevApts.push({ cells: [0, 1], wetCell: 0, type: '1K', valid: true, torec: false, corridorLabel: null });
+    prevApts.push({ cells: [2, 3], wetCell: 2, type: '1K', valid: true, torec: false, corridorLabel: null });
+    prevApts.push({ cells: [4, 5], wetCell: 4, type: '1K', valid: true, torec: false, corridorLabel: null });
+    prevApts.push({ cells: [6, 7], wetCell: 6, type: '1K', valid: true, torec: false, corridorLabel: null });
+
+    // All living cells are 'f' except cell 1 which is 'p'
+    var insolMap = { 1: 'p', 3: 'f', 5: 'f', 7: 'f' };
+    var remaining = { '1K': 0, '2K': 2, '3K': 0, '4K': 0 };
+
+    var result = planFloorByMerge(prevApts, insolMap, remaining, 5, N, []);
+
+    // All apartments must be valid after rebalance
+    for (var ai = 0; ai < result.apartments.length; ai++) {
+      var apt = result.apartments[ai];
+      var lc = livingCount(apt);
+      if (lc === 0) continue; // WZ-only degenerate — should not exist
+      assert.ok(apt.valid !== false || apt.type === 'orphan',
+        'apt ' + ai + ' (' + apt.type + ') should be valid or orphan after insol-constrained merge');
+    }
+
+    // No cell lost
+    var cells = {};
+    for (var ai = 0; ai < result.apartments.length; ai++) {
+      for (var ci = 0; ci < result.apartments[ai].cells.length; ci++) {
+        var c = result.apartments[ai].cells[ci];
+        if (typeof c === 'number') cells[c] = true;
+      }
+    }
+    for (var c = 0; c < 8; c++) {
+      assert.ok(cells[c], 'cell ' + c + ' lost during insol-constrained merge');
+    }
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════
+// 14. solveFloor — globalDownsize reduces large apartments
+// ═══════════════════════════════════════════════════════
+
+describe('globalDownsize', function () {
+  it('solver output has no apartment > 4K', function () {
+    // Large section — more room for oversized apartments pre-split
+    var N = 12;
+    var nodes = buildTestGraph(N, 2, 'near', []);
+    var result = solveFloor(nodes, N, 1, null, 'lon');
+
+    for (var ai = 0; ai < result.apartments.length; ai++) {
+      var lc = livingCount(result.apartments[ai]);
+      assert.ok(lc <= 4,
+        'apt ' + ai + ' has ' + lc + ' living cells (max 4 after downsize+split)');
+    }
+  });
+
+  it('all-pass insolation with large N produces balanced types', function () {
+    var N = 14;
+    var nodes = buildTestGraph(N, 2, 'near', []);
+    var insolMap = {};
+    for (var c = 0; c < 2 * N; c++) insolMap[c] = 'p';
+
+    var result = solveFloor(nodes, N, 1, insolMap, 'lon');
+    assert.ok(result.apartments.length >= 4, 'should produce >= 4 apartments for N=14');
+    assert.equal(result.orphanCount, 0, 'no orphans with all-pass insol');
+    assertLayoutInvariants(result.apartments, N, 'globalDownsize N=14 all-pass');
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════
+// 15. QuotaAllocator — zero percentage bug (falsy 0)
+// ═══════════════════════════════════════════════════════
+
+describe('QuotaAllocator zero percentage', function () {
+  it('respects 0% for 4K in single-section mode', function () {
+    var profiles = [{ key: 'sec1', orientation: 'lon', floor1Placed: { '1K': 8 }, totalEstimate: 50, floorCount: 8 }];
+    var mix = { '1K': 40, '2K': 35, '3K': 25, '4K': 0 };
+
+    var result = allocateQuotas(profiles, mix);
+    assert.ok(result.sec1, 'should return mix for sec1');
+    assert.equal(result.sec1['4K'], 0, '4K should be 0 when user sets 0% (not fallback to 10)');
+  });
+
+  it('respects 0% for 1K in single-section mode', function () {
+    var profiles = [{ key: 'sec1', orientation: 'lat', floor1Placed: { '1K': 0 }, totalEstimate: 30, floorCount: 6 }];
+    var mix = { '1K': 0, '2K': 40, '3K': 40, '4K': 20 };
+
+    var result = allocateQuotas(profiles, mix);
+    assert.equal(result.sec1['1K'], 0, '1K should be 0 when user sets 0%');
+  });
+
+  it('multi-section still distributes 0% correctly', function () {
+    var profiles = [
+      { key: 's1', orientation: 'lon', floor1Placed: { '1K': 6 }, totalEstimate: 40, floorCount: 8 },
+      { key: 's2', orientation: 'lat', floor1Placed: { '3K': 4 }, totalEstimate: 30, floorCount: 8 }
+    ];
+    var mix = { '1K': 50, '2K': 50, '3K': 0, '4K': 0 };
+
+    var result = allocateQuotas(profiles, mix);
+    // 3K and 4K global target = 0, so both sections should have 0
+    assert.equal(result.s1['3K'] + result.s1['4K'] + result.s2['3K'] + result.s2['4K'], 0,
+      '3K+4K should be 0 across all sections when global mix is 0');
   });
 });

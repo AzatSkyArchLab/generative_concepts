@@ -11,13 +11,19 @@ import {
   getNorthSide, getLLUParams, getCentralIndices
 } from './cells.js';
 import { buildSectionGraph } from './graph.js';
-import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1, buildLLURoof } from '../../core/three/MeshBuilder.js';
+import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1, buildLLURoof, buildCellMeshColored, buildDetailedTowerFloor1 } from '../../core/three/MeshBuilder.js';
 import { solveFloor } from '../../core/apartments/ApartmentSolver.js';
 import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
 import { allocateQuotas } from '../../core/apartments/QuotaAllocator.js';
 import { resolveQuota, computeRemainder, formatReport as formatQuotaReport } from '../../core/apartments/QuotaResolver.js';
 import { generateReport } from '../../ui/FloorPlanReport.js';
+
+import { getTowerDimensions, classifyCells, generateCellsFromFootprint } from '../../core/tower/TowerGenerator.js';
+import { walkRing, buildTowerGraph } from '../../core/tower/TowerGraph.js';
+import { computeTowerFootprints } from '../../core/tower/TowerFootprints.js';
+import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
+import { classifySegment } from '../../modules/urban-block/orientation.js';
 
 import { state } from './state.js';
 import { setupClickHandler, highlightIds } from './clickHandler.js';
@@ -86,16 +92,19 @@ export function processAllSections() {
   if (!state.layer || !state.featureStore) return;
   var all = state.featureStore.toArray();
   var sects = [];
+  var towers = [];
   for (var i = 0; i < all.length; i++) {
     if (all[i].properties.type === 'section-axis') sects.push(all[i]);
+    else if (all[i].properties.type === 'tower-axis') towers.push(all[i]);
   }
 
   if (state.threeOverlay) state.threeOverlay.clear();
-  if (sects.length === 0) { state.layer.clear(); state.lineFootprints = {}; state.stableOrigin = null; return; }
+  if (sects.length === 0 && towers.length === 0) { state.layer.clear(); state.lineFootprints = {}; state.stableOrigin = null; return; }
 
-  // Stable projection: lock to first section's first coord, never shifts
+  // Stable projection: lock to first feature's first coord, never shifts
   if (!state.stableOrigin) {
-    var firstCoord = sects[0].geometry.coordinates[0];
+    var firstFeature = sects.length > 0 ? sects[0] : towers[0];
+    var firstCoord = firstFeature.geometry.coordinates[0];
     state.stableOrigin = [firstCoord[0], firstCoord[1]];
   }
   var globalProj = createProjection(state.stableOrigin[0], state.stableOrigin[1]);
@@ -383,6 +392,189 @@ export function processAllSections() {
         state.threeOverlay.addMesh(buildDividerWall(fpM[3], fpM[0], 0, renderH + 0.05, 0.12));
     }
     state.lineFootprints[lineId] = lineFPsLL;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // Tower processing — recompute footprints from axis + current properties
+  // ══════════════════════════════════════════════════════════
+  for (var ti = 0; ti < towers.length; ti++) {
+    var tFeature = towers[ti];
+    var tLineId = tFeature.properties.id;
+    var tCoords = tFeature.geometry.coordinates;
+    if (!tCoords || tCoords.length < 2) continue;
+
+    // Recompute footprints from axis geometry (reflects cellSize/gap changes)
+    var tStartM = globalProj.toMeters(tCoords[0][0], tCoords[0][1]);
+    var tEndM = globalProj.toMeters(tCoords[1][0], tCoords[1][1]);
+    var oldStoredFP = tFeature.properties.footprints || [];
+    var recomputedFP = computeTowerFootprints(tStartM, tEndM, tFeature.properties,
+      function (mx, my) { return globalProj.toLngLat(mx, my); });
+
+    // Merge per-footprint overrides from old stored data
+    // (e.g. towerHeight set via edit mode)
+    for (var rfi = 0; rfi < recomputedFP.length; rfi++) {
+      if (rfi < oldStoredFP.length) {
+        if (oldStoredFP[rfi].towerHeight !== undefined) {
+          recomputedFP[rfi].towerHeight = oldStoredFP[rfi].towerHeight;
+        }
+      }
+    }
+
+    // Update stored footprints
+    tFeature.properties.footprints = recomputedFP;
+
+    if (recomputedFP.length === 0) continue;
+
+    var tCellSize = tFeature.properties.cellSize || 3.3;
+    var tNorthEnd = tFeature.properties.northEnd || detectNorthEnd(tStartM, tEndM);
+    var tOrientation = tFeature.properties.orientation || classifySegment(tStartM, tEndM).orientationName;
+    var tLineFPs = [];
+
+    var TOWER_DEFAULT_H = 112;
+    var firstFloorH = 4.5;
+    var typicalFloorH = 3.0;
+    var towerH = tFeature.properties.towerHeight || TOWER_DEFAULT_H;
+    var tFloorCount = computeFloorCount(towerH, firstFloorH, typicalFloorH);
+    var tBuildingH = computeBuildingHeight(towerH, firstFloorH, typicalFloorH);
+    var tFloor1Top = firstFloorH + typicalFloorH;
+
+    for (var twi = 0; twi < recomputedFP.length; twi++) {
+      var tfp = recomputedFP[twi];
+      var tSize = tfp.size || 'small';
+      var tDims = getTowerDimensions(tSize, tCellSize);
+
+      // Per-tower height override (like per-section sectionHeight)
+      var thisTowerH = tfp.towerHeight !== undefined ? tfp.towerHeight : towerH;
+      var thisTFloorCount = computeFloorCount(thisTowerH, firstFloorH, typicalFloorH);
+      var thisTBuildingH = computeBuildingHeight(thisTowerH, firstFloorH, typicalFloorH);
+
+      // Convert stored footprint polygon lng/lat → meters
+      var tfpM = [];
+      for (var tvi = 0; tvi < tfp.polygon.length; tvi++) {
+        tfpM.push(globalProj.toMeters(tfp.polygon[tvi][0], tfp.polygon[tvi][1]));
+      }
+
+      // Generate cells directly from footprint (preserves orientation from tool)
+      // Compute LLU exit side: meridional → through row-end, latitudinal → through column toward north
+      var exitSide;
+      if (tOrientation === 'lon') {
+        exitSide = tNorthEnd === 'start' ? 'row-start' : 'row-end';
+      } else {
+        // Latitudinal: across direction = tfpM[3] - tfpM[0], check which column side faces north
+        var acrossY = tfpM[3][1] - tfpM[0][1];
+        exitSide = acrossY >= 0 ? 'col-high' : 'col-low';
+      }
+      var tCells = classifyCells(tDims.rows, tDims.cols, exitSide);
+      var tPolysM = generateCellsFromFootprint(tfpM, tDims.rows, tDims.cols);
+
+      // ── Tower apartment graph (ring → linear section format) ──
+      var ringResult = walkRing(tDims.rows, tDims.cols, exitSide);
+      var towerGraph = buildTowerGraph(ringResult.pairs, tPolysM, tDims.cols, 2);
+      var K = towerGraph.K;
+
+      // Run apartment solver on ring graph
+      // Far cells are LLU → solver only distributes apartments on near (positions 0..K-1)
+      // Each position = rectangular pair (outer+inner grid cells)
+      var tAptResult = null;
+      var tCellAptMap = {};  // nearCid → {aptIdx, type, role}
+      if (K > 0) {
+        tAptResult = solveFloor(towerGraph.nodes, K, 1, null, 'lon');
+
+        if (tAptResult && tAptResult.apartments) {
+          for (var tai = 0; tai < tAptResult.apartments.length; tai++) {
+            var tApt = tAptResult.apartments[tai];
+            var tAptCells = tApt.cells || [];
+            for (var taci = 0; taci < tAptCells.length; taci++) {
+              var taCid = tAptCells[taci];
+              if (typeof taCid !== 'number') continue;  // skip corridor labels
+              tCellAptMap[taCid] = {
+                aptIdx: tai, type: tApt.type,
+                role: tApt.type === 'orphan' ? 'orphan' : (taCid === tApt.wetCell ? 'wet' : 'living'),
+                torec: tApt.torec || false
+              };
+            }
+          }
+        }
+      }
+
+      // ── Build gridId → apartment color + label map ──
+      // Each ring position expands to outer + inner grid cells
+      // WZ position: BOTH cells are WZ (rectangular pair perpendicular to core)
+      // Every outer cell gets a window (including WZ outer cells)
+      var gridAptColor = {};
+      var gridAptLabel = {};
+      for (var ri = 0; ri < ringResult.pairs.length; ri++) {
+        var rp = ringResult.pairs[ri];
+        var outerGid = rp.outerRow * tDims.cols + rp.outerCol;
+        var innerGid = rp.innerRow * tDims.cols + rp.innerCol;
+
+        var aptInfo = tCellAptMap[ri];
+        if (!aptInfo) continue;
+
+        var pal = APT_COLORS[aptInfo.type] || APT_COLORS['orphan'];
+        var isWet = aptInfo.role === 'wet';
+        var color = isWet ? pal.wet : pal.living;
+        var lbl = 'A' + aptInfo.aptIdx + (isWet ? ' wz' : ' ' + aptInfo.type);
+
+        // Both cells of the pair get same color (WZ or living)
+        gridAptColor[outerGid] = color;
+        gridAptColor[innerGid] = color;
+        gridAptLabel[outerGid] = lbl;
+        gridAptLabel[innerGid] = lbl;
+      }
+
+      // ── 2D cells with apartment colors ──
+      for (var tci = 0; tci < tCells.length; tci++) {
+        var tc = tCells[tci];
+        var tpoly = tPolysM[tci];
+        var gridIdx = tc.row * tDims.cols + tc.col;
+        var tCellColor;
+        var tCellLabel;
+
+        if (tc.type === 'llu' || tc.type === 'llu-exit') {
+          tCellColor = TYPE_COLORS.llu;
+          tCellLabel = tc.type === 'llu' ? 'LLU' : 'exit';
+        } else if (gridAptColor[gridIdx]) {
+          tCellColor = gridAptColor[gridIdx];
+          tCellLabel = gridAptLabel[gridIdx] || String(tc.id);
+        } else {
+          tCellColor = TYPE_COLORS.apartment;
+          tCellLabel = String(tc.id);
+        }
+
+        var tRingLL = [];
+        for (var tvi = 0; tvi < tpoly.length; tvi++) {
+          tRingLL.push(globalProj.toLngLat(tpoly[tvi][0], tpoly[tvi][1]));
+        }
+        tRingLL.push(tRingLL[0]);
+        allCellsLL.push({ ring: tRingLL, color: tCellColor, label: tCellLabel });
+      }
+
+      // ── 2D footprint outline ──
+      var tfpRingLL = closeRing(tfp.polygon);
+      allFootLL.push({
+        ring: tfpRingLL, lineId: tLineId, secIdx: twi,
+        floorCount: thisTFloorCount, buildingH: thisTBuildingH
+      });
+      tLineFPs.push(allFootLL[allFootLL.length - 1]);
+
+      // ── 3D ──
+      if (state.threeOverlay) {
+        // Floor 0: commercial — flat colored boxes, small gap
+        for (var tci = 0; tci < tPolysM.length; tci++) {
+          state.threeOverlay.addMesh(
+            buildCellMeshColored(tPolysM[tci], 0, firstFloorH, TYPE_COLORS.commercial, 0.03));
+        }
+        // Floor 1: detailed — apartment-colored boxes with facade windows
+        state.threeOverlay.addMesh(
+          buildDetailedTowerFloor1(ringResult.pairs, tPolysM, tDims.cols,
+            firstFloorH, tFloor1Top, gridAptColor, tCells));
+
+        state.threeOverlay.addMesh(buildSectionWireframe(tfpM, 0, thisTBuildingH));
+        state.threeOverlay.addMesh(buildFloorLabel(thisTFloorCount + 'F', tfpM, thisTBuildingH));
+      }
+    }
+    state.lineFootprints[tLineId] = tLineFPs;
   }
 
   // Phase 0 moved into Pass 2 (after QuotaAllocator computes section mixes)

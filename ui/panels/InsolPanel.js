@@ -25,43 +25,49 @@ export function updateInsolButton(featureStore, editAxisId, editSelectedIndices,
 
   var all = featureStore.toArray();
   var hasSections = false;
+  var hasTowers = false;
   for (var i = 0; i < all.length; i++) {
-    if (all[i].properties.type === 'section-axis') { hasSections = true; break; }
+    if (all[i].properties.type === 'section-axis') hasSections = true;
+    else if (all[i].properties.type === 'tower-axis') hasTowers = true;
   }
-  if (!hasSections) { wrap.innerHTML = ''; return; }
+  if (!hasSections && !hasTowers) { wrap.innerHTML = ''; return; }
 
   var scope, label, event, eventData;
 
   if (editAxisId && editSelectedIndices.length === 1) {
+    var editF = featureStore.get(editAxisId);
+    var isTower = editF && editF.properties.type === 'tower-axis';
     scope = 'section';
-    var secNum = editSelectedIndices[0] + 1;
-    label = 'Section #' + secNum;
+    var itemNum = editSelectedIndices[0] + 1;
+    label = (isTower ? 'Tower' : 'Section') + ' #' + itemNum;
     event = 'insolation:analyze:section';
     eventData = { axisId: editAxisId, sectionIdx: editSelectedIndices[0] };
   } else if (editAxisId) {
     scope = 'axis';
     var f = featureStore.get(editAxisId);
+    var isTower = f && f.properties.type === 'tower-axis';
     var n = f && f.properties.footprints ? f.properties.footprints.length : 0;
-    label = 'Editing axis · ' + n + ' sect.';
+    label = 'Editing axis · ' + n + (isTower ? ' tower' : ' sect') + '.';
     event = 'insolation:analyze:axis';
     eventData = { axisId: editAxisId };
   } else if (selectedIds.length === 1) {
     var f = featureStore.get(selectedIds[0]);
-    if (f && f.properties.type === 'section-axis') {
+    if (f && (f.properties.type === 'section-axis' || f.properties.type === 'tower-axis')) {
       scope = 'axis';
+      var isTower = f.properties.type === 'tower-axis';
       var n = f.properties.footprints ? f.properties.footprints.length : 0;
-      label = 'Selected axis · ' + n + ' sect.';
+      label = 'Selected · ' + n + (isTower ? ' tower' : ' sect') + '.';
       event = 'insolation:analyze:axis';
       eventData = { axisId: selectedIds[0] };
     } else {
       scope = 'global';
-      label = 'All sections';
+      label = 'All buildings';
       event = 'insolation:analyze:global';
       eventData = null;
     }
   } else {
     scope = 'global';
-    label = 'All sections';
+    label = 'All buildings';
     event = 'insolation:analyze:global';
     eventData = null;
   }
@@ -90,7 +96,7 @@ export function updateInsolButton(featureStore, editAxisId, editSelectedIndices,
 export function showInsolResults(data) {
   var el = document.getElementById('insol-results');
   if (!el) return;
-  var levelLabel = data.level === 'global' ? 'All sections' : data.level === 'axis' ? 'Selected axis' : 'Section';
+  var levelLabel = data.level === 'global' ? 'All buildings' : data.level === 'axis' ? 'Selected axis' : 'Section';
   el.style.display = 'block';
   el.innerHTML =
     '<div class="insol-results-card">' +

@@ -396,6 +396,28 @@ html, body {
   border-color: var(--text-muted);
 }
 
+.param-select {
+  width: 80px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+
+.param-select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.param-select:hover {
+  border-color: var(--text-muted);
+}
+
 .param-unit {
   font-size: 10px;
   color: var(--text-muted);

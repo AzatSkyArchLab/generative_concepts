@@ -54,13 +54,23 @@ export function buildBoxEdges(corners, baseZ, topZ) {
 export function insetPoly(poly, margin) {
   if (poly.length < 3 || margin <= 0) return poly;
   var n = poly.length;
+
+  // Detect winding via signed area: CW < 0, CCW > 0
+  var signedArea = 0;
+  for (var i = 0; i < n; i++) {
+    var sa = poly[i]; var sb = poly[(i+1)%n];
+    signedArea += (sa[0] * sb[1] - sb[0] * sa[1]);
+  }
+  // flip: +1 if CW (right-hand normal is inward), -1 if CCW (reverse)
+  var flip = signedArea < 0 ? 1 : -1;
+
   var inNormals = [];
   for (var i = 0; i < n; i++) {
     var a = poly[i]; var b = poly[(i+1)%n];
     var dx = b[0]-a[0]; var dy = b[1]-a[1];
     var len = Math.sqrt(dx*dx+dy*dy);
     if (len < 1e-10) { inNormals.push([0,0]); continue; }
-    inNormals.push([dy/len, -dx/len]);
+    inNormals.push([dy/len * flip, -dx/len * flip]);
   }
   var result = [];
   for (var i = 0; i < n; i++) {

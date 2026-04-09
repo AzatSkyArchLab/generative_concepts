@@ -16,6 +16,10 @@ import { getSunVectors } from '../../core/insolation/SunVectors.js';
 import { evaluateInsolation } from '../../core/insolation/InsolationCalc.js';
 import { getParams, getSectionHeight, computeBuildingHeight, computeFloorCount } from '../../core/SectionParams.js';
 import { createProjection } from '../../core/geo/projection.js';
+import { getTowerDimensions, classifyCells, generateCellsFromFootprint } from '../../core/tower/TowerGenerator.js';
+import { walkRing } from '../../core/tower/TowerGraph.js';
+import { classifySegment } from '../../modules/urban-block/orientation.js';
+import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
 
 // ── Config ─────────────────────────────────────────────
 
@@ -243,7 +247,7 @@ function addEndWallCollision(meshes, edgeP1, edgeP2, outN, aptDepth, corrWidth, 
   }
 }
 
-function buildAllCollisionMeshes(sections, proj) {
+function buildAllCollisionMeshes(sections, towers, proj) {
   var meshes = [];
   for (var si = 0; si < sections.length; si++) {
     var feature = sections[si];
@@ -378,6 +382,65 @@ function buildAllCollisionMeshes(sections, proj) {
       }
     }
   }
+
+  // Tower collision meshes — per-floor with window openings on outer ring
+  for (var ti = 0; ti < towers.length; ti++) {
+    var tFeature = towers[ti];
+    var tFP = tFeature.properties.footprints;
+    if (!tFP || tFP.length === 0) continue;
+    var axisH = tFeature.properties.towerHeight || 112;
+    var tCellSz = tFeature.properties.cellSize || 3.3;
+
+    for (var tfi = 0; tfi < tFP.length; tfi++) {
+      var perH = tFP[tfi].towerHeight !== undefined ? tFP[tfi].towerHeight : axisH;
+      var tfc = computeFloorCount(perH, 4.5, 3.0);
+      var tfpM = buildFpM(tFP[tfi], proj);
+
+      // Compute LLU core polygon (inset 2 cells from each edge)
+      var insetDist = 2 * tCellSz;
+      var tcx = (tfpM[0][0] + tfpM[1][0] + tfpM[2][0] + tfpM[3][0]) / 4;
+      var tcy = (tfpM[0][1] + tfpM[1][1] + tfpM[2][1] + tfpM[3][1]) / 4;
+      var coreM = [];
+      for (var ci = 0; ci < 4; ci++) {
+        var dx = tfpM[ci][0] - tcx;
+        var dy = tfpM[ci][1] - tcy;
+        var dl = Math.sqrt(dx * dx + dy * dy);
+        if (dl > 1e-10) {
+          var shrink = insetDist / dl;
+          coreM.push([tfpM[ci][0] - dx * shrink, tfpM[ci][1] - dy * shrink]);
+        } else {
+          coreM.push([tfpM[ci][0], tfpM[ci][1]]);
+        }
+      }
+
+      // Floor 0: commercial — solid full footprint
+      meshes.push(buildCollisionBoxRange(tfpM, 0, 4.5));
+
+      // Each residential floor: solid below windows + core at window height
+      for (var tfl = 1; tfl < tfc; tfl++) {
+        var flBase = 4.5 + (tfl - 1) * 3.0;
+        var flTop = flBase + 3.0;
+        var sillZ = flBase + COL_SLAB + COL_WIN_SILL;
+        var winTopZ = sillZ + COL_WIN_H;
+
+        // Solid below windows — full footprint
+        if (sillZ > flBase) {
+          meshes.push(buildCollisionBoxRange(tfpM, flBase, Math.min(sillZ, flTop)));
+        }
+
+        // Window zone: only LLU core is solid (outer ring has windows)
+        if (winTopZ > sillZ && sillZ < flTop) {
+          meshes.push(buildCollisionBoxRange(coreM, sillZ, Math.min(winTopZ, flTop)));
+        }
+
+        // Solid above windows — full footprint
+        if (winTopZ < flTop) {
+          meshes.push(buildCollisionBoxRange(tfpM, winTopZ, flTop));
+        }
+      }
+    }
+  }
+
   return meshes;
 }
 
@@ -528,6 +591,85 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
   return points;
 }
 
+// ── Tower facade points ──────────────────────────────
+
+/**
+ * Generate facade points for tower ring cells.
+ * Each outer ring cell gets one point at the center of its outward-facing edge.
+ *
+ * @param {Array<[number,number]>} tfpM - tower footprint polygon in meters (4 corners)
+ * @param {Object} dims - {rows, cols, cellSize} from getTowerDimensions
+ * @param {string} exitSide - 'row-start'|'row-end'|'col-low'|'col-high'
+ * @param {number} floorNum - floor number (1-based)
+ * @returns {Array<Object>} points in same format as section facade points
+ */
+function generateTowerFacadePoints(tfpM, dims, exitSide, floorNum) {
+  if (!floorNum) floorNum = 1;
+  var floorBaseZ = 4.5 + (floorNum - 1) * 3.0;
+  var z = floorBaseZ + 1.6; // window sill height
+
+  var ringResult = walkRing(dims.rows, dims.cols, exitSide);
+  var pairs = ringResult.pairs;
+  var cellPolysM = generateCellsFromFootprint(tfpM, dims.rows, dims.cols);
+
+  var points = [];
+  for (var i = 0; i < pairs.length; i++) {
+    var p = pairs[i];
+    var outerGridId = p.outerRow * dims.cols + p.outerCol;
+    var innerGridId = p.innerRow * dims.cols + p.innerCol;
+
+    var outerPoly = cellPolysM[outerGridId];
+    var innerPoly = cellPolysM[innerGridId];
+    if (!outerPoly || !innerPoly) continue;
+
+    // Outward normal: outer center - inner center
+    var ocx = 0, ocy = 0, icx = 0, icy = 0;
+    for (var v = 0; v < 4; v++) {
+      ocx += outerPoly[v][0]; ocy += outerPoly[v][1];
+      icx += innerPoly[v][0]; icy += innerPoly[v][1];
+    }
+    ocx /= 4; ocy /= 4; icx /= 4; icy /= 4;
+    var dx = ocx - icx;
+    var dy = ocy - icy;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1e-10) continue;
+    var nx = dx / len;
+    var ny = dy / len;
+
+    // Find outward-facing edge of outer cell polygon:
+    // The edge whose midpoint has max dot product with outward normal
+    var bestEdgeMx = ocx;
+    var bestEdgeMy = ocy;
+    var bestDot = -Infinity;
+    for (var ei = 0; ei < 4; ei++) {
+      var ea = outerPoly[ei];
+      var eb = outerPoly[(ei + 1) % 4];
+      var emx = (ea[0] + eb[0]) / 2;
+      var emy = (ea[1] + eb[1]) / 2;
+      // Dot of (edgeMid - cellCenter) with outward normal
+      var d = (emx - ocx) * nx + (emy - ocy) * ny;
+      if (d > bestDot) {
+        bestDot = d;
+        bestEdgeMx = emx;
+        bestEdgeMy = emy;
+      }
+    }
+
+    // Place point on outer edge, offset slightly outward (+0.1m outside surface)
+    var px = bestEdgeMx + nx * 0.1;
+    var py = bestEdgeMy + ny * 0.1;
+
+    points.push({
+      position: [px, py, z],
+      side: 'near',
+      cellIdx: i,
+      normal: [nx, ny]
+    });
+  }
+
+  return points;
+}
+
 // ── Raycasting ─────────────────────────────────────────
 
 function castSunRays(point, sunVectors, meshes) {
@@ -612,6 +754,14 @@ function collectSections() {
   return out;
 }
 
+function collectTowers() {
+  var all = _featureStore.toArray();
+  var out = [];
+  for (var i = 0; i < all.length; i++)
+    if (all[i].properties.type === 'tower-axis') out.push(all[i]);
+  return out;
+}
+
 var _stableOrigin = null;
 
 function getProj() {
@@ -622,7 +772,8 @@ function getProj() {
 function runAnalysis(level, axisId, sectionIdx, maxFloor) {
   clearResults();
   var sections = collectSections();
-  if (sections.length === 0) return;
+  var allTowers = collectTowers();
+  if (sections.length === 0 && allTowers.length === 0) return;
 
   _analysisLevel = level;
   if (level === 'global') {
@@ -637,7 +788,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
   var sunVectors = sunData.vectors;
   var rayMinutes = sunData.timeStep;
 
-  _collisionMeshes = buildAllCollisionMeshes(sections, proj);
+  _collisionMeshes = buildAllCollisionMeshes(sections, collectTowers(), proj);
 
   var targets = [];
   if (level === 'global') { targets = sections; }
@@ -714,6 +865,79 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
     }
   }
 
+  // ── Tower facade points ──
+  var towerTargets = collectTowers();
+  if (level === 'global') {
+    // Process all towers
+  } else {
+    // Filter to specific axis if needed
+    var filteredTowers = [];
+    for (var tti = 0; tti < towerTargets.length; tti++) {
+      if (towerTargets[tti].properties.id === axisId) filteredTowers.push(towerTargets[tti]);
+    }
+    towerTargets = filteredTowers;
+  }
+
+  for (var tti = 0; tti < towerTargets.length; tti++) {
+    var tFeature = towerTargets[tti];
+    var tLineId = tFeature.properties.id;
+    var tFP = tFeature.properties.footprints;
+    if (!tFP || tFP.length === 0) continue;
+
+    var tCellSize = tFeature.properties.cellSize || 3.3;
+    var tCoords = tFeature.geometry.coordinates;
+    if (!tCoords || tCoords.length < 2) continue;
+
+    var tStartM = proj.toMeters(tCoords[0][0], tCoords[0][1]);
+    var tEndM = proj.toMeters(tCoords[1][0], tCoords[1][1]);
+    var tOri = classifySegment(tStartM, tEndM);
+    var tNorthEnd = tFeature.properties.northEnd || detectNorthEnd(tStartM, tEndM);
+
+    for (var tfi = 0; tfi < tFP.length; tfi++) {
+      var tfp = tFP[tfi];
+      var tSize = tfp.size || 'small';
+      var tDims = getTowerDimensions(tSize, tCellSize);
+
+      var tfpM = buildFpM(tfp, proj);
+
+      // Compute exit side (same logic as processor)
+      var exitSide;
+      if (tOri.orientationName === 'lon') {
+        exitSide = tNorthEnd === 'start' ? 'row-start' : 'row-end';
+      } else {
+        var acrossY = tfpM[3][1] - tfpM[0][1];
+        exitSide = acrossY >= 0 ? 'col-high' : 'col-low';
+      }
+
+      var towerH = tFeature.properties.towerHeight || 112;
+      var perH = tfp.towerHeight !== undefined ? tfp.towerHeight : towerH;
+      var tfc = computeFloorCount(perH, 4.5, 3.0);
+      var actualMaxFloor = Math.min(floorEnd, tfc - 1);
+
+      for (var tfl = floorStart; tfl <= actualMaxFloor; tfl++) {
+        var tPoints = generateTowerFacadePoints(tfpM, tDims, exitSide, tfl);
+        for (var tpi = 0; tpi < tPoints.length; tpi++) {
+          var tpt = tPoints[tpi];
+          var tRayResults = castSunRays(tpt.position, sunVectors, _collisionMeshes);
+          var tIsFree = [];
+          for (var tri = 0; tri < tRayResults.length; tri++) tIsFree.push(tRayResults[tri].free);
+          var tEv = evaluateInsolation(tIsFree, NORMATIVE_MINUTES, rayMinutes);
+
+          facadeResults.push({
+            axisId: tLineId, sectionIdx: tfi, floor: tfl,
+            position: tpt.position, side: tpt.side, cellIdx: tpt.cellIdx,
+            status: tEv.status, totalMinutes: tEv.totalMinutes,
+            requiredMinutes: tEv.requiredMinutes, message: tEv.message,
+            perRay: tRayResults
+          });
+          if (tEv.status === 'PASS') pass++;
+          else if (tEv.status === 'WARNING') warn++;
+          else fail++;
+        }
+      }
+    }
+  }
+
   _lastResults = facadeResults;
   _lastPointData = facadeResults;
   displayResults(facadeResults);
@@ -774,7 +998,8 @@ function onSectionsChanged() {
   _debounceTimer = setTimeout(function () {
     _debounceTimer = null;
     var sections = collectSections();
-    if (sections.length === 0) { onClear(); return; }
+    var towers = collectTowers();
+    if (sections.length === 0 && towers.length === 0) { onClear(); return; }
     runAnalysis('global');
   }, 150);
 }

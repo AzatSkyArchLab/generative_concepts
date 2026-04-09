@@ -276,6 +276,9 @@ export function resolveQuota(C, targetPct, options) {
   }
   if (types.length === 0) types = TYPES.slice();
 
+  // Guarantee sort by width ascending — fixedType selection depends on this
+  types.sort(function (a, b) { return WIDTHS[a] - WIDTHS[b]; });
+
   // Choose solver based on C
   var BRUTE_FORCE_LIMIT = 300;
   var solutions;

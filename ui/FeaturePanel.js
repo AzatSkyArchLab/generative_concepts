@@ -164,8 +164,8 @@ export class FeaturePanel {
     for (var i = 0; i < features.length; i++) {
       var f = features[i]; var id = f.properties.id;
       var ftype = f.properties.type || 'feature';
-      var icon = ftype === 'section-axis' ? '▦' : '╱';
-      var label = ftype === 'section-axis' ? 'section' : 'line';
+      var icon = ftype === 'section-axis' ? '▦' : (ftype === 'tower-axis' ? '⊞' : '╱');
+      var label = ftype === 'section-axis' ? 'section' : (ftype === 'tower-axis' ? 'tower' : 'line');
       var sel = this._selectedIds.indexOf(id) >= 0 ? ' selected' : '';
       var editBadge = (this._editAxisId === id) ? ' <small style="color:var(--primary)">[edit]</small>' : '';
       html += '<div class="feature-item' + sel + '" data-id="' + id + '"><span class="feature-icon">' + icon + '</span>' +
@@ -182,30 +182,36 @@ export class FeaturePanel {
     if (this._selectedIds.length === 0 && !this._editAxisId) { propsEl.innerHTML = ''; return; }
 
     if (this._editAxisId && this._editSelectedIndices.length > 0) {
-      propsEl.innerHTML = this._renderSelectedSections();
+      var editF = this._featureStore.get(this._editAxisId);
+      var isTower = editF && editF.properties.type === 'tower-axis';
+      propsEl.innerHTML = isTower ? this._renderSelectedTowers() : this._renderSelectedSections();
       this._bindEditInputs();
       return;
     }
 
     if (this._editAxisId && this._editSelectedIndices.length === 0) {
       var f = this._featureStore.get(this._editAxisId);
-      var numSec = f && f.properties.footprints ? f.properties.footprints.length : 0;
+      var numItems = f && f.properties.footprints ? f.properties.footprints.length : 0;
+      var isTower = f && f.properties.type === 'tower-axis';
+      var itemWord = isTower ? 'tower' : 'section';
       propsEl.innerHTML = '<div class="props-section" style="background:rgba(255,102,0,0.08);border-radius:6px;margin:4px 0">' +
         '<div class="props-header" style="color:#ff6600">Edit Mode</div>' +
-        '<div style="padding:2px 12px 8px;font-size:11px;color:var(--text-secondary)">Click section to select · Shift+click for multi-select<br>' +
-        numSec + ' sections on this axis</div></div>';
+        '<div style="padding:2px 12px 8px;font-size:11px;color:var(--text-secondary)">Click ' + itemWord + ' to select · Shift+click for multi-select<br>' +
+        numItems + ' ' + itemWord + (numItems !== 1 ? 's' : '') + ' on this axis</div></div>';
       return;
     }
 
-    var sectionFeatures = []; var lineFeatures = [];
+    var sectionFeatures = []; var lineFeatures = []; var towerFeatures = [];
     for (var i = 0; i < this._selectedIds.length; i++) {
       var f = this._featureStore.get(this._selectedIds[i]);
       if (!f) continue;
       if (f.properties.type === 'section-axis') sectionFeatures.push(f);
+      else if (f.properties.type === 'tower-axis') towerFeatures.push(f);
       else if (f.geometry.type === 'LineString') lineFeatures.push(f);
     }
     var html = '';
     if (sectionFeatures.length > 0) html += this._renderSectionProps(sectionFeatures);
+    if (towerFeatures.length > 0) html += this._renderTowerProps(towerFeatures);
     if (lineFeatures.length > 0) html += this._renderLineProps(lineFeatures);
     propsEl.innerHTML = html;
     this._bindInputs();
@@ -284,19 +290,88 @@ export class FeaturePanel {
     var self = this;
     var input = document.getElementById('sec-edit-height');
     if (!input) return;
+    var editF = this._featureStore.get(this._editAxisId);
+    var isTower = editF && editF.properties.type === 'tower-axis';
+    var heightKey = isTower ? 'towerHeight' : 'sectionHeight';
     input.addEventListener('change', function (e) {
       var val = parseFloat(e.target.value);
       if (isNaN(val)) return;
       eventBus.emit('section:param:changed', {
         axisId: self._editAxisId,
         sectionIndices: self._editSelectedIndices.slice(),
-        key: 'sectionHeight',
+        key: heightKey,
         value: val
       });
       setTimeout(function () { self._updateProps(); }, 100);
     });
     input.focus();
     input.select();
+  }
+
+  _renderSelectedTowers() {
+    var f = this._featureStore.get(this._editAxisId);
+    if (!f || !f.properties.footprints) return '';
+    var fps = f.properties.footprints;
+    var axisH = f.properties.towerHeight || 112;
+    var indices = this._editSelectedIndices;
+    var isSingle = indices.length === 1;
+
+    var heights = [];
+    var hasIndep = false;
+    for (var i = 0; i < indices.length; i++) {
+      var fp = fps[indices[i]];
+      if (!fp) continue;
+      var h = fp.towerHeight !== undefined ? fp.towerHeight : axisH;
+      heights.push(h);
+      if (fp.towerHeight !== undefined) hasIndep = true;
+    }
+
+    var allSameH = true;
+    for (var i = 1; i < heights.length; i++) {
+      if (heights[i] !== heights[0]) { allSameH = false; break; }
+    }
+
+    var displayH = heights[0] || axisH;
+    var fc = computeFloorCount(displayH, 4.5, 3.0);
+    var bh = computeBuildingHeight(displayH, 4.5, 3.0);
+
+    var title;
+    if (isSingle) {
+      title = 'Tower #' + (indices[0] + 1);
+    } else {
+      var nums = [];
+      for (var i = 0; i < indices.length; i++) nums.push('#' + (indices[i] + 1));
+      title = 'Towers ' + nums.join(', ');
+    }
+
+    var html = '<div class="props-section" style="background:rgba(255,102,0,0.08);border-radius:6px;margin:4px 0">';
+    html += '<div class="props-header" style="color:#ff6600">' + title;
+    if (hasIndep) html += ' <span style="color:#dc2626;font-size:10px;font-weight:700;margin-left:4px">INDEPENDENT</span>';
+    html += '</div>';
+
+    html += '<div class="props-computed">';
+    html += '<div class="props-row"><span class="props-label">Floors</span><span class="props-value">' + fc + 'F</span></div>';
+    html += '<div class="props-row"><span class="props-label">Height</span><span class="props-value">' + bh.toFixed(1) + ' <small>м</small></span></div>';
+    html += '</div>';
+
+    html += '<div class="props-divider"></div>';
+    html += '<div class="param-row"><label class="param-label" style="font-weight:600">Tower height</label>';
+    html += '<div class="param-input-wrap"><input type="number" class="param-input" id="sec-edit-height"';
+    html += ' value="' + displayH + '" step="3" min="15" max="150"';
+    if (!allSameH) html += ' placeholder="mixed"';
+    html += '><span class="param-unit">м</span></div></div>';
+
+    if (!allSameH) {
+      html += '<div style="padding:2px 12px 4px;font-size:10px;color:#d97706">Selected towers have different heights. New value applies to all selected.</div>';
+    }
+    if (hasIndep) {
+      html += '<div style="padding:2px 12px 8px;font-size:10px;color:#dc2626">Modified height — independent from axis default (' + axisH + 'м)</div>';
+    } else {
+      html += '<div style="padding:2px 12px 8px;font-size:10px;color:var(--text-muted)">Change height to separate from axis group</div>';
+    }
+
+    html += '</div>';
+    return html;
   }
 
   _renderSectionProps(features) {
@@ -328,6 +403,78 @@ export class FeaturePanel {
         ' value="' + params[d.key] + '" step="' + d.step + '" min="' + d.min + '" max="' + d.max + '">' +
         '<span class="param-unit">' + d.unit + '</span></div></div>';
     }
+    h += '</div></div>';
+    return h;
+  }
+
+  _renderTowerProps(features) {
+    var f = features[0];
+    var p = f.properties;
+    var cellSize = p.cellSize || 3.3;
+    var gap = p.towerGap != null ? p.towerGap : 20;
+    var towerH = p.towerHeight || 112;
+    var ori = p.orientation || '?';
+    var fpCount = p.footprints ? p.footprints.length : 0;
+    var axisLen = p.axisLength ? p.axisLength.toFixed(1) : '?';
+
+    var floorCount = computeFloorCount(towerH, 4.5, 3.0);
+    var buildingH = computeBuildingHeight(towerH, 4.5, 3.0);
+
+    // Aggregate stats
+    var totalFootprint = 0;
+    var sizes = [];
+    for (var i = 0; i < fpCount; i++) {
+      var tfp = p.footprints[i];
+      var s = tfp.size || 'small';
+      if (sizes.indexOf(s) < 0) sizes.push(s);
+      totalFootprint += tfp.length * cellSize * 7;
+    }
+    var AREA_COEFF = 0.65;
+    var M2_PER_PERSON = 50;
+    var residentialFloors = Math.max(0, floorCount - 1);
+    var aptFloorArea = totalFootprint * AREA_COEFF;
+    var totalAptArea = aptFloorArea * residentialFloors;
+    var totalGBA = totalFootprint * floorCount;
+    var population = Math.round(totalAptArea / M2_PER_PERSON);
+
+    var label = features.length === 1 ? 'Tower ' + f.properties.id.slice(0, 6) : features.length + ' towers';
+
+    var h = '<div class="props-section"><div class="props-header">' + label + '</div>';
+
+    h += '<div class="props-computed">';
+    h += '<div class="props-row"><span class="props-label">Orientation</span><span class="props-value">' + (ori === 'lon' ? 'мерид' : 'шир') + (sizes.length > 0 ? ' <small>' + sizes.join(', ') + '</small>' : '') + '</span></div>';
+    h += '<div class="props-row"><span class="props-label">Axis</span><span class="props-value">' + axisLen + ' <small>м</small></span></div>';
+    h += '<div class="props-row"><span class="props-label">Towers</span><span class="props-value">' + fpCount + '</span></div>';
+    h += '<div class="props-row"><span class="props-label">Floors</span><span class="props-value">' + floorCount + 'F</span></div>';
+    h += '<div class="props-row"><span class="props-label">Footprint</span><span class="props-value">' + totalFootprint.toFixed(0) + ' <small>м²</small></span></div>';
+    h += '<div class="props-row"><span class="props-label">Apt. area</span><span class="props-value">' + (totalAptArea / 1000).toFixed(1) + 'k <small>м² ×' + AREA_COEFF + '</small></span></div>';
+    h += '<div class="props-row"><span class="props-label">GBA</span><span class="props-value">' + (totalGBA / 1000).toFixed(1) + 'k <small>м²</small></span></div>';
+    h += '<div class="props-row"><span class="props-label">Population</span><span class="props-value">' + population + ' <small>чел · /' + M2_PER_PERSON + ' м²</small></span></div>';
+    h += '</div>';
+
+    h += '<div class="props-divider"></div>';
+    h += '<div class="params-toggle" id="params-toggle">';
+    h += '<span class="params-toggle-label">Parameters</span>';
+    h += '<span class="params-toggle-chevron' + (this._paramsOpen ? ' open' : '') + '" id="params-chevron">▸</span>';
+    h += '</div>';
+    h += '<div class="params-body' + (this._paramsOpen ? ' open' : '') + '" id="params-body">';
+
+    h += '<div class="param-row"><label class="param-label">Tower height</label>';
+    h += '<div class="param-input-wrap"><input type="number" class="param-input" data-key="towerHeight" data-target="tower"';
+    h += ' value="' + towerH + '" step="3" min="15" max="150">';
+    h += '<span class="param-unit">м</span></div></div>';
+
+    h += '<div class="param-row"><label class="param-label">Cell size</label>';
+    h += '<div class="param-input-wrap"><select class="param-select" data-key="cellSize" data-target="tower">';
+    h += '<option value="3.0"' + (cellSize === 3.0 ? ' selected' : '') + '>3.0 м</option>';
+    h += '<option value="3.3"' + (cellSize === 3.3 ? ' selected' : '') + '>3.3 м</option>';
+    h += '</select></div></div>';
+
+    h += '<div class="param-row"><label class="param-label">Gap</label>';
+    h += '<div class="param-input-wrap"><input type="number" class="param-input" data-key="towerGap" data-target="tower"';
+    h += ' value="' + gap + '" min="5" max="50" step="1">';
+    h += '<span class="param-unit">м</span></div></div>';
+
     h += '</div></div>';
     return h;
   }
@@ -391,6 +538,27 @@ export class FeaturePanel {
           commandManager.execute(new UpdateFeatureCommand(
             self._featureStore, self._selectedIds[si],
             { color: e.target.value }, { color: oldColor }
+          ));
+        }
+        eventBus.emit('features:changed');
+      });
+    }
+
+    // Tower inputs (select + number)
+    var towerInputs = this._container.querySelectorAll('[data-target="tower"]');
+    for (var i = 0; i < towerInputs.length; i++) {
+      towerInputs[i].addEventListener('change', function (e) {
+        var key = e.target.dataset.key;
+        var val = parseFloat(e.target.value);
+        if (isNaN(val)) return;
+        for (var si = 0; si < self._selectedIds.length; si++) {
+          var f = self._featureStore.get(self._selectedIds[si]);
+          if (!f || f.properties.type !== 'tower-axis') continue;
+          var oldVal = f.properties[key];
+          var newP = {}; newP[key] = val;
+          var oldP = {}; oldP[key] = oldVal;
+          commandManager.execute(new UpdateFeatureCommand(
+            self._featureStore, self._selectedIds[si], newP, oldP
           ));
         }
         eventBus.emit('features:changed');

@@ -107,6 +107,7 @@ var sectionGenModule = {
     state.layer.init();
 
     state.unsubs.push(state.eventBus.on('draw:section:complete', onChanged));
+    state.unsubs.push(state.eventBus.on('draw:tower:complete', onChanged));
     state.unsubs.push(state.eventBus.on('features:changed', onChanged));
     state.unsubs.push(state.eventBus.on('section-gen:params:changed', onChanged));
     state.unsubs.push(state.eventBus.on('section:param:changed', onSectionParamChanged));

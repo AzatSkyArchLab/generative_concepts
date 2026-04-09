@@ -121,18 +121,25 @@ function computeBuffers() {
   if (!_featureStore) return;
   var all = _featureStore.toArray();
   var sects = [];
+  var towers = [];
   for (var i = 0; i < all.length; i++) {
     if (all[i].properties.type === 'section-axis') sects.push(all[i]);
+    else if (all[i].properties.type === 'tower-axis') towers.push(all[i]);
   }
 
   var firePolys = []; var endPolys = []; var insolPolys = [];
-  if (sects.length === 0) { updateSources(firePolys, endPolys, insolPolys); return; }
+  if (sects.length === 0 && towers.length === 0) { updateSources(firePolys, endPolys, insolPolys); return; }
 
   var allCoords = [];
   for (var i = 0; i < sects.length; i++) {
     var c = sects[i].geometry.coordinates;
     for (var j = 0; j < c.length; j++) allCoords.push(c[j]);
   }
+  for (var i = 0; i < towers.length; i++) {
+    var c = towers[i].geometry.coordinates;
+    for (var j = 0; j < c.length; j++) allCoords.push(c[j]);
+  }
+  if (allCoords.length === 0) { updateSources(firePolys, endPolys, insolPolys); return; }
   var gc = centroid(allCoords);
   var proj = createProjection(gc[0], gc[1]);
 
@@ -183,6 +190,33 @@ function computeBuffers() {
         for (var rfi = 0; rfi < runs[ri].length; rfi++) runFpMs.push(fpMs[runs[ri][rfi]]);
         var merged = mergeConsecutive(runFpMs);
         if (merged) firePolys.push(polyMToLL(bufferPolygonRounded(merged, autoFireDist(axisH), 6), proj));
+      }
+    }
+  }
+
+  // Tower buffers
+  for (var ti = 0; ti < towers.length; ti++) {
+    var tFeature = towers[ti];
+    var tFP = tFeature.properties.footprints;
+    if (!tFP || tFP.length === 0) continue;
+
+    for (var tfi = 0; tfi < tFP.length; tfi++) {
+      var tfpM = [];
+      for (var j = 0; j < tFP[tfi].polygon.length; j++)
+        tfpM.push(proj.toMeters(tFP[tfi].polygon[j][0], tFP[tfi].polygon[j][1]));
+
+      // Fire buffer (14m for towers — always high-rise)
+      firePolys.push(polyMToLL(bufferPolygonRounded(tfpM, 14, 8), proj));
+
+      // End buffer (torec)
+      endPolys.push(polyMToLL(bufferPolygonRounded(tfpM, _distances.end, 8), proj));
+
+      // Insolation buffer on all 4 sides
+      var tcx = polyCentroid(tfpM);
+      for (var ei = 0; ei < tfpM.length; ei++) {
+        var enext = (ei + 1) % tfpM.length;
+        insolPolys.push(polyMToLL(
+          offsetEdgeOutward(tfpM[ei], tfpM[enext], _distances.insolation, tcx[0], tcx[1]), proj));
       }
     }
   }

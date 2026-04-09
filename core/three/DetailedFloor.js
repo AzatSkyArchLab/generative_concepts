@@ -348,3 +348,111 @@ export function buildLLURoof(graphNodes, N, buildingH, lluHeight) {
 
   return group;
 }
+
+// ── Tower detailed floor ─────────────────────────────
+
+/**
+ * Build detailed floor 1 geometry for a tower.
+ * Every outer ring cell gets a window on its outward-facing edge.
+ *
+ * @param {Array} ringPairs - from walkRing
+ * @param {Array<Array<[number,number]>>} cellPolysM - all grid cell polygons
+ * @param {number} cols - grid column count
+ * @param {number} baseZ - floor base Z
+ * @param {number} topZ - floor top Z
+ * @param {Object} gridAptColor - { gridIdx: hexColor }
+ * @param {Array<Object>} allCells - from classifyCells
+ * @returns {THREE.Group}
+ */
+export function buildDetailedTowerFloor1(ringPairs, cellPolysM, cols, baseZ, topZ, gridAptColor, allCells) {
+  var group = new THREE.Group();
+  var SLAB = 0.3;
+  var floorZ = baseZ + SLAB;
+  var EXT_T = 0.6;
+  var GAP = 0.03;
+  var K = ringPairs.length;
+
+  var outerGridIds = {};
+  var innerGridIds = {};
+  for (var i = 0; i < K; i++) {
+    var p = ringPairs[i];
+    outerGridIds[p.outerRow * cols + p.outerCol] = i;
+    innerGridIds[p.innerRow * cols + p.innerCol] = i;
+  }
+
+  function cellCenter(poly) {
+    var cx = 0, cy = 0;
+    for (var v = 0; v < 4; v++) { cx += poly[v][0]; cy += poly[v][1]; }
+    return [cx / 4, cy / 4];
+  }
+
+  function findOutwardEdge(outerPoly, innerPoly) {
+    var oc = cellCenter(outerPoly);
+    var ic = cellCenter(innerPoly);
+    var nx = oc[0] - ic[0];
+    var ny = oc[1] - ic[1];
+    var len = Math.sqrt(nx * nx + ny * ny);
+    if (len < 1e-10) return { idx: 0, nx: 0, ny: 1 };
+    nx /= len; ny /= len;
+    var bestIdx = 0;
+    var bestDot = -Infinity;
+    for (var ei = 0; ei < 4; ei++) {
+      var ea = outerPoly[ei];
+      var eb = outerPoly[(ei + 1) % 4];
+      var mx = (ea[0] + eb[0]) / 2 - oc[0];
+      var my = (ea[1] + eb[1]) / 2 - oc[1];
+      var d = mx * nx + my * ny;
+      if (d > bestDot) { bestDot = d; bestIdx = ei; }
+    }
+    return { idx: bestIdx, nx: nx, ny: ny };
+  }
+
+  for (var ci = 0; ci < allCells.length; ci++) {
+    var cell = allCells[ci];
+    var gridId = cell.row * cols + cell.col;
+    var poly = cellPolysM[gridId];
+    if (!poly || poly.length < 4) continue;
+
+    if (cell.type === 'llu' || cell.type === 'llu-exit') {
+      var ip = insetPoly(poly, GAP);
+      group.add(new THREE.Mesh(buildBoxGeometry(ip, baseZ, topZ),
+        MATERIALS.llu || new THREE.MeshLambertMaterial({ color: 0x4f81bd, side: THREE.DoubleSide })));
+      continue;
+    }
+
+    var color = gridAptColor[gridId] || '#dce8f0';
+    var matl = new THREE.MeshLambertMaterial({ color: new THREE.Color(color), side: THREE.DoubleSide });
+
+    var isOuter = outerGridIds[gridId] !== undefined;
+    var isInner = innerGridIds[gridId] !== undefined;
+
+    if (isOuter) {
+      var ringIdx = outerGridIds[gridId];
+      var rp = ringPairs[ringIdx];
+      var innerGridId = rp.innerRow * cols + rp.innerCol;
+      var innerPoly = cellPolysM[innerGridId];
+      var edgeInfo = findOutwardEdge(poly, innerPoly);
+      var eIdx = edgeInfo.idx;
+
+      var margins = [GAP, GAP, GAP, GAP];
+      margins[eIdx] = EXT_T;
+      var ip = insetPolyPerEdge(poly, margins);
+      group.add(new THREE.Mesh(buildBoxGeometry(ip, baseZ, topZ), matl));
+      group.add(buildTopCap(ip, topZ));
+
+      var fp1 = poly[eIdx];
+      var fp2 = poly[(eIdx + 1) % 4];
+      group.add(buildFacadeWithWindow(fp1, fp2, edgeInfo.nx, edgeInfo.ny, floorZ, topZ, color));
+
+    } else if (isInner) {
+      var ip = insetPoly(poly, GAP);
+      group.add(new THREE.Mesh(buildBoxGeometry(ip, baseZ, topZ), matl));
+      group.add(buildTopCap(ip, topZ));
+    } else {
+      var ip = insetPoly(poly, GAP);
+      group.add(new THREE.Mesh(buildBoxGeometry(ip, baseZ, topZ), matl));
+    }
+  }
+
+  return group;
+}

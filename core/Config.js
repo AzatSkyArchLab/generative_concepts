@@ -28,6 +28,20 @@ export const Config = {
     grabbing: 'grabbing'
   },
 
+  solver: {
+    /** QuotaResolver: search radius around continuous optimum (O(1) mode) */
+    quotaSearchRadius: 4,
+    /** QuotaResolver: brute-force threshold (C ≤ limit → exhaustive) */
+    quotaBruteForceLimit: 300,
+    /** Global downsize / regroup iteration caps */
+    maxRegroupIter: 30,
+    maxDownsizeIter: 20,
+    /** MergePlanner dynamic rebalance iteration cap */
+    maxRebalanceIter: 30,
+    /** FloorPlanner segment-level downsize cap */
+    maxSegmentDownsizeIter: 20
+  },
+
   draw: {
     fillColor: '#3b82f6',
     fillOpacity: 0.25,

@@ -289,27 +289,19 @@ function reassignCorridors(apartments, sortedCorrNears, N) {
  * @param {number} [targetMerges] - override merge count from TrajectoryPlanner
  * @returns {Object} { apartments, placed }
  */
-export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges, floorTarget) {
+export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft, N, sortedCorrNears, targetMerges, floorCells, mix) {
   // 1. Deep copy
   var apartments = copyApartments(prevApartments);
 
   // 2. Compute merges needed
   var types = ['1K', '2K', '3K', '4K'];
   var sumR = 0;
-  var weightedSum = 0;
   for (var i = 0; i < types.length; i++) {
-    var r = Math.max(0, remaining[types[i]] || 0);
-    sumR += r;
-    weightedSum += r * TYPE_WIDTH[types[i]];
+    sumR += Math.max(0, remaining[types[i]] || 0);
   }
 
-  // Use remaining for merge scoring (stable signal with enough range).
-  // floorTarget is used for a final rebalance pass to fine-tune types.
+  // Use remaining for merge scoring
   var scoreRef = remaining;
-
-  if (sumR === 0 && !floorTarget) {
-    return finalize(apartments, remaining, sortedCorrNears, N);
-  }
 
   var currentCount = apartments.length;
   var mergesThisFloor;
@@ -317,11 +309,16 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
   if (targetMerges !== undefined && targetMerges !== null) {
     mergesThisFloor = Math.min(Math.max(0, targetMerges), currentCount - 2);
   } else {
+    // Fallback heuristic
     var totalCells = 0;
     for (var ai = 0; ai < apartments.length; ai++) {
       for (var ci = 0; ci < apartments[ai].cells.length; ci++) {
         if (typeof apartments[ai].cells[ci] === 'number') totalCells++;
       }
+    }
+    var weightedSum = 0;
+    for (var i = 0; i < types.length; i++) {
+      weightedSum += Math.max(0, remaining[types[i]] || 0) * TYPE_WIDTH[types[i]];
     }
     var targetAvgWidth = sumR > 0 ? weightedSum / sumR : 2;
     var targetCount = Math.max(2, Math.round(totalCells / targetAvgWidth));
@@ -329,15 +326,9 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
     mergesThisFloor = Math.max(0, Math.ceil(mergesNeeded / Math.max(1, Math.sqrt(floorsLeft))));
     if (mergesThisFloor > mergesNeeded) mergesThisFloor = mergesNeeded;
     if (mergesNeeded > 0 && mergesThisFloor === 0) mergesThisFloor = 1;
-
-    var largeDeficit = Math.max(0, remaining['3K'] || 0) + Math.max(0, remaining['4K'] || 0);
-    if (largeDeficit > 0 && sumR > 0 && largeDeficit / sumR > 0.25) {
-      var boost = Math.ceil(largeDeficit / Math.max(1, floorsLeft));
-      mergesThisFloor = Math.min(currentCount - 2, mergesThisFloor + boost);
-    }
   }
 
-  // 3. Find and score all possible merge pairs
+  // 3. Merge
   var isScheduled = (targetMerges !== undefined && targetMerges !== null && targetMerges > 0);
 
   for (var m = 0; m < mergesThisFloor; m++) {
@@ -347,56 +338,201 @@ export function planFloorByMerge(prevApartments, insolMap, remaining, floorsLeft
 
     for (var ai = 0; ai < apartments.length; ai++) {
       if (countLiving(apartments[ai]) >= 4) continue;
-
       for (var bi = ai + 1; bi < apartments.length; bi++) {
         if (countLiving(apartments[bi]) >= 4) continue;
         if (!areAdjacent(apartments[ai], apartments[bi], N)) continue;
-
         var score = scoreMergePair(apartments[ai], apartments[bi], insolMap, scoreRef);
-        // For scheduled merges, any valid merge (score >= 0) is acceptable.
-        // Score 0 just means "no type preference" — still valid for count reduction.
         if (isScheduled && score === 0) score = 1;
-        if (score > bestScore) {
-          bestScore = score;
-          bestI = ai;
-          bestJ = bi;
-        }
+        if (score > bestScore) { bestScore = score; bestI = ai; bestJ = bi; }
       }
     }
-
     if (bestI < 0 || bestScore < 0) break;
 
-    // 4. Execute merge
-    var oldTypeA = apartments[bestI].type;
-    var oldTypeB = apartments[bestJ].type;
-    var merged = mergeApartments(apartments[bestI], apartments[bestJ], insolMap);
-
-    // Update remaining
-    if (remaining[oldTypeA] !== undefined) remaining[oldTypeA]++;
-    if (remaining[oldTypeB] !== undefined) remaining[oldTypeB]++;
-    if (remaining[merged.type] !== undefined) remaining[merged.type]--;
-
-    apartments[bestI] = merged;
+    apartments[bestI] = mergeApartments(apartments[bestI], apartments[bestJ], insolMap);
     apartments.splice(bestJ, 1);
   }
 
-  // 5. Rebalance using global remaining
-  rebalance(apartments, remaining, insolMap, N);
+  // 4. SINGLE rebalance pass: dynamic per-floor target
+  // Compute target for THIS floor's actual apartment count and cell count
+  if (mix && floorCells > 0) {
+    var aptCount = apartments.length;
 
-  // 5b. Growth rebalance for 4K trajectory
-  if ((remaining['4K'] || 0) > 0) {
-    growthRebalance(apartments, remaining, insolMap, N);
-  }
+    // Determine forbidden types (0% in mix)
+    var mixSum = 0;
+    for (var i = 0; i < types.length; i++) mixSum += (mix[types[i]] || 0);
+    if (mixSum === 0) mixSum = 100;
+    var forbidden = {};
+    for (var i = 0; i < types.length; i++) {
+      if ((mix[types[i]] || 0) === 0) forbidden[types[i]] = true;
+    }
 
-  // 5c. Floor-target rebalance: align this floor with floorTarget.
-  // After merges and global rebalance, fine-tune type distribution
-  // to match the per-floor ideal. Only converts when the floor has
-  // surplus of one type and deficit of a neighbor type (e.g., 3K→2K).
-  if (floorTarget) {
-    floorTargetRebalance(apartments, floorTarget, insolMap, N);
+    // Find best composition: Σ n_t = aptCount, Σ n_t * w_t = floorCells
+    // Minimize L1 area deviation from mix
+    var dynTarget = solveDynTarget(aptCount, floorCells, mix, forbidden);
+    if (dynTarget) {
+      dynamicRebalance(apartments, dynTarget, insolMap, N);
+    }
   }
 
   return finalize(apartments, remaining, sortedCorrNears, N);
+}
+
+// ── Dynamic Target Solver ─────────────────────────────
+
+/**
+ * Find best type distribution for K apartments in C cells.
+ * Constraints: Σ n_t = K, Σ n_t * w_t = C, n_t >= 0 integer.
+ * Forbidden types get n_t = 0.
+ * Objective: minimize L1 area deviation from mix.
+ *
+ * Small K (typically 5-16), brute-force O(K^2) over 2 free vars.
+ */
+function solveDynTarget(K, C, mix, forbidden) {
+  var types = ['1K', '2K', '3K', '4K'];
+  var w = { '1K': 2, '2K': 3, '3K': 4, '4K': 5 };
+
+  var mixSum = 0;
+  for (var i = 0; i < types.length; i++) mixSum += (mix[types[i]] || 0);
+  if (mixSum === 0) mixSum = 100;
+  var alpha = {};
+  for (var i = 0; i < types.length; i++) alpha[types[i]] = (mix[types[i]] || 0) / mixSum;
+
+  var active = [];
+  for (var i = 0; i < types.length; i++) {
+    if (!forbidden[types[i]]) active.push(types[i]);
+  }
+  if (active.length === 0) return null;
+
+  var best = null;
+  var bestDev = Infinity;
+
+  // Enumerate all valid distributions with up to 4 active types
+  // Use first (active.length - 1) types as free variables, last from constraints
+  var na = active.length;
+  var last = active[na - 1];
+  var wLast = w[last];
+
+  if (na === 1) {
+    // Only one active type: n_last = K, check cells
+    if (K * wLast === C) {
+      best = {};
+      for (var i = 0; i < types.length; i++) best[types[i]] = 0;
+      best[last] = K;
+    }
+    return best;
+  }
+
+  // Enumerate free variables (all except last)
+  function enumerate(depth, kLeft, cLeft, sol) {
+    if (depth === na - 1) {
+      // Last active type absorbs remainder
+      if (kLeft < 0) return;
+      if (cLeft !== kLeft * wLast) return;
+      sol[last] = kLeft;
+
+      // Score
+      var dev = 0;
+      for (var i = 0; i < types.length; i++) {
+        var frac = C > 0 ? ((sol[types[i]] || 0) * w[types[i]]) / C : 0;
+        dev += Math.abs(frac - alpha[types[i]]);
+      }
+      if (dev < bestDev) {
+        bestDev = dev;
+        best = {};
+        for (var i = 0; i < types.length; i++) best[types[i]] = sol[types[i]] || 0;
+      }
+      return;
+    }
+
+    var t = active[depth];
+    var wt = w[t];
+    var maxN = Math.min(kLeft, Math.floor(cLeft / wt));
+    for (var n = 0; n <= maxN; n++) {
+      sol[t] = n;
+      enumerate(depth + 1, kLeft - n, cLeft - n * wt, sol);
+    }
+    sol[t] = 0;
+  }
+
+  var sol = {};
+  for (var i = 0; i < types.length; i++) sol[types[i]] = 0;
+  enumerate(0, K, C, sol);
+
+  return best;
+}
+
+// ── Dynamic Rebalance ─────────────────────────────────
+
+/**
+ * Single rebalance pass to match dynTarget.
+ * Replaces the old triple-rebalance (rebalance + growthRebalance + floorTargetRebalance).
+ */
+function dynamicRebalance(apartments, dynTarget, insolMap, N) {
+  var types = ['1K', '2K', '3K', '4K'];
+  var maxIter = 30;
+
+  for (var iter = 0; iter < maxIter; iter++) {
+    var placed = { '1K': 0, '2K': 0, '3K': 0, '4K': 0 };
+    for (var ai = 0; ai < apartments.length; ai++) {
+      var t = apartments[ai].type;
+      if (placed[t] !== undefined) placed[t]++;
+    }
+
+    var deficit = {};
+    var totalAbsDev = 0;
+    for (var i = 0; i < types.length; i++) {
+      deficit[types[i]] = (dynTarget[types[i]] || 0) - (placed[types[i]] || 0);
+      totalAbsDev += Math.abs(deficit[types[i]]);
+    }
+    if (totalAbsDev <= 1) break;
+
+    var improved = false;
+
+    for (var ai = 0; ai < apartments.length; ai++) {
+      var livA = countLiving(apartments[ai]);
+      var typeA = apartments[ai].type;
+      if ((deficit[typeA] || 0) >= 0) continue; // not oversupplied
+
+      for (var bi = 0; bi < apartments.length; bi++) {
+        if (bi === ai) continue;
+        if (!areAdjacent(apartments[ai], apartments[bi], N)) continue;
+
+        var livB = countLiving(apartments[bi]);
+        var typeB = apartments[bi].type;
+
+        // Try shrink A, grow B
+        if (livA >= 2 && livB + 1 <= 4) {
+          var newTypeA = aptType(livA - 1);
+          var newTypeB = aptType(livB + 1);
+
+          // Would this improve L1?
+          var oldD = Math.abs(deficit[typeA] || 0) + Math.abs(deficit[typeB] || 0)
+            + Math.abs(deficit[newTypeA] || 0) + Math.abs(deficit[newTypeB] || 0);
+
+          // Simulate deficit change
+          var sim = {};
+          for (var i = 0; i < types.length; i++) sim[types[i]] = deficit[types[i]] || 0;
+          if (typeA !== newTypeA) { sim[typeA]++; sim[newTypeA]--; }
+          if (typeB !== newTypeB) { sim[typeB]++; sim[newTypeB]--; }
+
+          var newD = Math.abs(sim[typeA]) + Math.abs(sim[typeB])
+            + Math.abs(sim[newTypeA]) + Math.abs(sim[newTypeB]);
+
+          if (newD < oldD) {
+            var transferred = transferCell(apartments[ai], apartments[bi], N, insolMap);
+            if (transferred) {
+              apartments[ai].type = newTypeA;
+              apartments[bi].type = newTypeB;
+              improved = true;
+              break;
+            }
+          }
+        }
+      }
+      if (improved) break;
+    }
+    if (!improved) break;
+  }
 }
 
 // ── Rebalance ────────────────────────────────────────
@@ -440,7 +576,7 @@ function rebalance(apartments, remaining, insolMap, N) {
             var newBad = Math.max(0, -newNeedA) + Math.max(0, -newNeedB);
 
             if (newBad < currentBad) {
-              var transferred = transferCell(apartments[ai], apartments[bi], N);
+              var transferred = transferCell(apartments[ai], apartments[bi], N, insolMap);
               if (transferred) {
                 if (typeA !== newTypeA) { remaining[typeA]++; remaining[newTypeA]--; }
                 if (typeB !== newTypeB) { remaining[typeB]++; remaining[newTypeB]--; }
@@ -463,7 +599,7 @@ function rebalance(apartments, remaining, insolMap, N) {
             var newBad2 = Math.max(0, -newNeedA2) + Math.max(0, -newNeedB2);
 
             if (newBad2 < currentBad) {
-              var transferred2 = transferCell(apartments[bi], apartments[ai], N);
+              var transferred2 = transferCell(apartments[bi], apartments[ai], N, insolMap);
               if (transferred2) {
                 if (typeA !== newTypeA2) { remaining[typeA]++; remaining[newTypeA2]--; }
                 if (typeB !== newTypeB2) { remaining[typeB]++; remaining[newTypeB2]--; }
@@ -490,9 +626,16 @@ function rebalance(apartments, remaining, insolMap, N) {
  * The cell must be adjacent to a cell in the receiver AND
  * must not be the donor's WZ.
  *
+ * Validates insolation: rejects transfers that would make
+ * either apartment invalid (e.g., 1K living without 'p').
+ *
+ * @param {Object} donor
+ * @param {Object} receiver
+ * @param {number} N
+ * @param {Object} [insolMap] - if provided, validates insolation after transfer
  * @returns {boolean} true if transfer succeeded
  */
-function transferCell(donor, receiver, N) {
+function transferCell(donor, receiver, N, insolMap) {
   // Build receiver cell set
   var recvSet = {};
   for (var ci = 0; ci < receiver.cells.length; ci++) {
@@ -521,6 +664,35 @@ function transferCell(donor, receiver, N) {
       if (!recvSet[nb]) continue;
       var nbRow = nb < N ? 0 : 1;
       if (nbRow !== cellRow) continue;
+
+      // ── Insolation guard: validate both apartments after transfer ──
+      if (insolMap) {
+        // Donor's remaining living after losing `cell`
+        var donorRemLiving = [];
+        for (var k = 0; k < donorLiving.length; k++) {
+          if (donorLiving[k] !== cell) donorRemLiving.push(donorLiving[k]);
+        }
+        // Reject if donor would have 0 living (degenerate WZ-only apartment)
+        if (donorRemLiving.length === 0) continue;
+        var dFlags = [];
+        for (var k = 0; k < donorRemLiving.length; k++) {
+          dFlags.push(getFlag(insolMap, donorRemLiving[k]));
+        }
+        if (!validateApartment(dFlags).valid) continue;
+
+        // Receiver's living after gaining `cell`
+        var recvLiving = [];
+        for (var k = 0; k < receiver.cells.length; k++) {
+          var rc = receiver.cells[k];
+          if (typeof rc === 'number' && rc !== receiver.wetCell) recvLiving.push(rc);
+        }
+        recvLiving.push(cell);
+        var rFlags = [];
+        for (var k = 0; k < recvLiving.length; k++) {
+          rFlags.push(getFlag(insolMap, recvLiving[k]));
+        }
+        if (!validateApartment(rFlags).valid) continue;
+      }
 
       // Valid transfer: remove from donor, add to receiver
       var newDonorCells = [];
@@ -587,7 +759,7 @@ function growthRebalance(apartments, remaining, insolMap, N) {
         if (livB !== 1) continue;
         if (!areAdjacent(apartments[ai], apartments[bi], N)) continue;
 
-        var transferred = transferCell(apartments[ai], apartments[bi], N);
+        var transferred = transferCell(apartments[ai], apartments[bi], N, insolMap);
         if (transferred) {
           remaining['3K'] = (remaining['3K'] || 0) + 1;
           remaining['1K'] = (remaining['1K'] || 0) + 1;
@@ -677,7 +849,7 @@ function floorTargetRebalance(apartments, floorTarget, insolMap, N) {
           var newDev = Math.abs(dA) + Math.abs(dB) + Math.abs(dNA) + Math.abs(dNB);
 
           if (newDev < oldDev) {
-            var transferred = transferCell(apartments[ai], apartments[bi], N);
+            var transferred = transferCell(apartments[ai], apartments[bi], N, insolMap);
             if (transferred) {
               apartments[ai].type = newTypeA;
               apartments[bi].type = newTypeB;

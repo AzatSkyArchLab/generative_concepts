@@ -52,10 +52,10 @@ export function allocateQuotas(sectionProfiles, globalMix) {
     // Single section — use global mix as-is
     var result = {};
     result[sectionProfiles[0].key] = {
-      '1K': globalMix['1K'] || 40,
-      '2K': globalMix['2K'] || 30,
-      '3K': globalMix['3K'] || 20,
-      '4K': globalMix['4K'] || 10
+      '1K': globalMix['1K'] != null ? globalMix['1K'] : 40,
+      '2K': globalMix['2K'] != null ? globalMix['2K'] : 30,
+      '3K': globalMix['3K'] != null ? globalMix['3K'] : 20,
+      '4K': globalMix['4K'] != null ? globalMix['4K'] : 10
     };
     return result;
   }
