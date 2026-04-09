@@ -99,25 +99,56 @@ export function walkRing(rows, cols, exitSide) {
 /**
  * Build a section-compatible graph from tower ring pairs.
  *
- * KEY DIFFERENCE from sections: each ring "position" (outer+inner pair)
- * is ONE solver cell. The inner row is marked as LLU — solver only
- * distributes apartments on the outer ring (near cells 0..K-1).
+ * KEY DESIGN:
+ * - Each ring position = one solver cell (outer+inner pair)
+ * - Inner row = LLU (solver only distributes apartments on outer ring)
+ * - Side transitions (corners) create cellId GAPS → segment breaks
+ *   This prevents L-shaped apartments spanning corners
+ * - No corridors — LLU core provides access directly
  *
- * After solving, each near cell's apartment expands to include its
- * paired inner cell (done by caller).
- *
- * No corridors — LLU core provides access directly.
- *
- * @param {Array} pairs - from walkRing
- * @param {Array<Array<[number,number]>>} cellPolygons - polygons for ALL grid cells
+ * @param {Array} pairs - from walkRing (with .side property)
+ * @param {Array<Array<[number,number]>>} cellPolygons - all grid cell polygons
  * @param {number} cols - grid columns
- * @param {number} floorCount - floors to generate (typically 2)
- * @returns {{ nodes: Object, edges: Array, K: number, ringPairs: Array }}
+ * @param {number} floorCount - floors to generate
+ * @returns {{ nodes, edges, K, N, ringPairs, posToCellId }}
  */
 export function buildTowerGraph(pairs, cellPolygons, cols, floorCount) {
   var K = pairs.length;
   var nodes = {};
   var edges = [];
+
+  // Assign cellIds with gaps at side transitions (corner breaks)
+  // But SKIP break if it would create a segment ≤1 position
+  var sideRuns = [];  // [{startIdx, endIdx, side}]
+  var runStart = 0;
+  for (var i = 1; i <= K; i++) {
+    if (i === K || pairs[i].side !== pairs[i - 1].side) {
+      sideRuns.push({ start: runStart, end: i - 1, side: pairs[runStart].side });
+      runStart = i;
+    }
+  }
+
+  // Decide which transitions to break
+  var breakBefore = {};  // position index → true if break before it
+  for (var si = 1; si < sideRuns.length; si++) {
+    var prevRun = sideRuns[si - 1];
+    var curRun = sideRuns[si];
+    var prevLen = prevRun.end - prevRun.start + 1;
+    var curLen = curRun.end - curRun.start + 1;
+    // Only break if both segments ≥ 2
+    if (prevLen >= 2 && curLen >= 2) {
+      breakBefore[curRun.start] = true;
+    }
+  }
+
+  var posToCellId = [];
+  var nextCid = 0;
+  for (var i = 0; i < K; i++) {
+    if (breakBefore[i]) nextCid++; // gap
+    posToCellId.push(nextCid);
+    nextCid++;
+  }
+  var N = nextCid;
 
   for (var floor = 0; floor < floorCount; floor++) {
     var isFirst = (floor === 0);
@@ -126,10 +157,11 @@ export function buildTowerGraph(pairs, cellPolygons, cols, floorCount) {
       var p = pairs[i];
       var outerGridId = p.outerRow * cols + p.outerCol;
       var innerGridId = p.innerRow * cols + p.innerCol;
+      var cid = posToCellId[i];
 
-      // Near cell = ring position (outer cell) → apartment on floor 1
-      nodes[i + ':' + floor] = {
-        cellId: i,
+      // Near cell = ring position → apartment on floor 1
+      nodes[cid + ':' + floor] = {
+        cellId: cid,
         floor: floor,
         type: isFirst ? 'commercial' : 'apartment',
         side: 'near',
@@ -137,11 +169,11 @@ export function buildTowerGraph(pairs, cellPolygons, cols, floorCount) {
         gridId: outerGridId,
         ringPos: i,
         ringSide: p.side,
-        label: i + '.' + floor
+        label: cid + '.' + floor
       };
 
-      // Far cell = inner cell → always LLU (part of core from solver's view)
-      var farCid = 2 * K - 1 - i;
+      // Far cell = inner → always LLU
+      var farCid = 2 * N - 1 - cid;
       nodes[farCid + ':' + floor] = {
         cellId: farCid,
         floor: floor,
@@ -156,9 +188,13 @@ export function buildTowerGraph(pairs, cellPolygons, cols, floorCount) {
       };
     }
 
-    // Horizontal near edges (ring adjacency)
+    // Horizontal near edges — break only at decided corners
     for (var i = 0; i < K - 1; i++) {
-      edges.push({ from: i + ':' + floor, to: (i + 1) + ':' + floor, type: 'horizontal' });
+      if (!breakBefore[i + 1]) {
+        var cidA = posToCellId[i];
+        var cidB = posToCellId[i + 1];
+        edges.push({ from: cidA + ':' + floor, to: cidB + ':' + floor, type: 'horizontal' });
+      }
     }
   }
 
@@ -172,7 +208,7 @@ export function buildTowerGraph(pairs, cellPolygons, cols, floorCount) {
     }
   }
 
-  return { nodes: nodes, edges: edges, K: K, ringPairs: pairs };
+  return { nodes: nodes, edges: edges, K: K, N: N, ringPairs: pairs, posToCellId: posToCellId };
 }
 
 /**

@@ -606,65 +606,76 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
 function generateTowerFacadePoints(tfpM, dims, exitSide, floorNum) {
   if (!floorNum) floorNum = 1;
   var floorBaseZ = 4.5 + (floorNum - 1) * 3.0;
-  var z = floorBaseZ + 1.6; // window sill height
+  var z = floorBaseZ + 1.6;
 
-  var ringResult = walkRing(dims.rows, dims.cols, exitSide);
-  var pairs = ringResult.pairs;
   var cellPolysM = generateCellsFromFootprint(tfpM, dims.rows, dims.cols);
+  var rows = dims.rows;
+  var cols = dims.cols;
+
+  // Classify cells to identify LLU
+  var cells = classifyCells(rows, cols, exitSide);
+
+  // Ring pair mapping for cellIdx
+  var ringResult = walkRing(rows, cols, exitSide);
+  var outerToRingIdx = {};
+  for (var i = 0; i < ringResult.pairs.length; i++) {
+    var p = ringResult.pairs[i];
+    outerToRingIdx[p.outerRow * cols + p.outerCol] = i;
+  }
 
   var points = [];
-  for (var i = 0; i < pairs.length; i++) {
-    var p = pairs[i];
-    var outerGridId = p.outerRow * dims.cols + p.outerCol;
-    var innerGridId = p.innerRow * dims.cols + p.innerCol;
+  for (var r = 0; r < rows; r++) {
+    for (var c = 0; c < cols; c++) {
+      var gridId = r * cols + c;
+      var cellType = cells[gridId] ? cells[gridId].type : 'apartment';
 
-    var outerPoly = cellPolysM[outerGridId];
-    var innerPoly = cellPolysM[innerGridId];
-    if (!outerPoly || !innerPoly) continue;
+      // Skip LLU cells — no insol points
+      if (cellType === 'llu' || cellType === 'llu-exit') continue;
 
-    // Outward normal: outer center - inner center
-    var ocx = 0, ocy = 0, icx = 0, icy = 0;
-    for (var v = 0; v < 4; v++) {
-      ocx += outerPoly[v][0]; ocy += outerPoly[v][1];
-      icx += innerPoly[v][0]; icy += innerPoly[v][1];
-    }
-    ocx /= 4; ocy /= 4; icx /= 4; icy /= 4;
-    var dx = ocx - icx;
-    var dy = ocy - icy;
-    var len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1e-10) continue;
-    var nx = dx / len;
-    var ny = dy / len;
+      // Only boundary cells
+      var isBoundary = (r === 0 || r === rows - 1 || c === 0 || c === cols - 1);
+      if (!isBoundary) continue;
 
-    // Find outward-facing edge of outer cell polygon:
-    // The edge whose midpoint has max dot product with outward normal
-    var bestEdgeMx = ocx;
-    var bestEdgeMy = ocy;
-    var bestDot = -Infinity;
-    for (var ei = 0; ei < 4; ei++) {
-      var ea = outerPoly[ei];
-      var eb = outerPoly[(ei + 1) % 4];
-      var emx = (ea[0] + eb[0]) / 2;
-      var emy = (ea[1] + eb[1]) / 2;
-      // Dot of (edgeMid - cellCenter) with outward normal
-      var d = (emx - ocx) * nx + (emy - ocy) * ny;
-      if (d > bestDot) {
-        bestDot = d;
-        bestEdgeMx = emx;
-        bestEdgeMy = emy;
+      var poly = cellPolysM[gridId];
+      if (!poly || poly.length < 4) continue;
+      var cc = [(poly[0][0]+poly[1][0]+poly[2][0]+poly[3][0])/4,
+                (poly[0][1]+poly[1][1]+poly[2][1]+poly[3][1])/4];
+
+      // Find exterior directions (1 for edge, 2 for corner)
+      var dirs = [];
+      if (r === 0 && r + 1 < rows) dirs.push({ nr: 1, nc: c });
+      if (r === rows - 1 && r - 1 >= 0) dirs.push({ nr: rows - 2, nc: c });
+      if (c === 0 && c + 1 < cols) dirs.push({ nr: r, nc: 1 });
+      if (c === cols - 1 && c - 1 >= 0) dirs.push({ nr: r, nc: cols - 2 });
+
+      for (var di = 0; di < dirs.length; di++) {
+        var nGid = dirs[di].nr * cols + dirs[di].nc;
+        var nPoly = cellPolysM[nGid];
+        if (!nPoly) continue;
+        var nc2 = [(nPoly[0][0]+nPoly[1][0]+nPoly[2][0]+nPoly[3][0])/4,
+                   (nPoly[0][1]+nPoly[1][1]+nPoly[2][1]+nPoly[3][1])/4];
+
+        var nx = cc[0] - nc2[0]; var ny = cc[1] - nc2[1];
+        var len = Math.sqrt(nx * nx + ny * ny);
+        if (len < 1e-10) continue;
+        nx /= len; ny /= len;
+
+        // Find outward edge
+        var bestMx = cc[0]; var bestMy = cc[1]; var bestDot = -Infinity;
+        for (var ei = 0; ei < 4; ei++) {
+          var ea = poly[ei]; var eb = poly[(ei + 1) % 4];
+          var emx = (ea[0] + eb[0]) / 2; var emy = (ea[1] + eb[1]) / 2;
+          var d = (emx - cc[0]) * nx + (emy - cc[1]) * ny;
+          if (d > bestDot) { bestDot = d; bestMx = emx; bestMy = emy; }
+        }
+
+        var px = bestMx + nx * 0.1;
+        var py = bestMy + ny * 0.1;
+
+        var cellIdx = outerToRingIdx[gridId] !== undefined ? outerToRingIdx[gridId] : -1;
+        points.push({ position: [px, py, z], side: 'near', cellIdx: cellIdx, normal: [nx, ny] });
       }
     }
-
-    // Place point on outer edge, offset slightly outward (+0.1m outside surface)
-    var px = bestEdgeMx + nx * 0.1;
-    var py = bestEdgeMy + ny * 0.1;
-
-    points.push({
-      position: [px, py, z],
-      side: 'near',
-      cellIdx: i,
-      normal: [nx, ny]
-    });
   }
 
   return points;

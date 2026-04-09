@@ -471,22 +471,116 @@ export function processAllSections() {
       var ringResult = walkRing(tDims.rows, tDims.cols, exitSide);
       var towerGraph = buildTowerGraph(ringResult.pairs, tPolysM, tDims.cols, 2);
       var K = towerGraph.K;
+      var N = towerGraph.N;
+      var posToCid = towerGraph.posToCellId;
 
-      // Run apartment solver on ring graph
-      // Far cells are LLU → solver only distributes apartments on near (positions 0..K-1)
-      // Each position = rectangular pair (outer+inner grid cells)
+      // Reverse map: cellId → ringPos
+      var cidToPos = {};
+      for (var ri = 0; ri < K; ri++) cidToPos[posToCid[ri]] = ri;
+
+      // ── WZ eligibility by cellId ──
+      var coreRowMin = 2, coreRowMax = tDims.rows - 3;
+      var coreColMin = 2, coreColMax = tDims.cols - 3;
+      var wzEligible = {};
+      for (var ri = 0; ri < K; ri++) {
+        var rp = ringResult.pairs[ri];
+        var ir = rp.innerRow, ic = rp.innerCol;
+        var adj = false;
+        if (ir - 1 >= coreRowMin && ir - 1 <= coreRowMax && ic >= coreColMin && ic <= coreColMax) adj = true;
+        if (ir + 1 >= coreRowMin && ir + 1 <= coreRowMax && ic >= coreColMin && ic <= coreColMax) adj = true;
+        if (ic - 1 >= coreColMin && ic - 1 <= coreColMax && ir >= coreRowMin && ir <= coreRowMax) adj = true;
+        if (ic + 1 >= coreColMin && ic + 1 <= coreColMax && ir >= coreRowMin && ir <= coreRowMax) adj = true;
+        wzEligible[posToCid[ri]] = adj;
+      }
+
+      // ── Insolation map (from previous analysis, floor 1) ──
+      var tInsolMap = null;
+      if (state.insolCellMap && state.insolCellMap[tLineId] &&
+          state.insolCellMap[tLineId][twi] && state.insolCellMap[tLineId][twi][1]) {
+        var rawFloor = state.insolCellMap[tLineId][twi][1];
+        if (rawFloor && rawFloor.points && rawFloor.points.length > 0) {
+          tInsolMap = {};
+          var FLAG_PRIO = { 'f': 1, 'w': 2, 'p': 3 };
+          for (var ipi = 0; ipi < rawFloor.points.length; ipi++) {
+            var ip = rawFloor.points[ipi];
+            // cellIdx = ring position index → convert to solver cellId
+            if (ip.cellIdx !== undefined && ip.cellIdx < K) {
+              var cid = posToCid[ip.cellIdx];
+              var oldFlag = tInsolMap[cid];
+              // Keep worst flag (lowest priority number)
+              if (!oldFlag || FLAG_PRIO[ip.flag] < FLAG_PRIO[oldFlag]) {
+                tInsolMap[cid] = ip.flag;
+              }
+            }
+          }
+        }
+      }
+
+      // ── Run solver ──
       var tAptResult = null;
-      var tCellAptMap = {};  // nearCid → {aptIdx, type, role}
+      var tCellAptMap = {};
       if (K > 0) {
-        tAptResult = solveFloor(towerGraph.nodes, K, 1, null, 'lon');
+        tAptResult = solveFloor(towerGraph.nodes, N, 1, tInsolMap, 'lon');
 
         if (tAptResult && tAptResult.apartments) {
-          for (var tai = 0; tai < tAptResult.apartments.length; tai++) {
-            var tApt = tAptResult.apartments[tai];
+          var apts = tAptResult.apartments;
+          var TYPE_UPGRADE = { '1K': '2K', '2K': '3K', '3K': '4K', '4K': '4K' };
+          var wzAssigned = {};
+
+          // Pass 1: cluster WZ in couples at eligible boundaries
+          for (var ai = 0; ai + 1 < apts.length; ai += 2) {
+            var cur = apts[ai];
+            var nxt = apts[ai + 1];
+            if (cur.type === 'orphan' || nxt.type === 'orphan') continue;
+            var curNums = [];
+            var nxtNums = [];
+            for (var ci2 = 0; ci2 < cur.cells.length; ci2++) {
+              if (typeof cur.cells[ci2] === 'number') curNums.push(cur.cells[ci2]);
+            }
+            for (var ci2 = 0; ci2 < nxt.cells.length; ci2++) {
+              if (typeof nxt.cells[ci2] === 'number') nxtNums.push(nxt.cells[ci2]);
+            }
+            if (curNums.length === 0 || nxtNums.length === 0) continue;
+            var curMax = curNums[curNums.length - 1];
+            var nxtMin = nxtNums[0];
+            if (curMax + 1 === nxtMin && wzEligible[curMax] && wzEligible[nxtMin]) {
+              cur.wetCell = curMax;
+              nxt.wetCell = nxtMin;
+              wzAssigned[ai] = true;
+              wzAssigned[ai + 1] = true;
+            }
+          }
+
+          // Pass 2: remaining — place WZ at best eligible cell, or keep solver default
+          for (var ai = 0; ai < apts.length; ai++) {
+            if (wzAssigned[ai]) continue;
+            var apt = apts[ai];
+            if (apt.type === 'orphan') continue;
+            var nums = [];
+            for (var ci2 = 0; ci2 < apt.cells.length; ci2++) {
+              if (typeof apt.cells[ci2] === 'number') nums.push(apt.cells[ci2]);
+            }
+            var eligCells = [];
+            for (var ci2 = 0; ci2 < nums.length; ci2++) {
+              if (wzEligible[nums[ci2]]) eligCells.push(nums[ci2]);
+            }
+            if (eligCells.length > 0) {
+              // Eligible WZ exists → place there, upgrade room type (one less WZ = one more living)
+              var best = eligCells[0];
+              if (eligCells.indexOf(nums[nums.length - 1]) >= 0) best = nums[nums.length - 1];
+              if (eligCells.indexOf(nums[0]) >= 0) best = nums[0];
+              apt.wetCell = best;
+            }
+            // else: no eligible cell → keep solver's original wetCell (suboptimal but functional)
+          }
+
+          // Build cellId → apt info map
+          for (var tai = 0; tai < apts.length; tai++) {
+            var tApt = apts[tai];
             var tAptCells = tApt.cells || [];
             for (var taci = 0; taci < tAptCells.length; taci++) {
               var taCid = tAptCells[taci];
-              if (typeof taCid !== 'number') continue;  // skip corridor labels
+              if (typeof taCid !== 'number') continue;
               tCellAptMap[taCid] = {
                 aptIdx: tai, type: tApt.type,
                 role: tApt.type === 'orphan' ? 'orphan' : (taCid === tApt.wetCell ? 'wet' : 'living'),
@@ -508,7 +602,7 @@ export function processAllSections() {
         var outerGid = rp.outerRow * tDims.cols + rp.outerCol;
         var innerGid = rp.innerRow * tDims.cols + rp.innerCol;
 
-        var aptInfo = tCellAptMap[ri];
+        var aptInfo = tCellAptMap[posToCid[ri]]; // cellId from ring position
         if (!aptInfo) continue;
 
         var pal = APT_COLORS[aptInfo.type] || APT_COLORS['orphan'];
@@ -565,10 +659,10 @@ export function processAllSections() {
           state.threeOverlay.addMesh(
             buildCellMeshColored(tPolysM[tci], 0, firstFloorH, TYPE_COLORS.commercial, 0.03));
         }
-        // Floor 1: detailed — apartment-colored boxes with facade windows
+        // Floor 1: detailed — apartment-colored boxes with facade windows + labels
         state.threeOverlay.addMesh(
-          buildDetailedTowerFloor1(ringResult.pairs, tPolysM, tDims.cols,
-            firstFloorH, tFloor1Top, gridAptColor, tCells));
+          buildDetailedTowerFloor1(ringResult.pairs, tPolysM, tDims.cols, tDims.rows,
+            firstFloorH, tFloor1Top, gridAptColor, gridAptLabel, tCells));
 
         state.threeOverlay.addMesh(buildSectionWireframe(tfpM, 0, thisTBuildingH));
         state.threeOverlay.addMesh(buildFloorLabel(thisTFloorCount + 'F', tfpM, thisTBuildingH));
