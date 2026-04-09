@@ -34,11 +34,11 @@ export function packTowers(axisLength, orientation, options) {
   if (!options) options = {};
   var gap = options.gap != null ? options.gap : DEFAULT_GAP;
   var cellSize = options.cellSize || DEFAULT_CELL_SIZE;
+  var forcedSize = options.forcedSize || null;
 
   // Determine which tower size to use
-  // For meridional: try each tower size, pick largest that allows ≥1 tower
-  var size = chooseTowerSize(orientation, axisLength, cellSize);
-  var dims = getTowerDimensions(size, cellSize);
+  var size = forcedSize || chooseTowerSize(orientation, axisLength, cellSize);
+  var dims = getTowerDimensions(size, cellSize, orientation);
 
   // Try to pack as many as possible with gap
   var towerLen = dims.lengthAlong;
@@ -49,12 +49,12 @@ export function packTowers(axisLength, orientation, options) {
     // Can't fit even one — try smaller sizes
     if (size === 'large') {
       size = 'medium';
-      dims = getTowerDimensions(size, cellSize);
+      dims = getTowerDimensions(size, cellSize, orientation);
       towerLen = dims.lengthAlong;
     }
     if (axisLength < towerLen && size === 'medium') {
       size = 'small';
-      dims = getTowerDimensions(size, cellSize);
+      dims = getTowerDimensions(size, cellSize, orientation);
       towerLen = dims.lengthAlong;
     }
     if (axisLength < towerLen) {

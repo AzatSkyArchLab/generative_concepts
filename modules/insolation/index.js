@@ -907,7 +907,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
     for (var tfi = 0; tfi < tFP.length; tfi++) {
       var tfp = tFP[tfi];
       var tSize = tfp.size || 'small';
-      var tDims = getTowerDimensions(tSize, tCellSize);
+      var tDims = getTowerDimensions(tSize, tCellSize, tOri.orientationName);
 
       var tfpM = buildFpM(tfp, proj);
 

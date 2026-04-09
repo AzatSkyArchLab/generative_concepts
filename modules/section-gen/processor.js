@@ -441,7 +441,7 @@ export function processAllSections() {
     for (var twi = 0; twi < recomputedFP.length; twi++) {
       var tfp = recomputedFP[twi];
       var tSize = tfp.size || 'small';
-      var tDims = getTowerDimensions(tSize, tCellSize);
+      var tDims = getTowerDimensions(tSize, tCellSize, tOrientation);
 
       // Per-tower height override (like per-section sectionHeight)
       var thisTowerH = tfp.towerHeight !== undefined ? tfp.towerHeight : towerH;
@@ -524,7 +524,8 @@ export function processAllSections() {
 
         if (tAptResult && tAptResult.apartments) {
           var apts = tAptResult.apartments;
-          var TYPE_UPGRADE = { '1K': '2K', '2K': '3K', '3K': '4K', '4K': '4K' };
+          var TYPE_FROM_COUNT = { 2: '1K', 3: '2K', 4: '3K', 5: '4K' };
+          function typeFromCount(n) { return TYPE_FROM_COUNT[n] || (n <= 1 ? 'orphan' : '4K'); }
           var wzAssigned = {};
 
           // Pass 1: cluster WZ in couples at eligible boundaries
@@ -565,14 +566,107 @@ export function processAllSections() {
               if (wzEligible[nums[ci2]]) eligCells.push(nums[ci2]);
             }
             if (eligCells.length > 0) {
-              // Eligible WZ exists → place there, upgrade room type (one less WZ = one more living)
               var best = eligCells[0];
               if (eligCells.indexOf(nums[nums.length - 1]) >= 0) best = nums[nums.length - 1];
               if (eligCells.indexOf(nums[0]) >= 0) best = nums[0];
               apt.wetCell = best;
             }
-            // else: no eligible cell → keep solver's original wetCell (suboptimal but functional)
           }
+
+          // Pass 3: orphan absorption across side boundaries (L-shape OK if core access)
+          // Build cellId → aptIdx map
+          var cidToApt = {};
+          for (var ai = 0; ai < apts.length; ai++) {
+            for (var ci2 = 0; ci2 < apts[ai].cells.length; ci2++) {
+              var cid = apts[ai].cells[ci2];
+              if (typeof cid === 'number') cidToApt[cid] = ai;
+            }
+          }
+
+          // For each orphan, try merging with physical ring neighbor
+          for (var ai = 0; ai < apts.length; ai++) {
+            if (apts[ai].type !== 'orphan') continue;
+            var orphanCells = [];
+            for (var ci2 = 0; ci2 < apts[ai].cells.length; ci2++) {
+              if (typeof apts[ai].cells[ci2] === 'number') orphanCells.push(apts[ai].cells[ci2]);
+            }
+            if (orphanCells.length === 0) continue;
+            var orphanCid = orphanCells[0];
+
+            // Find orphan's ring position
+            var orphanPos = cidToPos[orphanCid];
+            if (orphanPos === undefined) continue;
+
+            // Check ring neighbors (pos-1, pos+1)
+            var merged = false;
+            var neighborPositions = [];
+            if (orphanPos > 0) neighborPositions.push(orphanPos - 1);
+            if (orphanPos < K - 1) neighborPositions.push(orphanPos + 1);
+
+            for (var ni = 0; ni < neighborPositions.length; ni++) {
+              var nPos = neighborPositions[ni];
+              var nCid = posToCid[nPos];
+              var nAptIdx = cidToApt[nCid];
+              if (nAptIdx === undefined) continue;
+              var nApt = apts[nAptIdx];
+              if (nApt.type === 'orphan') continue;
+
+              // Check: would merged apartment have core access?
+              var mergedHasCore = false;
+              for (var ci2 = 0; ci2 < nApt.cells.length; ci2++) {
+                if (typeof nApt.cells[ci2] === 'number' && wzEligible[nApt.cells[ci2]]) {
+                  mergedHasCore = true;
+                  break;
+                }
+              }
+              if (!mergedHasCore && wzEligible[orphanCid]) mergedHasCore = true;
+
+              if (mergedHasCore) {
+                // Merge orphan into neighbor apartment
+                for (var ci2 = 0; ci2 < orphanCells.length; ci2++) {
+                  nApt.cells.push(orphanCells[ci2]);
+                  cidToApt[orphanCells[ci2]] = nAptIdx;
+                }
+                // Upgrade type based on actual cell count
+                var mergedCount = 0;
+                for (var ci3 = 0; ci3 < nApt.cells.length; ci3++) {
+                  if (typeof nApt.cells[ci3] === 'number') mergedCount++;
+                }
+                nApt.type = typeFromCount(mergedCount);
+                apts[ai].type = '_merged';
+                apts[ai].cells = [];
+                merged = true;
+                break;
+              }
+            }
+          }
+
+          // Final: recalculate types from cell counts + filter merged
+          var cleanApts = [];
+          for (var ai = 0; ai < apts.length; ai++) {
+            if (apts[ai].type === '_merged') continue;
+            var apt = apts[ai];
+            if (apt.type !== 'orphan') {
+              var nc = 0;
+              for (var ci2 = 0; ci2 < apt.cells.length; ci2++) {
+                if (typeof apt.cells[ci2] === 'number') nc++;
+              }
+              apt.type = typeFromCount(nc);
+            }
+            cleanApts.push(apt);
+          }
+          apts = cleanApts;
+          tAptResult.apartments = apts;
+
+          // Diagnostic
+          var diagTypes = {};
+          var diagOrphans = 0;
+          for (var ai = 0; ai < apts.length; ai++) {
+            diagTypes[apts[ai].type] = (diagTypes[apts[ai].type] || 0) + 1;
+            if (apts[ai].type === 'orphan') diagOrphans++;
+          }
+          console.log('[Tower] twi=' + twi + ' K=' + K + ' N=' + N + ' apts=' + apts.length +
+            ' orphans=' + diagOrphans + ' mix=' + JSON.stringify(diagTypes));
 
           // Build cellId → apt info map
           for (var tai = 0; tai < apts.length; tai++) {

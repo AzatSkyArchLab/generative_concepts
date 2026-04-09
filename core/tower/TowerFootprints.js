@@ -27,9 +27,10 @@ export function computeTowerFootprints(startM, endM, props, toLngLat) {
   var cellSize = props.cellSize || DEFAULT_CELL_SIZE;
   var gap = props.towerGap != null ? props.towerGap : 20;
   var flipped = props.flipped || false;
+  var forcedSize = props.forcedSize || null;
 
   var ori = classifySegment(startM, endM);
-  var towers = packTowers(totalLen, ori.orientationName, { cellSize: cellSize, gap: gap });
+  var towers = packTowers(totalLen, ori.orientationName, { cellSize: cellSize, gap: gap, forcedSize: forcedSize });
   if (towers.length === 0) return [];
 
   var dirX = dx / totalLen;

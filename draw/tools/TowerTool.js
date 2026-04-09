@@ -15,7 +15,7 @@ import { SectionPreviewLayer } from '../layers/SectionPreviewLayer.js';
 import { createProjection } from '../../core/geo/projection.js';
 import { classifySegment } from '../../modules/urban-block/orientation.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
-import { DEFAULT_CELL_SIZE } from '../../core/tower/TowerGenerator.js';
+import { TOWER_SIZES, DEFAULT_CELL_SIZE } from '../../core/tower/TowerGenerator.js';
 import { computeTowerFootprints } from '../../core/tower/TowerFootprints.js';
 
 export class TowerTool extends BaseTool {
@@ -30,14 +30,17 @@ export class TowerTool extends BaseTool {
     this._startLL = null;
     this._proj = null;
     this._flipped = false;
+    this._forcedSize = null;  // null=auto, 'small', 'medium', 'large'
     this._lastCursorLL = null;
     this._rightClickHandler = null;
+    this._middleClickHandler = null;
   }
 
   activate() {
     super.activate();
     this._startLL = null;
     this._flipped = false;
+    this._forcedSize = null;
     if (!this._previewLayer) {
       this._previewLayer = new SectionPreviewLayer(this._mapManager);
       this._previewLayer.init();
@@ -50,7 +53,37 @@ export class TowerTool extends BaseTool {
         if (self._lastCursorLL) self._updatePreview(self._lastCursorLL);
       }
     };
+    this._middleClickHandler = function (e) {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      if (!self._startLL) return;
+
+      // Determine current orientation from preview
+      var cursorLL = self._lastCursorLL;
+      if (!cursorLL) return;
+      var sm = self._proj.toMeters(self._startLL[0], self._startLL[1]);
+      var em = self._proj.toMeters(cursorLL[0], cursorLL[1]);
+      var ori = classifySegment(sm, em);
+
+      // Different cycles per orientation:
+      // Lat: null(7×7) → medium(7×9) → large(7×12) → null
+      // Lon: null(auto) → small(7×7) → medium(9×7) → large(12×7) → null
+      var cycle;
+      if (ori.orientationName === 'lat') {
+        cycle = [null, 'medium', 'large'];
+      } else {
+        cycle = [null, 'small', 'medium', 'large'];
+      }
+
+      var idx = cycle.indexOf(self._forcedSize);
+      self._forcedSize = cycle[(idx + 1) % cycle.length];
+
+      var label = self._forcedSize || 'auto';
+      console.log('[TowerTool] size: ' + label + ' (' + ori.orientationName + ')');
+      self._updatePreview(cursorLL);
+    };
     this._mapManager.getMap().getCanvas().addEventListener('contextmenu', this._rightClickHandler);
+    this._mapManager.getMap().getCanvas().addEventListener('mousedown', this._middleClickHandler);
     eventBus.emit('draw:start');
   }
 
@@ -61,8 +94,13 @@ export class TowerTool extends BaseTool {
       this._mapManager.getMap().getCanvas().removeEventListener('contextmenu', this._rightClickHandler);
       this._rightClickHandler = null;
     }
+    if (this._middleClickHandler) {
+      this._mapManager.getMap().getCanvas().removeEventListener('mousedown', this._middleClickHandler);
+      this._middleClickHandler = null;
+    }
     this._startLL = null;
     this._lastCursorLL = null;
+    this._forcedSize = null;
     eventBus.emit('draw:end');
   }
 
@@ -104,7 +142,7 @@ export class TowerTool extends BaseTool {
     if (totalLen < 1) return { fpMeters: [], fpLngLat: [], oriName: 'lat', totalLen: 0 };
 
     var ori = classifySegment(startM, endM);
-    var props = { cellSize: DEFAULT_CELL_SIZE, towerGap: 20, flipped: this._flipped };
+    var props = { cellSize: DEFAULT_CELL_SIZE, towerGap: 20, flipped: this._flipped, forcedSize: this._forcedSize };
 
     // Meter-space (for preview)
     var fpMeters = computeTowerFootprints(startM, endM, props, null);
@@ -153,6 +191,7 @@ export class TowerTool extends BaseTool {
         cellSize: DEFAULT_CELL_SIZE,
         towerHeight: 112,
         towerGap: 20,
+        forcedSize: this._forcedSize,
         northEnd: northEnd,
         footprints: result.fpLngLat
       },
@@ -169,5 +208,6 @@ export class TowerTool extends BaseTool {
     this._startLL = null;
     this._lastCursorLL = null;
     this._flipped = false;
+    this._forcedSize = null;
   }
 }

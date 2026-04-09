@@ -64,14 +64,23 @@ export function chooseTowerSize(orientation, availableLength, cellSize) {
  * @param {number} [cellSize]
  * @returns {{ widthAcross: number, lengthAlong: number, rows: number, cols: number }}
  */
-export function getTowerDimensions(size, cellSize) {
+export function getTowerDimensions(size, cellSize, orientation) {
   if (!cellSize) cellSize = DEFAULT_CELL_SIZE;
   var s = TOWER_SIZES[size] || TOWER_SIZES.small;
+  var r = s.rows;
+  var c = s.cols;
+
+  // Latitudinal: tower extends perpendicular to axis (cols grow, rows stay 7)
+  if (orientation === 'lat' && size !== 'small') {
+    r = s.cols;  // 7 along axis
+    c = s.rows;  // 9 or 12 across axis
+  }
+
   return {
-    widthAcross: s.cols * cellSize,
-    lengthAlong: s.rows * cellSize,
-    rows: s.rows,
-    cols: s.cols,
+    widthAcross: c * cellSize,
+    lengthAlong: r * cellSize,
+    rows: r,
+    cols: c,
     cellSize: cellSize
   };
 }
