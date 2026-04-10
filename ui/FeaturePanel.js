@@ -11,6 +11,8 @@
  */
 
 import { eventBus } from '../core/EventBus.js';
+import { solveUrbanBlock } from '../core/urban-block/UrbanBlockSolver.js';
+import { createProjection } from '../core/geo/projection.js';
 import { commandManager } from '../core/commands/CommandManager.js';
 import { UpdateFeatureCommand } from '../core/commands/UpdateFeatureCommand.js';
 import { DEFAULT_PARAMS, getParams, computeFloorCount, computeBuildingHeight, autoFireDist } from '../core/SectionParams.js';
@@ -40,6 +42,7 @@ export class FeaturePanel {
     this._editAxisId = null;
     this._editSelectedIndices = [];
     this._paramsOpen = false;
+    this._undergroundVisible = true;
   }
 
   init() { this._render(); this._setupEvents(); }
@@ -52,11 +55,13 @@ export class FeaturePanel {
       '<span class="panel-badge" id="feature-count">0</span></div>' +
       '<div class="panel-body"><div id="feature-list"></div><div id="section-props"></div>' +
       '<div id="buffer-section"></div><div id="insol-section"></div>' +
+      '<div id="underground-section"></div>' +
       '<div id="apt-mix-section"></div>' +
       '<div id="quota-section"></div>' +
       '<div id="stats-section"></div></div>';
     renderBufferSection();
     renderInsolSection();
+    this._renderUnderground();
     renderAptMixSection();
     renderQuotaSection();
     injectQuotaStyles();
@@ -66,6 +71,35 @@ export class FeaturePanel {
 
   _refreshInsolButton() {
     updateInsolButton(this._featureStore, this._editAxisId, this._editSelectedIndices, this._selectedIds);
+  }
+
+  _renderUnderground() {
+    var el = document.getElementById('underground-section');
+    if (!el) return;
+
+    // Only show when there are section or tower axes
+    var all = this._featureStore.toArray();
+    var hasBuildings = false;
+    for (var i = 0; i < all.length; i++) {
+      var t = all[i].properties.type;
+      if (t === 'section-axis' || t === 'tower-axis') { hasBuildings = true; break; }
+    }
+    if (!hasBuildings) { el.innerHTML = ''; return; }
+
+    var isVis = this._undergroundVisible;
+    el.innerHTML =
+      '<div style="padding:4px 12px">' +
+      '<button class="ug-toggle-btn' + (isVis ? ' active' : '') + '" id="underground-toggle-btn">' +
+      '<span class="ug-toggle-icon">▼</span>' +
+      '<span id="underground-label">' + (isVis ? 'Hide underground' : 'Show underground') + '</span>' +
+      '</button></div>';
+
+    var btn = document.getElementById('underground-toggle-btn');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        eventBus.emit('underground:toggle');
+      });
+    }
   }
 
   _updateAptMixVisibility() {
@@ -85,6 +119,7 @@ export class FeaturePanel {
     eventBus.on('features:changed', function () {
       self._updateList(); self._updateProps(); self._refreshInsolButton();
       self._updateAptMixVisibility();
+      self._renderUnderground();
       resetDistributeState();
       resetBuildingPlans();
     });
@@ -149,6 +184,17 @@ export class FeaturePanel {
     eventBus.on('building:plans:reset', function () { resetBuildingPlans(); });
     eventBus.on('building:plan:result', function (data) { showBuildingPlan(data.sectionKey, data.plan); });
     eventBus.on('quota:resolved', function (data) { updateQuotaResults(data); });
+
+    eventBus.on('underground:visibility', function (d) {
+      self._undergroundVisible = d.visible;
+      var lbl = document.getElementById('underground-label');
+      if (lbl) lbl.textContent = d.visible ? 'Hide underground' : 'Show underground';
+      var btn = document.getElementById('underground-toggle-btn');
+      if (btn) {
+        if (d.visible) btn.classList.add('active');
+        else btn.classList.remove('active');
+      }
+    });
   }
 
   // ── Feature list ────────────────────────────────────
@@ -202,19 +248,408 @@ export class FeaturePanel {
     }
 
     var sectionFeatures = []; var lineFeatures = []; var towerFeatures = [];
+    var blockFeature = null;
     for (var i = 0; i < this._selectedIds.length; i++) {
       var f = this._featureStore.get(this._selectedIds[i]);
       if (!f) continue;
       if (f.properties.type === 'section-axis') sectionFeatures.push(f);
       else if (f.properties.type === 'tower-axis') towerFeatures.push(f);
+      else if (f.properties.urbanBlock) blockFeature = f;
       else if (f.geometry.type === 'LineString') lineFeatures.push(f);
     }
     var html = '';
+    if (blockFeature) html += this._renderBlockProps(blockFeature);
     if (sectionFeatures.length > 0) html += this._renderSectionProps(sectionFeatures);
     if (towerFeatures.length > 0) html += this._renderTowerProps(towerFeatures);
     if (lineFeatures.length > 0) html += this._renderLineProps(lineFeatures);
     propsEl.innerHTML = html;
     this._bindInputs();
+    this._bindBlockInputs(blockFeature);
+  }
+
+  _renderBlockProps(f) {
+    var bid = f.properties.id;
+    var p = f.properties.blockParams || {};
+    var all = this._featureStore.toArray();
+    var axCount = 0; var secCount = 0; var totalLen = 0;
+    var latSecs = 0; var lonSecs = 0;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].properties.blockId === bid) {
+        axCount++;
+        var fps = all[i].properties.footprints;
+        if (fps) {
+          secCount += fps.length;
+          for (var j = 0; j < fps.length; j++) totalLen += fps[j].length;
+        }
+        if (all[i].properties.orientation === 'lat') latSecs += (fps ? fps.length : 0);
+        else lonSecs += (fps ? fps.length : 0);
+      }
+    }
+
+    function sli(id, label, val, min, max, step, unit) {
+      return '<div style="margin-bottom:5px">' +
+        '<div style="display:flex;justify-content:space-between;margin-bottom:1px">' +
+        '<span style="font-weight:600;font-size:11px">' + label + '</span>' +
+        '<span id="' + id + '-val" style="font-weight:700;color:#8b5cf6;font-size:11px">' + val + unit + '</span></div>' +
+        '<input type="range" id="' + id + '" min="' + min + '" max="' + max + '" step="' + step + '" value="' + val + '" ' +
+        'data-unit="' + unit + '" ' +
+        'style="width:100%;height:3px;accent-color:#8b5cf6"/></div>';
+    }
+
+    return '<div class="props-section" style="background:rgba(139,92,246,0.06);border-radius:6px;margin:4px 0">' +
+      '<div class="props-header" style="color:#8b5cf6">Urban Block</div>' +
+      '<div style="padding:4px 12px 6px;font-size:11px">' +
+
+      // Stats
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin-bottom:6px">' +
+      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">Axes</span><span style="font-weight:600">' + axCount + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">Sections</span><span style="font-weight:600">' + secCount + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">[Ш]</span><span>' + latSecs + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">[М]</span><span>' + lonSecs + '</span></div>' +
+      '<div style="display:flex;justify-content:space-between;grid-column:span 2"><span style="opacity:0.6">Total length</span><span style="font-weight:600">' + totalLen.toFixed(0) + 'м</span></div>' +
+      '</div>' +
+
+      '<div class="props-divider"></div>' +
+      '<div style="font-size:9px;opacity:0.4;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Buffers &amp; Sections</div>' +
+
+      sli('ub-sw', 'Section width', p.sw != null ? p.sw : 18, 10, 25, 1, 'м') +
+      sli('ub-fire', 'Fire', p.fire != null ? p.fire : 14, 6, 30, 1, 'м') +
+      sli('ub-end', 'End', p.endB != null ? p.endB : 20, 10, 40, 1, 'м') +
+      sli('ub-insol', 'Insol', p.insol != null ? p.insol : 30, 10, 80, 1, 'м') +
+      sli('ub-gap', 'Gap', p.gapTarget != null ? p.gapTarget : 22, 15, 40, 1, 'м') +
+
+      '<div style="margin-top:4px">' +
+      '<label style="font-weight:600;display:block;margin-bottom:2px;font-size:11px">Lat [Ш] (м)</label>' +
+      '<input id="ub-lat-lens" value="' + (p.latLens || [27, 30]).join(',') + '" ' +
+      'style="width:100%;padding:4px 6px;font-size:11px;border:1px solid rgba(139,92,246,0.25);border-radius:4px;font-family:inherit;box-sizing:border-box;background:rgba(139,92,246,0.04);color:inherit"/></div>' +
+      '<div style="margin-top:4px">' +
+      '<label style="font-weight:600;display:block;margin-bottom:2px;font-size:11px">Lon [М] (м)</label>' +
+      '<input id="ub-lon-lens" value="' + (p.lonLens || [36, 39, 42, 46, 49]).join(',') + '" ' +
+      'style="width:100%;padding:4px 6px;font-size:11px;border:1px solid rgba(139,92,246,0.25);border-radius:4px;font-family:inherit;box-sizing:border-box;background:rgba(139,92,246,0.04);color:inherit"/></div>' +
+
+      '<div class="props-divider" style="margin-top:8px"></div>' +
+      '<div style="font-size:9px;opacity:0.4;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Height Distribution</div>' +
+      sli('ub-spp', 'Target SPP', p.spp || 80000, 20000, 200000, 5000, 'м²') +
+      '<button id="block-spp-btn" class="ug-toggle-btn active" style="width:100%;border-color:rgba(245,158,11,0.5);color:#f59e0b;margin-bottom:4px">' +
+      '<span style="font-size:12px">▲</span> Apply heights</button>' +
+
+      '<div class="props-divider" style="margin-top:4px"></div>' +
+      '<div style="display:flex;gap:6px;margin-top:4px">' +
+      '<button id="block-rebuild-btn" class="ug-toggle-btn" style="flex:1;border-color:rgba(139,92,246,0.4);color:#8b5cf6">' +
+      '<span style="font-size:12px">↻</span> Rebuild</button>' +
+      '<button id="block-delete-btn" class="ug-toggle-btn" style="flex:1;border-color:rgba(239,68,68,0.4);color:#ef4444">' +
+      '<span style="font-size:12px">✕</span> Delete</button>' +
+      '</div>' +
+
+      '</div></div>';
+  }
+
+  _bindBlockInputs(blockFeature) {
+    if (!blockFeature) return;
+    var bid = blockFeature.properties.id;
+    var self = this;
+
+    // Live slider value display
+    var sliderIds = ['ub-sw', 'ub-fire', 'ub-end', 'ub-insol', 'ub-gap', 'ub-spp'];
+    for (var si = 0; si < sliderIds.length; si++) {
+      (function (sid) {
+        var slider = document.getElementById(sid);
+        var valSpan = document.getElementById(sid + '-val');
+        if (slider && valSpan) {
+          slider.addEventListener('input', function () {
+            valSpan.textContent = slider.value + (slider.dataset.unit || '');
+          });
+        }
+      })(sliderIds[si]);
+    }
+
+    // Delete button
+    var delBtn = document.getElementById('block-delete-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', function () {
+        var all = self._featureStore.toArray();
+        for (var i = 0; i < all.length; i++) {
+          if (all[i].properties.id === bid || all[i].properties.blockId === bid) {
+            self._featureStore._features.delete(all[i].properties.id);
+          }
+        }
+        self._selectedIds = [];
+        self._editAxisId = null;
+        self._editSelectedIndices = [];
+        eventBus.emit('feature:deselected');
+        eventBus.emit('features:changed');
+      });
+    }
+
+    // Rebuild button
+    var rebuildBtn = document.getElementById('block-rebuild-btn');
+    if (rebuildBtn) {
+      rebuildBtn.addEventListener('click', function () {
+        self._rebuildBlock(blockFeature);
+      });
+    }
+
+    // SPP height distribution
+    var sppBtn = document.getElementById('block-spp-btn');
+    if (sppBtn) {
+      sppBtn.addEventListener('click', function () {
+        self._applySPP(blockFeature);
+      });
+    }
+  }
+
+  _applySPP(blockFeature) {
+    var bid = blockFeature.properties.id;
+    var sppEl = document.getElementById('ub-spp');
+    var targetSPP = sppEl ? parseFloat(sppEl.value) : 80000;
+    blockFeature.properties.blockParams.spp = targetSPP;
+
+    var AREA_COEFF = 0.65;
+    var FIRST_FLOOR_H = 4.5;
+    var TYPICAL_FLOOR_H = 3.0;
+    // Height tiers: tall → short
+    var MERID_HEIGHTS = [75, 55, 28];
+    var LAT_HEIGHTS = [55, 28];  // lat can go up to 55 if needed
+    var TOWER_HEIGHTS = [112, 75, 55];
+
+    // Collect all block axes
+    var all = this._featureStore.toArray();
+    var axes = [];
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].properties.blockId !== bid) continue;
+      var f = all[i];
+      var fps = f.properties.footprints;
+      if (!fps || fps.length === 0) continue;
+
+      var coords = f.geometry.coordinates;
+      var avgY = (coords && coords.length >= 2) ? (coords[0][1] + coords[1][1]) / 2 : 0;
+
+      // Footprint area from axis length × section width (much more reliable than lng/lat shoelace)
+      var totalFpArea = f.properties.axisLength * (blockFeature.properties.blockParams.sw || 18);
+
+      axes.push({
+        feature: f,
+        isTower: f.properties.type === 'tower-axis',
+        isLat: f.properties.orientation === 'lat',
+        northness: avgY,
+        fpArea: totalFpArea
+      });
+    }
+    if (axes.length === 0) return;
+
+    // Sort: towers first, then by northness descending
+    axes.sort(function (a, b) {
+      if (a.isTower !== b.isTower) return a.isTower ? -1 : 1;
+      return b.northness - a.northness;
+    });
+
+    function floorCount(h) {
+      if (h <= FIRST_FLOOR_H) return 1;
+      return 1 + Math.floor((h - FIRST_FLOOR_H) / TYPICAL_FLOOR_H);
+    }
+
+    function computeSPP(hMap) {
+      var total = 0;
+      for (var i = 0; i < axes.length; i++) {
+        var h = hMap[i];
+        var fc = floorCount(h);
+        var residential = Math.max(0, fc - 1);
+        total += axes[i].fpArea * AREA_COEFF * residential;
+      }
+      return total;
+    }
+
+    function getTiers(ax) {
+      if (ax.isTower) return TOWER_HEIGHTS;
+      if (ax.isLat) return LAT_HEIGHTS;
+      return MERID_HEIGHTS;
+    }
+
+    // Start: towers at max, merid at max, lat at min
+    var hMap = [];
+    for (var i = 0; i < axes.length; i++) {
+      var tiers = getTiers(axes[i]);
+      hMap.push(axes[i].isTower ? tiers[0] : (axes[i].isLat ? tiers[tiers.length - 1] : tiers[0]));
+    }
+
+    var spp = computeSPP(hMap);
+    console.log('[SPP] initial=' + Math.round(spp) + ' target=' + targetSPP);
+
+    // If too high: downgrade from south to north (reverse order)
+    if (spp > targetSPP * 1.05) {
+      for (var pass = 0; pass < 5 && spp > targetSPP * 1.05; pass++) {
+        for (var i = axes.length - 1; i >= 0; i--) {
+          var tiers = getTiers(axes[i]);
+          var curIdx = tiers.indexOf(hMap[i]);
+          if (curIdx < 0) curIdx = 0;
+          if (curIdx < tiers.length - 1) {
+            hMap[i] = tiers[curIdx + 1]; // downgrade one step
+            spp = computeSPP(hMap);
+            if (spp <= targetSPP * 1.05) break;
+          }
+        }
+      }
+    }
+
+    // If too low: upgrade from north to south
+    if (spp < targetSPP * 0.95) {
+      for (var pass = 0; pass < 5 && spp < targetSPP * 0.95; pass++) {
+        for (var i = 0; i < axes.length; i++) {
+          var tiers = getTiers(axes[i]);
+          var curIdx = tiers.indexOf(hMap[i]);
+          if (curIdx < 0) curIdx = tiers.length - 1;
+          if (curIdx > 0) {
+            var oldH = hMap[i];
+            hMap[i] = tiers[curIdx - 1]; // upgrade one step
+            spp = computeSPP(hMap);
+            if (spp > targetSPP * 1.05) { hMap[i] = oldH; spp = computeSPP(hMap); }
+          }
+          if (spp >= targetSPP * 0.95) break;
+        }
+      }
+    }
+
+    // Apply to features
+    for (var i = 0; i < axes.length; i++) {
+      if (axes[i].isTower) {
+        axes[i].feature.properties.towerHeight = hMap[i];
+      } else {
+        axes[i].feature.properties.sectionHeight = hMap[i];
+      }
+    }
+
+    spp = computeSPP(hMap);
+    var pct = targetSPP > 0 ? (spp / targetSPP * 100).toFixed(0) : '?';
+    console.log('[SPP] result=' + Math.round(spp) + 'm² (' + pct + '%) heights=' +
+      axes.map(function (a, i) { return (a.isLat ? 'Ш' : 'М') + ':' + hMap[i] + 'м'; }).join(' '));
+
+    eventBus.emit('features:changed');
+  }
+
+  _rebuildBlock(blockFeature) {
+    var bid = blockFeature.properties.id;
+
+    // Read current slider values
+    function val(id, fallback) {
+      var el = document.getElementById(id);
+      return el ? parseFloat(el.value) : fallback;
+    }
+    function parseLens(id, fallback) {
+      var el = document.getElementById(id);
+      if (!el) return fallback;
+      return el.value.split(',').map(function (v) { return parseFloat(v.trim()); }).filter(function (v) { return !isNaN(v) && v > 0; });
+    }
+
+    var params = {
+      sw: val('ub-sw', 15),
+      fire: val('ub-fire', 14),
+      endB: val('ub-end', 20),
+      insol: val('ub-insol', 30),
+      gapTarget: val('ub-gap', 22),
+      latLens: parseLens('ub-lat-lens', [27, 30]),
+      lonLens: parseLens('ub-lon-lens', [36, 39, 42, 46, 49])
+    };
+
+    // Update blockParams on feature
+    blockFeature.properties.blockParams = params;
+
+    // Remove old axes (keep polygon)
+    var all = this._featureStore.toArray();
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].properties.blockId === bid) {
+        this._featureStore._features.delete(all[i].properties.id);
+      }
+    }
+
+    // Get polygon coords from geometry
+    var polyLL = blockFeature.geometry.coordinates[0].slice();
+    if (polyLL.length > 0 && polyLL[polyLL.length - 1][0] === polyLL[0][0] &&
+        polyLL[polyLL.length - 1][1] === polyLL[0][1]) {
+      polyLL.pop(); // remove closing vertex
+    }
+
+    // Project to meters
+    var cx = 0; var cy = 0;
+    for (var i = 0; i < polyLL.length; i++) { cx += polyLL[i][0]; cy += polyLL[i][1]; }
+    cx /= polyLL.length; cy /= polyLL.length;
+    var proj = createProjection(cx, cy);
+
+    var polyM = [];
+    for (var i = 0; i < polyLL.length; i++) {
+      polyM.push(proj.toMeters(polyLL[i][0], polyLL[i][1]));
+    }
+
+    // Ensure CCW
+    var area = 0;
+    for (var i = 0; i < polyM.length; i++) {
+      var j = (i + 1) % polyM.length;
+      area += (polyM[j][0] + polyM[i][0]) * (polyM[j][1] - polyM[i][1]);
+    }
+    if (area < 0) { polyM.reverse(); polyLL.reverse(); }
+
+    // Solve
+    var axes = solveUrbanBlock(polyM, params);
+    var sw = params.sw;
+    var created = 0;
+
+    for (var ai = 0; ai < axes.length; ai++) {
+      var ax = axes[ai];
+      if (ax.removed || ax.length < 3 || !ax.oi || !ax.secs || ax.secs.length === 0) continue;
+
+      var startLL = proj.toLngLat(ax.start[0], ax.start[1]);
+      var endLL = proj.toLngLat(ax.end[0], ax.end[1]);
+      var oriName = ax.oriName || (ax.orientation === 1 ? 'lon' : 'lat');
+
+      var od = ax.oi.od;
+      var dirV = [ax.end[0] - ax.start[0], ax.end[1] - ax.start[1]];
+      var axLen = ax.length;
+      var dirN = axLen > 0 ? [dirV[0] / axLen, dirV[1] / axLen] : [1, 0];
+      var ox = od[0] * sw;
+      var oy = od[1] * sw;
+
+      var fpLngLat = [];
+      var pos = 0;
+      for (var si = 0; si < ax.secs.length; si++) {
+        var sec = ax.secs[si];
+        if (sec.gap) { pos += sec.l; continue; }
+        var sx = ax.start[0] + dirN[0] * pos;
+        var sy = ax.start[1] + dirN[1] * pos;
+        var ex = ax.start[0] + dirN[0] * (pos + sec.l);
+        var ey = ax.start[1] + dirN[1] * (pos + sec.l);
+        var pm = [[sx, sy], [ex, ey], [ex + ox, ey + oy], [sx + ox, sy + oy]];
+        var pll = [];
+        for (var j = 0; j < pm.length; j++) pll.push(proj.toLngLat(pm[j][0], pm[j][1]));
+        fpLngLat.push({ polygon: pll, length: sec.l });
+        pos += sec.l;
+      }
+      if (fpLngLat.length === 0) continue;
+
+      var id = crypto.randomUUID();
+      this._featureStore._features.set(id, {
+        type: 'Feature',
+        properties: {
+          id: id,
+          type: 'section-axis',
+          createdAt: new Date().toISOString(),
+          flipped: false,
+          orientation: oriName,
+          axisLength: axLen,
+          footprints: fpLngLat,
+          blockId: bid,
+          context: ax.context,
+          trimmed: ax.trimmed || false
+        },
+        geometry: {
+          type: 'LineString',
+          coordinates: [startLL, endLL]
+        }
+      });
+      created++;
+    }
+
+    console.log('[UrbanBlock] rebuilt ' + bid.slice(0, 6) + ': ' + created + ' axes');
+    this._selectedIds = [bid];
+    eventBus.emit('features:changed');
   }
 
   _renderSelectedSections() {

@@ -135,6 +135,14 @@ var sectionGenModule = {
     state.unsubs.push(state.eventBus.on('building:report:generate', function () {
       generateReport(state.buildingPlans, state.graphDataMap);
     }));
+    state.unsubs.push(state.eventBus.on('underground:toggle', function () {
+      state.undergroundVisible = !state.undergroundVisible;
+      if (state.undergroundGroup) {
+        state.undergroundGroup.visible = state.undergroundVisible;
+        if (state.threeOverlay) state.threeOverlay.requestRender();
+      }
+      state.eventBus.emit('underground:visibility', { visible: state.undergroundVisible });
+    }));
 
     console.log('[section-gen] initialized');
   },

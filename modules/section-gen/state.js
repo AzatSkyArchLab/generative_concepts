@@ -27,7 +27,9 @@ export var state = {
   aptMix: { '1K': 40, '2K': 30, '3K': 20, '4K': 10 },
   buildingPlans: {},     // { lineId_fi: buildingPlanResult }
   graphDataMap: {},      // { lineId_fi: { nodes, N, params, floorCount } }
-  sectionMixes: null     // { lineId_fi: adjustedMix } — computed by QuotaAllocator
+  sectionMixes: null,     // { lineId_fi: adjustedMix } — computed by QuotaAllocator
+  undergroundGroup: null,
+  undergroundVisible: true
 };
 
 /**
@@ -56,4 +58,6 @@ export function resetState() {
   state.buildingPlans = {};
   state.graphDataMap = {};
   state.sectionMixes = null;
+  state.undergroundGroup = null;
+  state.undergroundVisible = true;
 }

@@ -1,0 +1,162 @@
+/**
+ * UrbanBlockTool — draw urban block polygon, auto-generate trimmed axes.
+ *
+ * Pipeline: draw polygon → solve (priority trim + distribute) → create axes.
+ * All sections/towers face inward. Grouped by blockId.
+ *
+ * Hotkey: U
+ */
+
+import { eventBus } from '../../core/EventBus.js';
+import { Config } from '../../core/Config.js';
+import { BaseDrawTool } from './BaseTool.js';
+import { commandManager } from '../../core/commands/CommandManager.js';
+import { AddFeatureCommand } from '../../core/commands/AddFeatureCommand.js';
+import { CompoundCommand } from '../../core/commands/CompoundCommand.js';
+import { createProjection } from '../../core/geo/projection.js';
+import { solveUrbanBlock, DEFAULT_PARAMS } from '../../core/urban-block/UrbanBlockSolver.js';
+
+var SECTION_WIDTH = 18.0;
+
+export class UrbanBlockTool extends BaseDrawTool {
+  constructor(manager, featureStore, mapManager) {
+    super(manager);
+    this.id = 'urban-block';
+    this.name = 'Urban Block';
+    this.cursor = Config.cursors.crosshair;
+    this._featureStore = featureStore;
+    this._mapManager = mapManager;
+  }
+
+  onMapDoubleClick(_e) {
+    if (this._points.length > 0) this._points.pop();
+    if (this._points.length >= 3) this._complete();
+  }
+
+  onKeyDown(e) {
+    if (e.key === 'Enter' && this._points.length >= 3) {
+      this._complete();
+    } else {
+      super.onKeyDown(e);
+    }
+  }
+
+  _getPreviewGeometry() {
+    if (this._points.length === 0) return null;
+    var coords = this._points.slice();
+    if (this._tempPoint) coords.push(this._tempPoint);
+    if (coords.length < 2) return null;
+    if (coords.length < 3) {
+      return { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } };
+    }
+    return { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [coords.concat([coords[0]])] } };
+  }
+
+  _complete() {
+    if (this._points.length < 3) return;
+
+    var polyLL = this._points.slice();
+    var blockId = crypto.randomUUID();
+
+    // Projection from centroid
+    var cx = 0; var cy = 0;
+    for (var i = 0; i < polyLL.length; i++) { cx += polyLL[i][0]; cy += polyLL[i][1]; }
+    cx /= polyLL.length; cy /= polyLL.length;
+    var proj = createProjection(cx, cy);
+
+    // Convert to meters
+    var polyM = [];
+    for (var i = 0; i < polyLL.length; i++) {
+      polyM.push(proj.toMeters(polyLL[i][0], polyLL[i][1]));
+    }
+
+    // Ensure CCW
+    var area = 0;
+    for (var i = 0; i < polyM.length; i++) {
+      var j = (i + 1) % polyM.length;
+      area += (polyM[j][0] + polyM[i][0]) * (polyM[j][1] - polyM[i][1]);
+    }
+    if (area < 0) { polyM.reverse(); polyLL.reverse(); }
+
+    // Run solver with priority trimming + buffer subtraction
+    var axes = solveUrbanBlock(polyM, DEFAULT_PARAMS);
+    var sw = DEFAULT_PARAMS.sw;
+    var commands = [];
+
+    // Block polygon (first command)
+    var blockFeature = {
+      type: 'Feature',
+      properties: {
+        id: blockId, type: 'polygon', createdAt: new Date().toISOString(),
+        urbanBlock: true, blockParams: Object.assign({}, DEFAULT_PARAMS)
+      },
+      geometry: { type: 'Polygon', coordinates: [polyLL.concat([polyLL[0]])] }
+    };
+    commands.push(new AddFeatureCommand(this._featureStore, blockFeature));
+
+    for (var ai = 0; ai < axes.length; ai++) {
+      var ax = axes[ai];
+      if (ax.removed || ax.length < 3 || !ax.oi || !ax.secs || ax.secs.length === 0) continue;
+      var startLL = proj.toLngLat(ax.start[0], ax.start[1]);
+      var endLL = proj.toLngLat(ax.end[0], ax.end[1]);
+      var oriName = ax.oriName || (ax.orientation === 1 ? 'lon' : 'lat');
+      var od = ax.oi.od;
+      var dirV = [ax.end[0] - ax.start[0], ax.end[1] - ax.start[1]];
+      var axLen = ax.length;
+      var dirN = axLen > 0 ? [dirV[0] / axLen, dirV[1] / axLen] : [1, 0];
+      var ox = od[0] * sw; var oy = od[1] * sw;
+
+      var fpLngLat = []; var pos = 0;
+      for (var si = 0; si < ax.secs.length; si++) {
+        var sec = ax.secs[si];
+        if (sec.gap) { pos += sec.l; continue; }
+        var sx = ax.start[0] + dirN[0] * pos; var sy = ax.start[1] + dirN[1] * pos;
+        var ex = ax.start[0] + dirN[0] * (pos + sec.l); var ey = ax.start[1] + dirN[1] * (pos + sec.l);
+        var pm = [[sx, sy], [ex, ey], [ex + ox, ey + oy], [sx + ox, sy + oy]];
+        var pll = [];
+        for (var j = 0; j < pm.length; j++) pll.push(proj.toLngLat(pm[j][0], pm[j][1]));
+        fpLngLat.push({ polygon: pll, length: sec.l });
+        pos += sec.l;
+      }
+      if (fpLngLat.length === 0) continue;
+
+      commands.push(new AddFeatureCommand(this._featureStore, {
+        type: 'Feature',
+        properties: {
+          id: crypto.randomUUID(), type: 'section-axis',
+          createdAt: new Date().toISOString(), flipped: false,
+          orientation: oriName, axisLength: axLen,
+          footprints: fpLngLat, blockId: blockId,
+          context: ax.context, trimmed: ax.trimmed || false
+        },
+        geometry: { type: 'LineString', coordinates: [startLL, endLL] }
+      }));
+    }
+
+    // Single compound command — one Ctrl+Z undoes entire block
+    commandManager.execute(new CompoundCommand(commands, 'Add urban block'));
+    eventBus.emit('draw:section:complete', blockFeature);
+    console.log('[UrbanBlock] block ' + blockId.slice(0, 6) + ': ' + (commands.length - 1) + ' axes');
+
+    this._reset();
+    this._manager.clearPreview();
+  }
+}
+
+/**
+ * Delete all features belonging to a block (polygon + axes).
+ */
+export function deleteBlock(featureStore, blockId) {
+  var all = featureStore.toArray();
+  var toRemove = [];
+  for (var i = 0; i < all.length; i++) {
+    var f = all[i];
+    if (f.properties.id === blockId || f.properties.blockId === blockId) {
+      toRemove.push(f.properties.id);
+    }
+  }
+  for (var i = 0; i < toRemove.length; i++) {
+    featureStore.remove(toRemove[i]);
+  }
+  return toRemove.length;
+}

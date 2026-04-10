@@ -129,6 +129,10 @@ export class ThreeOverlay {
 
   getScene() { return this._scene; }
 
+  requestRender() {
+    if (this._map) this._map.triggerRepaint();
+  }
+
   addMesh(obj) {
     this._scene.add(obj);
     if (this._map) this._map.triggerRepaint();

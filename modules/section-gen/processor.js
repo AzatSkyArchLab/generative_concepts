@@ -4,6 +4,7 @@
  */
 
 import { createProjection } from '../../core/geo/projection.js';
+import * as THREE from 'three';
 import { getParams, getSectionHeight, computeFloorCount, computeBuildingHeight } from '../../core/SectionParams.js';
 import { TYPE_COLORS, APT_COLORS } from '../../core/constants/ApartmentColors.js';
 import {
@@ -113,6 +114,7 @@ export function processAllSections() {
 
   var allCellsLL = [];
   var allFootLL = [];
+  var ugSectionGraphs = [];  // [{nodes}] for underground rendering
   state.lineFootprints = {};
 
   var AREA_COEFF = 0.65;
@@ -186,6 +188,7 @@ export function processAllSections() {
 
       var graph = buildSectionGraph(N, nearCells, farCells, corridorCells,
         northSide, lluIndices, lluParams.tag, renderFloors);
+      ugSectionGraphs.push(graph.nodes);
 
       // ── Apartment solver → colored cells ──────────────
       var cellAptMap = {};
@@ -748,10 +751,28 @@ export function processAllSections() {
 
       // ── 3D ──
       if (state.threeOverlay) {
-        // Floor 0: commercial — flat colored boxes, small gap
-        for (var tci = 0; tci < tPolysM.length; tci++) {
+        // Wider exit for floor 0: ±1 around exit cells
+        var f0WiderExit = {};
+        for (var tci = 0; tci < tCells.length; tci++) {
+          if (tCells[tci].type === 'llu-exit') {
+            var er = tCells[tci].row; var ec = tCells[tci].col;
+            if (exitSide === 'row-start' || exitSide === 'row-end') {
+              if (ec > 0) f0WiderExit[er * tDims.cols + (ec - 1)] = true;
+              if (ec < tDims.cols - 1) f0WiderExit[er * tDims.cols + (ec + 1)] = true;
+            } else {
+              if (er > 0) f0WiderExit[(er - 1) * tDims.cols + ec] = true;
+              if (er < tDims.rows - 1) f0WiderExit[(er + 1) * tDims.cols + ec] = true;
+            }
+          }
+        }
+
+        // Floor 0: commercial + LLU (with wider exit)
+        for (var tci = 0; tci < tCells.length; tci++) {
+          var f0gid = tCells[tci].row * tDims.cols + tCells[tci].col;
+          var isF0LLU = tCells[tci].type === 'llu' || tCells[tci].type === 'llu-exit' || f0WiderExit[f0gid];
           state.threeOverlay.addMesh(
-            buildCellMeshColored(tPolysM[tci], 0, firstFloorH, TYPE_COLORS.commercial, 0.03));
+            buildCellMeshColored(tPolysM[f0gid], 0, firstFloorH,
+              isF0LLU ? TYPE_COLORS.llu : TYPE_COLORS.commercial, 0.03));
         }
         // Floor 1: detailed — apartment-colored boxes with facade windows + labels
         state.threeOverlay.addMesh(
@@ -925,6 +946,101 @@ export function processAllSections() {
     }
 
     state._deferredPlans = null;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // Underground floor (-4.5 to 0): gray + LLU (blue)
+  // ══════════════════════════════════════════════════════════
+  if (state.threeOverlay) {
+    if (state.undergroundGroup) {
+      state.threeOverlay.removeMesh(state.undergroundGroup);
+      state.undergroundGroup = null;
+    }
+    var ugGroup = new THREE.Group();
+    var UG_BASE = -4.5;
+    var UG_TOP = 0;
+    var UG_GRAY = '#9e9e9e';
+    var UG_LLU = '#4f81bd';
+    var UG_GAP = 0.03;
+
+    // Section underground: per-cell with LLU coloring
+    for (var ugi = 0; ugi < ugSectionGraphs.length; ugi++) {
+      var ugNodes = ugSectionGraphs[ugi];
+      for (var nk in ugNodes) {
+        if (!ugNodes.hasOwnProperty(nk)) continue;
+        var node = ugNodes[nk];
+        if (node.floor !== 0) continue;
+        if (!node.polygon || node.polygon.length < 3) continue;
+        var isLLU = node.type === 'llu';
+        ugGroup.add(buildCellMeshColored(node.polygon, UG_BASE, UG_TOP,
+          isLLU ? UG_LLU : UG_GRAY, UG_GAP));
+      }
+    }
+
+    // Tower underground: per-cell with LLU + wider exit stub
+    for (var ti = 0; ti < towers.length; ti++) {
+      var tFeature = towers[ti];
+      var tFP = tFeature.properties.footprints;
+      if (!tFP || tFP.length === 0) continue;
+      var tCellSize = tFeature.properties.cellSize || 3.3;
+      var tCoords = tFeature.geometry.coordinates;
+      if (!tCoords || tCoords.length < 2) continue;
+      var tStartM = globalProj.toMeters(tCoords[0][0], tCoords[0][1]);
+      var tEndM = globalProj.toMeters(tCoords[1][0], tCoords[1][1]);
+      var tNorthEnd = tFeature.properties.northEnd || detectNorthEnd(tStartM, tEndM);
+      var tOri2 = tFeature.properties.orientation || classifySegment(tStartM, tEndM).orientationName;
+
+      for (var tfi = 0; tfi < tFP.length; tfi++) {
+        var tfp = tFP[tfi];
+        var tSize = tfp.size || 'small';
+        var tDims = getTowerDimensions(tSize, tCellSize, tOri2);
+        var tfpM = [];
+        for (var j = 0; j < tfp.polygon.length; j++)
+          tfpM.push(globalProj.toMeters(tfp.polygon[j][0], tfp.polygon[j][1]));
+
+        var exitSide;
+        if (tOri2 === 'lon') {
+          exitSide = tNorthEnd === 'start' ? 'row-start' : 'row-end';
+        } else {
+          var acrossY = tfpM[3][1] - tfpM[0][1];
+          exitSide = acrossY >= 0 ? 'col-high' : 'col-low';
+        }
+
+        var ugCells = classifyCells(tDims.rows, tDims.cols, exitSide);
+        var ugPolys = generateCellsFromFootprint(tfpM, tDims.rows, tDims.cols);
+
+        // Wider exit: add ±1 column around exitCol (or ±1 row for col-low/col-high)
+        var exitCol = Math.floor(tDims.cols / 2);
+        var exitRow = Math.floor(tDims.rows / 2);
+        var widerExit = {};
+        for (var uci = 0; uci < ugCells.length; uci++) {
+          var uc = ugCells[uci];
+          if (uc.type === 'llu-exit') {
+            // Mark neighbors as wider exit
+            if (exitSide === 'row-start' || exitSide === 'row-end') {
+              if (uc.col > 0) widerExit[uc.row * tDims.cols + (uc.col - 1)] = true;
+              if (uc.col < tDims.cols - 1) widerExit[uc.row * tDims.cols + (uc.col + 1)] = true;
+            } else {
+              if (uc.row > 0) widerExit[(uc.row - 1) * tDims.cols + uc.col] = true;
+              if (uc.row < tDims.rows - 1) widerExit[(uc.row + 1) * tDims.cols + uc.col] = true;
+            }
+          }
+        }
+
+        for (var uci = 0; uci < ugCells.length; uci++) {
+          var uc = ugCells[uci];
+          var ugid = uc.row * tDims.cols + uc.col;
+          var isLLU = uc.type === 'llu' || uc.type === 'llu-exit' || widerExit[ugid];
+          ugGroup.add(buildCellMeshColored(ugPolys[ugid], UG_BASE, UG_TOP,
+            isLLU ? UG_LLU : UG_GRAY, UG_GAP));
+        }
+      }
+    }
+
+    state.undergroundGroup = ugGroup;
+    ugGroup.visible = state.undergroundVisible;
+    state.threeOverlay.addMesh(ugGroup);
+    console.log('[underground] group created: ' + ugGroup.children.length + ' meshes, visible=' + ugGroup.visible);
   }
 
   state.layer.update(allCellsLL, allFootLL);

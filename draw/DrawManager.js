@@ -12,6 +12,7 @@ import { PolygonTool } from './tools/PolygonTool.js';
 import { LineTool } from './tools/LineTool.js';
 import { SectionTool } from './tools/SectionTool.js';
 import { TowerTool } from './tools/TowerTool.js';
+import { UrbanBlockTool } from './tools/UrbanBlockTool.js';
 
 export class DrawManager {
   /**
@@ -47,6 +48,7 @@ export class DrawManager {
     this._registerTool(new LineTool(this, this._featureStore));
     this._registerTool(new SectionTool(this, this._featureStore, this._mapManager));
     this._registerTool(new TowerTool(this, this._featureStore, this._mapManager));
+    this._registerTool(new UrbanBlockTool(this, this._featureStore, this._mapManager));
   }
 
   _registerTool(tool) {

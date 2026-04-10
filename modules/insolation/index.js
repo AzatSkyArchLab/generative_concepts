@@ -525,6 +525,7 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
   }
 
   // Long facades — use same N for both (near edge defines cell count, matching section-gen)
+  var nearCount = 0; var farCount = 0;
   for (var fi = 0; fi < facades.length; fi++) {
     var f = facades[fi];
     var normal = getOutwardNormal(f.p1, f.p2, cx, cy);
@@ -539,6 +540,7 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
       var px = f.p1[0] + edgeDx * t + normal[0] * FACADE_OFFSET;
       var py = f.p1[1] + edgeDy * t + normal[1] * FACADE_OFFSET;
       points.push({ position: [px, py, z], side: f.side, cellIdx: ci, normal: normal });
+      if (f.side === 'near') nearCount++; else farCount++;
     }
   }
 
@@ -588,6 +590,7 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
     }
   }
 
+  if (floorNum === 1) console.log('[insol] section N=' + cellCount + ' llu=' + lluSide + ' near=' + nearCount + ' far=' + farCount + ' ends=' + (points.length - nearCount - farCount));
   return points;
 }
 
@@ -927,6 +930,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
 
       for (var tfl = floorStart; tfl <= actualMaxFloor; tfl++) {
         var tPoints = generateTowerFacadePoints(tfpM, tDims, exitSide, tfl);
+        console.log('[insol] tower ' + tfi + ' floor ' + tfl + ': ' + tPoints.length + ' facade points, dims=' + tDims.rows + '×' + tDims.cols + ' exit=' + exitSide);
         for (var tpi = 0; tpi < tPoints.length; tpi++) {
           var tpt = tPoints[tpi];
           var tRayResults = castSunRays(tpt.position, sunVectors, _collisionMeshes);
@@ -951,6 +955,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
 
   _lastResults = facadeResults;
   _lastPointData = facadeResults;
+  console.log('[insol] TOTAL: ' + facadeResults.length + ' facade points (P:' + pass + ' W:' + warn + ' F:' + fail + ')');
   displayResults(facadeResults);
   if (_raysVisible) showAllRays(sunVectors);
 
