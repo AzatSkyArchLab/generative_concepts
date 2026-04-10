@@ -369,12 +369,34 @@ export function computeOverlays(polyM, axes, params) {
     }
   }
 
+  // Connector road quads (6m wide, matching prototype rendering)
+  var connectorQuads = [];
+  for (var cqi = 0; cqi < connectors.length; cqi++) {
+    var cq = connectors[cqi];
+    var cdx = cq.to[0] - cq.from[0], cdy = cq.to[1] - cq.from[1];
+    var clen = Math.sqrt(cdx * cdx + cdy * cdy);
+    if (clen < 0.5) continue;
+    var pAx = -cdy / clen, pAy = cdx / clen;
+    var cmid = [(cq.from[0] + cq.to[0]) / 2, (cq.from[1] + cq.to[1]) / 2];
+    var bc = cq.bufCen || cmid;
+    var testA = [cmid[0] + pAx * 3, cmid[1] + pAy * 3];
+    var testB = [cmid[0] - pAx * 3, cmid[1] - pAy * 3];
+    var toInner = (vLen(vSub(testA, bc)) < vLen(vSub(testB, bc))) ? 1 : -1;
+    var ipx = pAx * toInner * 6, ipy = pAy * toInner * 6;
+    connectorQuads.push([
+      cq.from, cq.to,
+      [cq.to[0] + ipx, cq.to[1] + ipy],
+      [cq.from[0] + ipx, cq.from[1] + ipy]
+    ]);
+  }
+
   return {
     secFire: secFire,
     roadBuf: roadBuf,
     roadOuter: roadOuter,
     roadInner: roadInner,
     connectors: connectors,
+    connectorQuads: connectorQuads,
     graphNodes: graphNodes,
     graphEdges: graphEdges,
     trashPad: trashPad,

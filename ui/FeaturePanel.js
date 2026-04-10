@@ -263,7 +263,10 @@ export class FeaturePanel {
       else if (f.geometry.type === 'LineString') lineFeatures.push(f);
     }
     var html = '';
-    if (blockFeature) html += this._renderBlockProps(blockFeature);
+    if (blockFeature) {
+      try { html += this._renderBlockProps(blockFeature); }
+      catch (e) { html += '<div style="padding:12px;color:#ef4444;font-size:11px"><b>Panel error:</b> ' + e.message + '</div>'; console.error('[FeaturePanel] _renderBlockProps error:', e); }
+    }
     if (sectionFeatures.length > 0) html += this._renderSectionProps(sectionFeatures);
     if (towerFeatures.length > 0) html += this._renderTowerProps(towerFeatures);
     if (lineFeatures.length > 0) html += this._renderLineProps(lineFeatures);
@@ -350,7 +353,8 @@ export class FeaturePanel {
       '<input type="range" id="ub-spp" min="20000" max="200000" step="5000" value="' + (p.spp || 80000) + '" data-unit="м²" style="flex:1;height:3px;accent-color:#f59e0b">' +
       '<span id="ub-spp-val" style="min-width:48px;text-align:right;font-weight:600;font-size:10px;color:#f59e0b">' + (p.spp || 80000) + 'м²</span>' +
       '</div></div>';
-    var insolLive = isInsolLiveActive();
+    var insolLive = false;
+    try { insolLive = isInsolLiveActive(); } catch (e) { /* module not ready */ }
     h += '<button id="block-spp-btn" class="ug-toggle-btn' + (insolLive ? ' active' : '') + '" style="width:100%;border-color:rgba(245,158,11,' + (insolLive ? '0.4' : '0.15') + ');color:' + (insolLive ? '#f59e0b' : '#94a3b8') + ';font-size:10px;margin:4px 0;' + (insolLive ? '' : 'cursor:not-allowed;opacity:0.5') + '">▲ Применить высоты' + (insolLive ? '' : ' (нужен Live insol)') + '</button>';
     h += '</div>';
 
@@ -358,14 +362,15 @@ export class FeaturePanel {
     h += '<div class="props-divider"></div>';
     h += '<div class="props-header-small">Слои плана</div>';
     h += '<div style="padding:0 12px 4px">';
-    var vis = (blockFeature.properties.overlayVisibility) || {};
+    var vis = (f.properties.overlayVisibility) || {};
     var layers = [
       ['ov-buffers', 'Буферы (fire/end/insol)', vis.buffers !== false],
       ['ov-secfire', 'Двор (зелёная зона)', vis.secfire !== false],
       ['ov-road', 'Дорожное кольцо', vis.road !== false],
       ['ov-connectors', 'Коннекторы', vis.connectors !== false],
       ['ov-graph', 'Граф дорожной сети', vis.graph !== false],
-      ['ov-trash', 'ТКО площадка', vis.trash !== false]
+      ['ov-trash', 'ТКО площадка + зона', vis.trash !== false],
+      ['ov-play', 'Детские площадки', vis.play !== false]
     ];
     for (var li = 0; li < layers.length; li++) {
       var lyr = layers[li];
@@ -467,8 +472,8 @@ export class FeaturePanel {
     }
 
     // Overlay visibility toggles
-    var ovToggles = ['ov-buffers', 'ov-secfire', 'ov-road', 'ov-connectors', 'ov-graph', 'ov-trash'];
-    var ovKeys = ['buffers', 'secfire', 'road', 'connectors', 'graph', 'trash'];
+    var ovToggles = ['ov-buffers', 'ov-secfire', 'ov-road', 'ov-connectors', 'ov-graph', 'ov-trash', 'ov-play'];
+    var ovKeys = ['buffers', 'secfire', 'road', 'connectors', 'graph', 'trash', 'play'];
     for (var oti = 0; oti < ovToggles.length; oti++) {
       (function (tid, key) {
         var el = document.getElementById(tid);
@@ -497,10 +502,7 @@ export class FeaturePanel {
     var AREA_COEFF = 0.65;
     var FIRST_FLOOR_H = 4.5;
     var TYPICAL_FLOOR_H = 3.0;
-    // Standard tiers: tall → short
-    var MERID_HEIGHTS = [75, 55, 28];
-    var LAT_HEIGHTS = [28];           // lat stays 28 by default, can be lowered
-    var TOWER_HEIGHTS = [112, 75, 55];
+    var MAX_H = 250; // absolute ceiling
 
     var all = this._featureStore.toArray();
     var axes = [];
@@ -521,9 +523,11 @@ export class FeaturePanel {
     }
     if (axes.length === 0) return;
 
-    // Sort: towers first, then by northness desc
+    // Sort priority: towers first, then merid by northness desc, then lat by northness desc
     axes.sort(function (a, b) {
-      if (a.isTower !== b.isTower) return a.isTower ? -1 : 1;
+      var pa = a.isTower ? 0 : a.isLat ? 2 : 1;
+      var pb = b.isTower ? 0 : b.isLat ? 2 : 1;
+      if (pa !== pb) return pa - pb;
       return b.northness - a.northness;
     });
 
@@ -531,6 +535,7 @@ export class FeaturePanel {
       if (h <= FIRST_FLOOR_H) return 1;
       return 1 + Math.floor((h - FIRST_FLOOR_H) / TYPICAL_FLOOR_H);
     }
+    function heightForFloors(n) { return FIRST_FLOOR_H + (n - 1) * TYPICAL_FLOOR_H; }
     function computeSPP(hMap) {
       var total = 0;
       for (var i = 0; i < axes.length; i++) {
@@ -550,71 +555,55 @@ export class FeaturePanel {
     var spp = computeSPP(hMap);
     console.log('[SPP] standard start: ' + Math.round(spp) + ' target: ' + targetSPP);
 
-    // Phase 1: If SPP too low → upgrade merid north→south (55→75), then lat (28→55)
-    if (spp < targetSPP * 0.95) {
-      for (var i = 0; i < axes.length && spp < targetSPP * 0.95; i++) {
-        if (axes[i].isTower) continue; // towers already at max
-        if (!axes[i].isLat) {
-          // Merid: try 55→75
-          if (hMap[i] === 55) {
-            hMap[i] = 75;
-            spp = computeSPP(hMap);
-            if (spp > targetSPP * 1.05) { hMap[i] = 55; spp = computeSPP(hMap); }
-          }
-        }
+    // Phase 1: upgrade one floor at a time, priority order, up to 50 iterations
+    for (var iter = 0; iter < 50 && spp < targetSPP * 0.95; iter++) {
+      var upgraded = false;
+      for (var i = 0; i < axes.length; i++) {
+        if (spp >= targetSPP * 0.95) break;
+        var oldH = hMap[i];
+        var newH = heightForFloors(floorCount(oldH) + 1);
+        if (newH > MAX_H) continue;
+        hMap[i] = newH;
+        var newSpp = computeSPP(hMap);
+        if (newSpp > targetSPP * 1.05) { hMap[i] = oldH; continue; }
+        spp = newSpp;
+        upgraded = true;
       }
+      if (!upgraded) break;
     }
-    // Still low? Try lat 28→55
+
+    // Phase 2: if still low, force-upgrade highest-priority axes beyond limit
     if (spp < targetSPP * 0.95) {
       for (var i = 0; i < axes.length && spp < targetSPP * 0.95; i++) {
-        if (axes[i].isLat && hMap[i] === 28) {
-          hMap[i] = 55;
+        while (spp < targetSPP * 0.95 && hMap[i] < MAX_H) {
+          hMap[i] = heightForFloors(floorCount(hMap[i]) + 1);
           spp = computeSPP(hMap);
-          if (spp > targetSPP * 1.05) { hMap[i] = 28; spp = computeSPP(hMap); }
         }
       }
     }
 
-    // Phase 2: If SPP too high → downgrade south→north (merid 55→28, then 75→55)
+    // Phase 3: if too high, downgrade from south (lowest priority)
     if (spp > targetSPP * 1.05) {
       for (var i = axes.length - 1; i >= 0 && spp > targetSPP * 1.05; i--) {
-        if (axes[i].isTower) continue;
-        if (!axes[i].isLat && hMap[i] === 75) {
-          hMap[i] = 55; spp = computeSPP(hMap);
-          if (spp <= targetSPP * 1.05) break;
-        }
-      }
-    }
-    if (spp > targetSPP * 1.05) {
-      for (var i = axes.length - 1; i >= 0 && spp > targetSPP * 1.05; i--) {
-        if (axes[i].isTower) continue;
-        if (!axes[i].isLat && hMap[i] === 55) {
-          hMap[i] = 28; spp = computeSPP(hMap);
-          if (spp <= targetSPP * 1.05) break;
+        while (spp > targetSPP * 1.05 && floorCount(hMap[i]) > 2) {
+          hMap[i] = heightForFloors(floorCount(hMap[i]) - 1);
+          spp = computeSPP(hMap);
         }
       }
     }
 
-    // Phase 3: Staircase — max ±2 floors between adjacent merid sections
-    // (sort merid by northness, smooth)
-    var meridIdx = [];
-    for (var i = 0; i < axes.length; i++) {
-      if (!axes[i].isTower && !axes[i].isLat) meridIdx.push(i);
-    }
+    // Phase 4: staircase smoothing (max ±2 floors between neighbors of same type)
     for (var pass = 0; pass < 3; pass++) {
-      for (var k = 1; k < meridIdx.length; k++) {
-        var a = meridIdx[k - 1]; var b = meridIdx[k];
-        var fA = floorCount(hMap[a]); var fB = floorCount(hMap[b]);
-        if (fA - fB > 2) {
-          // North too tall relative to south neighbor → try lowering north
-          var tiers = MERID_HEIGHTS;
-          var idx = tiers.indexOf(hMap[a]);
-          if (idx >= 0 && idx < tiers.length - 1) hMap[a] = tiers[idx + 1];
-        }
+      for (var i = 1; i < axes.length; i++) {
+        if (axes[i].isTower || axes[i - 1].isTower) continue;
+        if (axes[i].isLat !== axes[i - 1].isLat) continue;
+        var fA = floorCount(hMap[i - 1]); var fB = floorCount(hMap[i]);
+        if (fA - fB > 2) hMap[i] = heightForFloors(fA - 2);
+        else if (fB - fA > 2) hMap[i - 1] = heightForFloors(fB - 2);
       }
     }
 
-    // Apply to features
+    // Apply
     for (var i = 0; i < axes.length; i++) {
       if (axes[i].isTower) axes[i].feature.properties.towerHeight = hMap[i];
       else axes[i].feature.properties.sectionHeight = hMap[i];
@@ -622,9 +611,8 @@ export class FeaturePanel {
 
     spp = computeSPP(hMap);
     console.log('[SPP] result=' + Math.round(spp) + 'm² (' + (targetSPP > 0 ? (spp / targetSPP * 100).toFixed(0) : '?') + '%) heights=' +
-      axes.map(function (a, i) { return (a.isTower ? 'Б' : a.isLat ? 'Ш' : 'М') + ':' + hMap[i] + 'м'; }).join(' '));
+      axes.map(function (a, i) { return (a.isTower ? 'Б' : a.isLat ? 'Ш' : 'М') + ':' + hMap[i] + 'м(' + floorCount(hMap[i]) + 'F)'; }).join(' '));
 
-    // Rebuild triggers insol (Live is active). Orphan check happens after insol results.
     eventBus.emit('features:changed');
   }
 
@@ -801,9 +789,15 @@ export class FeaturePanel {
       roadOuter: overlays.roadOuter.length >= 3 ? polyToLL(overlays.roadOuter) : [],
       roadInner: overlays.roadInner.length >= 3 ? polyToLL(overlays.roadInner) : [],
       connectors: overlays.connectors.map(function (c) { return { from: proj.toLngLat(c.from[0], c.from[1]), to: proj.toLngLat(c.to[0], c.to[1]) }; }),
+      connectorQuads: polysToLL(overlays.connectorQuads || []),
       graphNodes: overlays.graphNodes.map(function (n) { return { pt: proj.toLngLat(n.pt[0], n.pt[1]), type: n.type }; }),
       graphEdges: overlays.graphEdges,
       trashPad: overlays.trashPad ? { center: proj.toLngLat(overlays.trashPad.center[0], overlays.trashPad.center[1]), rect: polyToLL(overlays.trashPad.rect) } : null,
+      trashInner: polysToLL(overlays.trashInner),
+      trashOuter: polysToLL(overlays.trashOuter),
+      playBuf12: polysToLL(overlays.playBuf12),
+      playBuf20: polysToLL(overlays.playBuf20),
+      playBuf40: polysToLL(overlays.playBuf40),
       bufferZones: (function () {
         var bz = [];
         for (var ai2 = 0; ai2 < axes.length; ai2++) {
@@ -818,6 +812,11 @@ export class FeaturePanel {
         return bz;
       })()
     };
+    // Store meters data for canvas-based overlay renderer
+    blockFeature.properties._overlaysM = overlays;
+    blockFeature.properties._polyM = polyM;
+    blockFeature.properties._params = params;
+    blockFeature.properties._projCenter = [cx, cy]; // lngLat center of local projection
 
     console.log('[UrbanBlock] rebuilt ' + bid.slice(0, 6) + ': ' + created + ' axes, ' +
       overlays.connectors.length + ' connectors, trash=' + (overlays.trashPad ? 'yes' : 'no'));

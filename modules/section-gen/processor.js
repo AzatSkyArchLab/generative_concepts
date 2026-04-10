@@ -18,6 +18,7 @@ import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
 import { allocateQuotas } from '../../core/apartments/QuotaAllocator.js';
 import { resolveQuota, computeRemainder, formatReport as formatQuotaReport } from '../../core/apartments/QuotaResolver.js';
+import { renderOverlayCanvas } from '../../core/urban-block/OverlayRenderer.js';
 import { generateReport } from '../../ui/FloorPlanReport.js';
 
 import { getTowerDimensions, classifyCells, generateCellsFromFootprint } from '../../core/tower/TowerGenerator.js';
@@ -1042,95 +1043,69 @@ export function processAllSections() {
     state.threeOverlay.addMesh(ugGroup);
     console.log('[underground] group created: ' + ugGroup.children.length + ' meshes, visible=' + ugGroup.visible);
 
-    // Urban block overlays (buffers, roads, graph, trash)
+    // Urban block overlays — canvas-based rendering (exact prototype compositing)
     if (state._blockOverlayGroup) { state.threeOverlay.removeMesh(state._blockOverlayGroup); state._blockOverlayGroup = null; }
     var ovGroup = new THREE.Group();
-    var OV_Z = 0.15;
     var allFeatures = state.featureStore.toArray();
-
-    function llToM(ll) { return globalProj.toMeters(ll[0], ll[1]); }
-    function makeQuad(target, p, color, opacity) {
-      if (!p || p.length < 4) return;
-      var m = []; for (var qi = 0; qi < p.length; qi++) m.push(llToM(p[qi]));
-      var mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: opacity, side: THREE.DoubleSide, depthWrite: false });
-      var geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([m[0][0],m[0][1],OV_Z, m[1][0],m[1][1],OV_Z, m[2][0],m[2][1],OV_Z, m[3][0],m[3][1],OV_Z]), 3));
-      geo.setIndex([0,1,2, 0,2,3]);
-      target.add(new THREE.Mesh(geo, mat));
-    }
-    function makeLine(target, pts, color) {
-      if (pts.length < 2) return;
-      var positions = [];
-      for (var li = 0; li < pts.length; li++) { var lm = llToM(pts[li]); positions.push(lm[0], lm[1], OV_Z + 0.05); }
-      var geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-      target.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.7 })));
-    }
-    function makeDot(target, ll, color, size) {
-      var dm = llToM(ll);
-      var geo = new THREE.CircleGeometry(size || 1, 8);
-      var mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide }));
-      mesh.position.set(dm[0], dm[1], OV_Z + 0.1);
-      target.add(mesh);
-    }
 
     for (var bfi = 0; bfi < allFeatures.length; bfi++) {
       var bf = allFeatures[bfi];
-      if (!bf.properties.urbanBlock || !bf.properties.overlays) continue;
-      var ov = bf.properties.overlays;
+      if (!bf.properties.urbanBlock || !bf.properties._overlaysM || !bf.properties._polyM) continue;
       var vis = bf.properties.overlayVisibility || {};
 
-      // Sub-groups with visibility control
-      var gBuf = new THREE.Group(); gBuf.visible = vis.buffers !== false;
-      var gSec = new THREE.Group(); gSec.visible = vis.secfire !== false;
-      var gRoad = new THREE.Group(); gRoad.visible = vis.road !== false;
-      var gConn = new THREE.Group(); gConn.visible = vis.connectors !== false;
-      var gGraph = new THREE.Group(); gGraph.visible = vis.graph !== false;
-      var gTrash = new THREE.Group(); gTrash.visible = vis.trash !== false;
+      var result = null;
+      try {
+        result = renderOverlayCanvas(
+          bf.properties._overlaysM,
+          bf.properties._polyM,
+          bf.properties._params || {},
+          vis
+        );
+      } catch (e) { console.error('[overlay] canvas render error:', e); }
 
-      // Buffer zones
-      if (ov.bufferZones) {
-        var BC = { fire: 0x4caf50, end: 0x9c27b0, insol: 0xffeb3b };
-        var BO = { fire: 0.08, end: 0.06, insol: 0.05 };
-        for (var bi = 0; bi < ov.bufferZones.length; bi++) {
-          var bz = ov.bufferZones[bi];
-          makeQuad(gBuf, bz.polygon, BC[bz.type] || 0x888888, BO[bz.type] || 0.06);
-        }
-      }
-      // Section fire (courtyard)
-      if (ov.secFire) { for (var sfi = 0; sfi < ov.secFire.length; sfi++) makeQuad(gSec, ov.secFire[sfi], 0x4cbb61, 0.12); }
-      // Road ring (filled strip between outer/inner via quads per edge)
-      if (ov.roadOuter && ov.roadOuter.length >= 3 && ov.roadInner && ov.roadInner.length >= 3) {
-        var ro = ov.roadOuter; var ri = ov.roadInner;
-        var rn = Math.min(ro.length, ri.length);
-        for (var rri = 0; rri < rn; rri++) {
-          var rni = (rri + 1) % rn;
-          makeQuad(gRoad, [ro[rri], ro[rni], ri[rni], ri[rri]], 0x8c8c9b, 0.25);
-        }
-      }
-      // Connectors
-      if (ov.connectors) {
-        for (var ci = 0; ci < ov.connectors.length; ci++) {
-          makeLine(gConn, [ov.connectors[ci].from, ov.connectors[ci].to], 0xdc7828);
-          makeDot(gConn, ov.connectors[ci].from, 0x2080e0, 1.5);
-          makeDot(gConn, ov.connectors[ci].to, 0xe07020, 1.5);
-        }
-      }
-      // Graph
-      if (ov.graphEdges && ov.graphNodes) {
-        for (var gei = 0; gei < ov.graphEdges.length; gei++) {
-          var ge = ov.graphEdges[gei]; var na = ov.graphNodes[ge.a], nb = ov.graphNodes[ge.b];
-          if (na && nb) makeLine(gGraph, [na.pt, nb.pt], ge.type === 'ring' ? 0x00b4a0 : 0xdc7828);
-        }
-        for (var gni = 0; gni < ov.graphNodes.length; gni++) {
-          var nd = ov.graphNodes[gni];
-          makeDot(gGraph, nd.pt, nd.type === 'junction' ? 0xff6600 : nd.type === 'boundary' ? 0x2080e0 : 0x00b4a0, nd.type === 'ring' ? 0.8 : 1.5);
-        }
-      }
-      // Trash pad
-      if (ov.trashPad) makeQuad(gTrash, ov.trashPad.rect, 0xc88c1e, 0.6);
+      if (!result || !result.canvas) continue;
 
-      ovGroup.add(gBuf, gSec, gRoad, gConn, gGraph, gTrash);
+      // Compute offset: local projection center → globalProj meters
+      var projCenter = bf.properties._projCenter || [0, 0];
+      var offset = globalProj.toMeters(projCenter[0], projCenter[1]);
+
+      // Create texture from canvas
+      var texture = new THREE.CanvasTexture(result.canvas);
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+
+      // Create plane mesh covering the overlay bounds (in local meters + offset to global)
+      var planeW = result.width;
+      var planeH = result.height;
+      var planeCx = (result.minX + result.maxX) / 2 + offset[0];
+      var planeCy = (result.minY + result.maxY) / 2 + offset[1];
+
+      var geo = new THREE.PlaneGeometry(planeW, planeH);
+      var mat = new THREE.MeshBasicMaterial({
+        map: texture, transparent: true,
+        side: THREE.DoubleSide, depthWrite: false
+      });
+      var mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(planeCx, planeCy, 0.15);
+      ovGroup.add(mesh);
+
+      // ТКО 3D pad (always visible, offset to global coords)
+      var ovM = bf.properties._overlaysM;
+      if (ovM.trashPad && ovM.trashPad.rect && ovM.trashPad.rect.length >= 4) {
+        var tpm = ovM.trashPad.rect;
+        var tpW = Math.sqrt(Math.pow(tpm[1][0]-tpm[0][0],2) + Math.pow(tpm[1][1]-tpm[0][1],2));
+        var tpD = Math.sqrt(Math.pow(tpm[3][0]-tpm[0][0],2) + Math.pow(tpm[3][1]-tpm[0][1],2));
+        var tpCx = (tpm[0][0]+tpm[2][0])/2 + offset[0];
+        var tpCy = (tpm[0][1]+tpm[2][1])/2 + offset[1];
+        var tpAngle = Math.atan2(tpm[1][1]-tpm[0][1], tpm[1][0]-tpm[0][0]);
+        var tpMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(tpW, tpD, 2),
+          new THREE.MeshLambertMaterial({ color: 0xc88c1e, transparent: true, opacity: 0.85 })
+        );
+        tpMesh.position.set(tpCx, tpCy, 1);
+        tpMesh.rotation.z = tpAngle;
+        ovGroup.add(tpMesh);
+      }
     }
     if (ovGroup.children.length > 0) { state._blockOverlayGroup = ovGroup; state.threeOverlay.addMesh(ovGroup); }
   }

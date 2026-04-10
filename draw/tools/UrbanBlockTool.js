@@ -100,9 +100,15 @@ export class UrbanBlockTool extends BaseDrawTool {
           roadOuter: overlays.roadOuter.length >= 3 ? polyToLL(overlays.roadOuter) : [],
           roadInner: overlays.roadInner.length >= 3 ? polyToLL(overlays.roadInner) : [],
           connectors: overlays.connectors.map(function (c) { return { from: proj.toLngLat(c.from[0], c.from[1]), to: proj.toLngLat(c.to[0], c.to[1]) }; }),
+          connectorQuads: polysToLL(overlays.connectorQuads || []),
           graphNodes: overlays.graphNodes.map(function (n) { return { pt: proj.toLngLat(n.pt[0], n.pt[1]), type: n.type }; }),
           graphEdges: overlays.graphEdges,
           trashPad: overlays.trashPad ? { center: proj.toLngLat(overlays.trashPad.center[0], overlays.trashPad.center[1]), rect: polyToLL(overlays.trashPad.rect) } : null,
+          trashInner: polysToLL(overlays.trashInner),
+          trashOuter: polysToLL(overlays.trashOuter),
+          playBuf12: polysToLL(overlays.playBuf12),
+          playBuf20: polysToLL(overlays.playBuf20),
+          playBuf40: polysToLL(overlays.playBuf40),
           bufferZones: (function () {
             var bz = [];
             for (var bi = 0; bi < axes.length; bi++) {
@@ -119,6 +125,11 @@ export class UrbanBlockTool extends BaseDrawTool {
       },
       geometry: { type: 'Polygon', coordinates: [polyLL.concat([polyLL[0]])] }
     };
+    // Store meters data for canvas overlay renderer
+    blockFeature.properties._overlaysM = overlays;
+    blockFeature.properties._polyM = polyM;
+    blockFeature.properties._params = Object.assign({}, DEFAULT_PARAMS);
+    blockFeature.properties._projCenter = [cx, cy];
     commands.push(new AddFeatureCommand(this._featureStore, blockFeature));
 
     for (var ai = 0; ai < axes.length; ai++) {
