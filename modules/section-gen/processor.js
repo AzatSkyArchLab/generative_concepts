@@ -1041,6 +1041,98 @@ export function processAllSections() {
     ugGroup.visible = state.undergroundVisible;
     state.threeOverlay.addMesh(ugGroup);
     console.log('[underground] group created: ' + ugGroup.children.length + ' meshes, visible=' + ugGroup.visible);
+
+    // Urban block overlays (buffers, roads, graph, trash)
+    if (state._blockOverlayGroup) { state.threeOverlay.removeMesh(state._blockOverlayGroup); state._blockOverlayGroup = null; }
+    var ovGroup = new THREE.Group();
+    var OV_Z = 0.15;
+    var allFeatures = state.featureStore.toArray();
+
+    function llToM(ll) { return globalProj.toMeters(ll[0], ll[1]); }
+    function makeQuad(target, p, color, opacity) {
+      if (!p || p.length < 4) return;
+      var m = []; for (var qi = 0; qi < p.length; qi++) m.push(llToM(p[qi]));
+      var mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: opacity, side: THREE.DoubleSide, depthWrite: false });
+      var geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([m[0][0],m[0][1],OV_Z, m[1][0],m[1][1],OV_Z, m[2][0],m[2][1],OV_Z, m[3][0],m[3][1],OV_Z]), 3));
+      geo.setIndex([0,1,2, 0,2,3]);
+      target.add(new THREE.Mesh(geo, mat));
+    }
+    function makeLine(target, pts, color) {
+      if (pts.length < 2) return;
+      var positions = [];
+      for (var li = 0; li < pts.length; li++) { var lm = llToM(pts[li]); positions.push(lm[0], lm[1], OV_Z + 0.05); }
+      var geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      target.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.7 })));
+    }
+    function makeDot(target, ll, color, size) {
+      var dm = llToM(ll);
+      var geo = new THREE.CircleGeometry(size || 1, 8);
+      var mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide }));
+      mesh.position.set(dm[0], dm[1], OV_Z + 0.1);
+      target.add(mesh);
+    }
+
+    for (var bfi = 0; bfi < allFeatures.length; bfi++) {
+      var bf = allFeatures[bfi];
+      if (!bf.properties.urbanBlock || !bf.properties.overlays) continue;
+      var ov = bf.properties.overlays;
+      var vis = bf.properties.overlayVisibility || {};
+
+      // Sub-groups with visibility control
+      var gBuf = new THREE.Group(); gBuf.visible = vis.buffers !== false;
+      var gSec = new THREE.Group(); gSec.visible = vis.secfire !== false;
+      var gRoad = new THREE.Group(); gRoad.visible = vis.road !== false;
+      var gConn = new THREE.Group(); gConn.visible = vis.connectors !== false;
+      var gGraph = new THREE.Group(); gGraph.visible = vis.graph !== false;
+      var gTrash = new THREE.Group(); gTrash.visible = vis.trash !== false;
+
+      // Buffer zones
+      if (ov.bufferZones) {
+        var BC = { fire: 0x4caf50, end: 0x9c27b0, insol: 0xffeb3b };
+        var BO = { fire: 0.08, end: 0.06, insol: 0.05 };
+        for (var bi = 0; bi < ov.bufferZones.length; bi++) {
+          var bz = ov.bufferZones[bi];
+          makeQuad(gBuf, bz.polygon, BC[bz.type] || 0x888888, BO[bz.type] || 0.06);
+        }
+      }
+      // Section fire (courtyard)
+      if (ov.secFire) { for (var sfi = 0; sfi < ov.secFire.length; sfi++) makeQuad(gSec, ov.secFire[sfi], 0x4cbb61, 0.12); }
+      // Road ring (filled strip between outer/inner via quads per edge)
+      if (ov.roadOuter && ov.roadOuter.length >= 3 && ov.roadInner && ov.roadInner.length >= 3) {
+        var ro = ov.roadOuter; var ri = ov.roadInner;
+        var rn = Math.min(ro.length, ri.length);
+        for (var rri = 0; rri < rn; rri++) {
+          var rni = (rri + 1) % rn;
+          makeQuad(gRoad, [ro[rri], ro[rni], ri[rni], ri[rri]], 0x8c8c9b, 0.25);
+        }
+      }
+      // Connectors
+      if (ov.connectors) {
+        for (var ci = 0; ci < ov.connectors.length; ci++) {
+          makeLine(gConn, [ov.connectors[ci].from, ov.connectors[ci].to], 0xdc7828);
+          makeDot(gConn, ov.connectors[ci].from, 0x2080e0, 1.5);
+          makeDot(gConn, ov.connectors[ci].to, 0xe07020, 1.5);
+        }
+      }
+      // Graph
+      if (ov.graphEdges && ov.graphNodes) {
+        for (var gei = 0; gei < ov.graphEdges.length; gei++) {
+          var ge = ov.graphEdges[gei]; var na = ov.graphNodes[ge.a], nb = ov.graphNodes[ge.b];
+          if (na && nb) makeLine(gGraph, [na.pt, nb.pt], ge.type === 'ring' ? 0x00b4a0 : 0xdc7828);
+        }
+        for (var gni = 0; gni < ov.graphNodes.length; gni++) {
+          var nd = ov.graphNodes[gni];
+          makeDot(gGraph, nd.pt, nd.type === 'junction' ? 0xff6600 : nd.type === 'boundary' ? 0x2080e0 : 0x00b4a0, nd.type === 'ring' ? 0.8 : 1.5);
+        }
+      }
+      // Trash pad
+      if (ov.trashPad) makeQuad(gTrash, ov.trashPad.rect, 0xc88c1e, 0.6);
+
+      ovGroup.add(gBuf, gSec, gRoad, gConn, gGraph, gTrash);
+    }
+    if (ovGroup.children.length > 0) { state._blockOverlayGroup = ovGroup; state.threeOverlay.addMesh(ovGroup); }
   }
 
   state.layer.update(allCellsLL, allFootLL);

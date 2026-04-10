@@ -12,7 +12,12 @@
 
 import { eventBus } from '../core/EventBus.js';
 import { solveUrbanBlock } from '../core/urban-block/UrbanBlockSolver.js';
+import { computeOverlays } from '../core/urban-block/UrbanBlockOverlays.js';
 import { createProjection } from '../core/geo/projection.js';
+import { computeTowerFootprints } from '../core/tower/TowerFootprints.js';
+import { detectNorthEnd } from '../core/tower/TowerPlacer.js';
+import { classifySegment } from '../modules/urban-block/orientation.js';
+import { isInsolLiveActive } from '../modules/insolation/index.js';
 import { commandManager } from '../core/commands/CommandManager.js';
 import { UpdateFeatureCommand } from '../core/commands/UpdateFeatureCommand.js';
 import { DEFAULT_PARAMS, getParams, computeFloorCount, computeBuildingHeight, autoFireDist } from '../core/SectionParams.js';
@@ -272,76 +277,117 @@ export class FeaturePanel {
     var p = f.properties.blockParams || {};
     var all = this._featureStore.toArray();
     var axCount = 0; var secCount = 0; var totalLen = 0;
-    var latSecs = 0; var lonSecs = 0;
+    var latSecs = 0; var lonSecs = 0; var trimCount = 0;
+    var actualSPP = 0; var totalOrphans = 0;
+    var AREA_COEFF = 0.65;
     for (var i = 0; i < all.length; i++) {
-      if (all[i].properties.blockId === bid) {
-        axCount++;
-        var fps = all[i].properties.footprints;
-        if (fps) {
-          secCount += fps.length;
-          for (var j = 0; j < fps.length; j++) totalLen += fps[j].length;
-        }
-        if (all[i].properties.orientation === 'lat') latSecs += (fps ? fps.length : 0);
-        else lonSecs += (fps ? fps.length : 0);
-      }
+      if (all[i].properties.blockId !== bid) continue;
+      axCount++;
+      var fps = all[i].properties.footprints;
+      if (fps) { secCount += fps.length; for (var j = 0; j < fps.length; j++) totalLen += fps[j].length; }
+      if (all[i].properties.orientation === 'lat') latSecs += (fps ? fps.length : 0);
+      else lonSecs += (fps ? fps.length : 0);
+      if (all[i].properties.trimmed) trimCount++;
+      // Compute actual SPP contribution
+      var axH = all[i].properties.sectionHeight || all[i].properties.towerHeight || 28;
+      var axFpArea = (all[i].properties.axisLength || 0) * (p.sw || 18);
+      var axFloors = Math.max(1, 1 + Math.floor((axH - 4.5) / 3.0));
+      var axResid = Math.max(0, axFloors - 1);
+      actualSPP += axFpArea * AREA_COEFF * axResid;
     }
+    var targetSPP = p.spp || 80000;
+    var deltaSPP = actualSPP - targetSPP;
+    var ctxRoll = p.ctxRoll || 0;
 
-    function sli(id, label, val, min, max, step, unit) {
-      return '<div style="margin-bottom:5px">' +
-        '<div style="display:flex;justify-content:space-between;margin-bottom:1px">' +
-        '<span style="font-weight:600;font-size:11px">' + label + '</span>' +
-        '<span id="' + id + '-val" style="font-weight:700;color:#8b5cf6;font-size:11px">' + val + unit + '</span></div>' +
-        '<input type="range" id="' + id + '" min="' + min + '" max="' + max + '" step="' + step + '" value="' + val + '" ' +
-        'data-unit="' + unit + '" ' +
-        'style="width:100%;height:3px;accent-color:#8b5cf6"/></div>';
+    var h = '<div class="props-section"><div class="props-header">Urban Block</div>';
+    h += '<div class="props-computed">';
+    h += '<div class="props-row"><span class="props-label">Осей</span><span class="props-value">' + axCount + ' <small>подрезано ' + trimCount + '</small></span></div>';
+    h += '<div class="props-row"><span class="props-label">Секций</span><span class="props-value">' + secCount + ' <small>[Ш]' + latSecs + ' [М]' + lonSecs + '</small></span></div>';
+    h += '<div class="props-row"><span class="props-label">Длина</span><span class="props-value">' + totalLen.toFixed(0) + ' м</span></div>';
+    h += '<div class="props-row"><span class="props-label">СПП факт</span><span class="props-value" style="font-weight:700">' + Math.round(actualSPP).toLocaleString() + ' <small>м²</small></span></div>';
+    h += '<div class="props-row"><span class="props-label">СПП цель</span><span class="props-value">' + Math.round(targetSPP).toLocaleString() + ' <small style="color:' + (Math.abs(deltaSPP) < targetSPP * 0.05 ? '#22c55e' : '#ef4444') + '">' + (deltaSPP >= 0 ? '+' : '') + Math.round(deltaSPP).toLocaleString() + '</small></span></div>';
+    h += '</div>';
+
+    // Typology
+    h += '<div class="props-divider"></div>';
+    h += '<div style="padding:4px 12px;display:flex;gap:4px">';
+    var typo = p.typo || 0;
+    h += '<button id="ub-typo-0" class="ug-toggle-btn' + (typo === 0 ? ' active' : '') + '" style="flex:1;font-size:10px">Секции</button>';
+    h += '<button id="ub-typo-1" class="ug-toggle-btn' + (typo === 1 ? ' active' : '') + '" style="flex:1;font-size:10px">Башня+С</button>';
+    h += '</div>';
+
+    // Parameters
+    h += '<div class="props-divider"></div>';
+    h += '<div class="props-header-small">Параметры</div>';
+    h += '<div style="padding:0 12px">';
+    var sliders = [
+      ['ub-sw', 'Ширина секции', p.sw != null ? p.sw : 18, 10, 25, 1, 'м'],
+      ['ub-fire', 'Пожарный', p.fire != null ? p.fire : 14, 6, 30, 1, 'м'],
+      ['ub-end', 'Торцевой', p.endB != null ? p.endB : 20, 10, 40, 1, 'м'],
+      ['ub-insol', 'Инсоляция', p.insol != null ? p.insol : 25, 10, 80, 1, 'м'],
+      ['ub-gap', 'Gap', p.gapTarget != null ? p.gapTarget : 22, 15, 40, 1, 'м']
+    ];
+    for (var si = 0; si < sliders.length; si++) {
+      var s = sliders[si];
+      h += '<div class="param-row"><label class="param-label">' + s[1] + '</label>' +
+        '<div style="display:flex;align-items:center;gap:4px;flex:1">' +
+        '<input type="range" id="' + s[0] + '" min="' + s[3] + '" max="' + s[4] + '" step="' + s[5] + '" value="' + s[2] + '" data-unit="' + s[6] + '" style="flex:1;height:3px;accent-color:var(--primary)">' +
+        '<span id="' + s[0] + '-val" style="min-width:32px;text-align:right;font-weight:600;font-size:10px;color:var(--primary)">' + s[2] + s[6] + '</span>' +
+        '</div></div>';
     }
+    h += '<div class="param-row"><label class="param-label">Широтные [Ш]</label>' +
+      '<input id="ub-lat-lens" class="param-input" value="' + (p.latLens || [24, 27]).join(',') + '" style="width:80px"></div>';
+    h += '<div class="param-row"><label class="param-label">Меридиональные [М]</label>' +
+      '<input id="ub-lon-lens" class="param-input" value="' + (p.lonLens || [30, 36, 39, 42, 46, 49]).join(',') + '" style="width:80px"></div>';
+    h += '</div>';
 
-    return '<div class="props-section" style="background:rgba(139,92,246,0.06);border-radius:6px;margin:4px 0">' +
-      '<div class="props-header" style="color:#8b5cf6">Urban Block</div>' +
-      '<div style="padding:4px 12px 6px;font-size:11px">' +
-
-      // Stats
-      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin-bottom:6px">' +
-      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">Axes</span><span style="font-weight:600">' + axCount + '</span></div>' +
-      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">Sections</span><span style="font-weight:600">' + secCount + '</span></div>' +
-      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">[Ш]</span><span>' + latSecs + '</span></div>' +
-      '<div style="display:flex;justify-content:space-between"><span style="opacity:0.6">[М]</span><span>' + lonSecs + '</span></div>' +
-      '<div style="display:flex;justify-content:space-between;grid-column:span 2"><span style="opacity:0.6">Total length</span><span style="font-weight:600">' + totalLen.toFixed(0) + 'м</span></div>' +
-      '</div>' +
-
-      '<div class="props-divider"></div>' +
-      '<div style="font-size:9px;opacity:0.4;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Buffers &amp; Sections</div>' +
-
-      sli('ub-sw', 'Section width', p.sw != null ? p.sw : 18, 10, 25, 1, 'м') +
-      sli('ub-fire', 'Fire', p.fire != null ? p.fire : 14, 6, 30, 1, 'м') +
-      sli('ub-end', 'End', p.endB != null ? p.endB : 20, 10, 40, 1, 'м') +
-      sli('ub-insol', 'Insol', p.insol != null ? p.insol : 30, 10, 80, 1, 'м') +
-      sli('ub-gap', 'Gap', p.gapTarget != null ? p.gapTarget : 22, 15, 40, 1, 'м') +
-
-      '<div style="margin-top:4px">' +
-      '<label style="font-weight:600;display:block;margin-bottom:2px;font-size:11px">Lat [Ш] (м)</label>' +
-      '<input id="ub-lat-lens" value="' + (p.latLens || [27, 30]).join(',') + '" ' +
-      'style="width:100%;padding:4px 6px;font-size:11px;border:1px solid rgba(139,92,246,0.25);border-radius:4px;font-family:inherit;box-sizing:border-box;background:rgba(139,92,246,0.04);color:inherit"/></div>' +
-      '<div style="margin-top:4px">' +
-      '<label style="font-weight:600;display:block;margin-bottom:2px;font-size:11px">Lon [М] (м)</label>' +
-      '<input id="ub-lon-lens" value="' + (p.lonLens || [36, 39, 42, 46, 49]).join(',') + '" ' +
-      'style="width:100%;padding:4px 6px;font-size:11px;border:1px solid rgba(139,92,246,0.25);border-radius:4px;font-family:inherit;box-sizing:border-box;background:rgba(139,92,246,0.04);color:inherit"/></div>' +
-
-      '<div class="props-divider" style="margin-top:8px"></div>' +
-      '<div style="font-size:9px;opacity:0.4;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px">Height Distribution</div>' +
-      sli('ub-spp', 'Target SPP', p.spp || 80000, 20000, 200000, 5000, 'м²') +
-      '<button id="block-spp-btn" class="ug-toggle-btn active" style="width:100%;border-color:rgba(245,158,11,0.5);color:#f59e0b;margin-bottom:4px">' +
-      '<span style="font-size:12px">▲</span> Apply heights</button>' +
-
-      '<div class="props-divider" style="margin-top:4px"></div>' +
-      '<div style="display:flex;gap:6px;margin-top:4px">' +
-      '<button id="block-rebuild-btn" class="ug-toggle-btn" style="flex:1;border-color:rgba(139,92,246,0.4);color:#8b5cf6">' +
-      '<span style="font-size:12px">↻</span> Rebuild</button>' +
-      '<button id="block-delete-btn" class="ug-toggle-btn" style="flex:1;border-color:rgba(239,68,68,0.4);color:#ef4444">' +
-      '<span style="font-size:12px">✕</span> Delete</button>' +
-      '</div>' +
-
+    // SPP
+    h += '<div class="props-divider"></div>';
+    h += '<div class="props-header-small">Высотность (СПП)</div>';
+    h += '<div style="padding:0 12px">';
+    h += '<div class="param-row"><label class="param-label">Target SPP</label>' +
+      '<div style="display:flex;align-items:center;gap:4px;flex:1">' +
+      '<input type="range" id="ub-spp" min="20000" max="200000" step="5000" value="' + (p.spp || 80000) + '" data-unit="м²" style="flex:1;height:3px;accent-color:#f59e0b">' +
+      '<span id="ub-spp-val" style="min-width:48px;text-align:right;font-weight:600;font-size:10px;color:#f59e0b">' + (p.spp || 80000) + 'м²</span>' +
       '</div></div>';
+    var insolLive = isInsolLiveActive();
+    h += '<button id="block-spp-btn" class="ug-toggle-btn' + (insolLive ? ' active' : '') + '" style="width:100%;border-color:rgba(245,158,11,' + (insolLive ? '0.4' : '0.15') + ');color:' + (insolLive ? '#f59e0b' : '#94a3b8') + ';font-size:10px;margin:4px 0;' + (insolLive ? '' : 'cursor:not-allowed;opacity:0.5') + '">▲ Применить высоты' + (insolLive ? '' : ' (нужен Live insol)') + '</button>';
+    h += '</div>';
+
+    // Overlay visibility toggles
+    h += '<div class="props-divider"></div>';
+    h += '<div class="props-header-small">Слои плана</div>';
+    h += '<div style="padding:0 12px 4px">';
+    var vis = (blockFeature.properties.overlayVisibility) || {};
+    var layers = [
+      ['ov-buffers', 'Буферы (fire/end/insol)', vis.buffers !== false],
+      ['ov-secfire', 'Двор (зелёная зона)', vis.secfire !== false],
+      ['ov-road', 'Дорожное кольцо', vis.road !== false],
+      ['ov-connectors', 'Коннекторы', vis.connectors !== false],
+      ['ov-graph', 'Граф дорожной сети', vis.graph !== false],
+      ['ov-trash', 'ТКО площадка', vis.trash !== false]
+    ];
+    for (var li = 0; li < layers.length; li++) {
+      var lyr = layers[li];
+      h += '<div id="' + lyr[0] + '" data-on="' + (lyr[2] ? '1' : '0') + '" style="display:flex;align-items:center;gap:6px;margin-bottom:3px;cursor:pointer;user-select:none">' +
+        '<div style="width:26px;height:14px;border-radius:7px;background:' + (lyr[2] ? 'var(--primary)' : 'rgba(148,163,184,0.35)') + ';position:relative;transition:0.15s">' +
+        '<div style="width:10px;height:10px;border-radius:5px;background:#fff;position:absolute;top:2px;left:' + (lyr[2] ? '14px' : '2px') + ';transition:0.15s"></div></div>' +
+        '<span style="font-size:10px">' + lyr[1] + '</span></div>';
+    }
+    h += '</div>';
+
+    // Actions
+    h += '<div class="props-divider"></div>';
+    h += '<div style="padding:4px 12px;display:flex;gap:4px">';
+    h += '<button id="block-ctx-btn" class="ug-toggle-btn" style="flex:1;font-size:10px">Перебор #' + ctxRoll + '</button>';
+    h += '<button id="block-rebuild-btn" class="ug-toggle-btn" style="flex:1;font-size:10px;border-color:rgba(59,130,246,0.4);color:var(--primary)">↻ Rebuild</button>';
+    h += '</div>';
+    h += '<div style="padding:2px 12px 8px">';
+    h += '<button id="block-delete-btn" class="ug-toggle-btn" style="width:100%;font-size:10px;border-color:rgba(239,68,68,0.3);color:#ef4444">✕ Удалить блок</button>';
+    h += '</div>';
+
+    h += '</div>';
+    return h;
   }
 
   _bindBlockInputs(blockFeature) {
@@ -349,7 +395,7 @@ export class FeaturePanel {
     var bid = blockFeature.properties.id;
     var self = this;
 
-    // Live slider value display
+    // Live slider updates
     var sliderIds = ['ub-sw', 'ub-fire', 'ub-end', 'ub-insol', 'ub-gap', 'ub-spp'];
     for (var si = 0; si < sliderIds.length; si++) {
       (function (sid) {
@@ -363,7 +409,29 @@ export class FeaturePanel {
       })(sliderIds[si]);
     }
 
-    // Delete button
+    // Typology buttons
+    var typo0 = document.getElementById('ub-typo-0');
+    var typo1 = document.getElementById('ub-typo-1');
+    if (typo0) typo0.addEventListener('click', function () {
+      blockFeature.properties.blockParams.typo = 0;
+      self._rebuildBlock(blockFeature);
+    });
+    if (typo1) typo1.addEventListener('click', function () {
+      blockFeature.properties.blockParams.typo = 1;
+      self._rebuildBlock(blockFeature);
+    });
+
+    // Context rolling
+    var ctxBtn = document.getElementById('block-ctx-btn');
+    if (ctxBtn) {
+      ctxBtn.addEventListener('click', function () {
+        var p = blockFeature.properties.blockParams;
+        p.ctxRoll = (p.ctxRoll || 0) + 1;
+        self._rebuildBlock(blockFeature);
+      });
+    }
+
+    // Delete
     var delBtn = document.getElementById('block-delete-btn');
     if (delBtn) {
       delBtn.addEventListener('click', function () {
@@ -381,7 +449,7 @@ export class FeaturePanel {
       });
     }
 
-    // Rebuild button
+    // Rebuild
     var rebuildBtn = document.getElementById('block-rebuild-btn');
     if (rebuildBtn) {
       rebuildBtn.addEventListener('click', function () {
@@ -389,12 +457,34 @@ export class FeaturePanel {
       });
     }
 
-    // SPP height distribution
+    // SPP (only works with insol Live active)
     var sppBtn = document.getElementById('block-spp-btn');
     if (sppBtn) {
       sppBtn.addEventListener('click', function () {
+        if (!isInsolLiveActive()) return;
         self._applySPP(blockFeature);
       });
+    }
+
+    // Overlay visibility toggles
+    var ovToggles = ['ov-buffers', 'ov-secfire', 'ov-road', 'ov-connectors', 'ov-graph', 'ov-trash'];
+    var ovKeys = ['buffers', 'secfire', 'road', 'connectors', 'graph', 'trash'];
+    for (var oti = 0; oti < ovToggles.length; oti++) {
+      (function (tid, key) {
+        var el = document.getElementById(tid);
+        if (!el) return;
+        el.addEventListener('click', function () {
+          var isOn = el.dataset.on === '1';
+          el.dataset.on = isOn ? '0' : '1';
+          var sw = el.querySelector('div');
+          var knob = sw ? sw.querySelector('div') : null;
+          if (sw) sw.style.background = isOn ? 'rgba(148,163,184,0.35)' : 'var(--primary)';
+          if (knob) knob.style.left = isOn ? '2px' : '14px';
+          if (!blockFeature.properties.overlayVisibility) blockFeature.properties.overlayVisibility = {};
+          blockFeature.properties.overlayVisibility[key] = !isOn;
+          eventBus.emit('features:changed');
+        });
+      })(ovToggles[oti], ovKeys[oti]);
     }
   }
 
@@ -407,12 +497,11 @@ export class FeaturePanel {
     var AREA_COEFF = 0.65;
     var FIRST_FLOOR_H = 4.5;
     var TYPICAL_FLOOR_H = 3.0;
-    // Height tiers: tall → short
+    // Standard tiers: tall → short
     var MERID_HEIGHTS = [75, 55, 28];
-    var LAT_HEIGHTS = [55, 28];  // lat can go up to 55 if needed
+    var LAT_HEIGHTS = [28];           // lat stays 28 by default, can be lowered
     var TOWER_HEIGHTS = [112, 75, 55];
 
-    // Collect all block axes
     var all = this._featureStore.toArray();
     var axes = [];
     for (var i = 0; i < all.length; i++) {
@@ -420,24 +509,19 @@ export class FeaturePanel {
       var f = all[i];
       var fps = f.properties.footprints;
       if (!fps || fps.length === 0) continue;
-
       var coords = f.geometry.coordinates;
       var avgY = (coords && coords.length >= 2) ? (coords[0][1] + coords[1][1]) / 2 : 0;
-
-      // Footprint area from axis length × section width (much more reliable than lng/lat shoelace)
-      var totalFpArea = f.properties.axisLength * (blockFeature.properties.blockParams.sw || 18);
-
       axes.push({
         feature: f,
         isTower: f.properties.type === 'tower-axis',
         isLat: f.properties.orientation === 'lat',
         northness: avgY,
-        fpArea: totalFpArea
+        fpArea: f.properties.axisLength * (blockFeature.properties.blockParams.sw || 18)
       });
     }
     if (axes.length === 0) return;
 
-    // Sort: towers first, then by northness descending
+    // Sort: towers first, then by northness desc
     axes.sort(function (a, b) {
       if (a.isTower !== b.isTower) return a.isTower ? -1 : 1;
       return b.northness - a.northness;
@@ -447,82 +531,100 @@ export class FeaturePanel {
       if (h <= FIRST_FLOOR_H) return 1;
       return 1 + Math.floor((h - FIRST_FLOOR_H) / TYPICAL_FLOOR_H);
     }
-
     function computeSPP(hMap) {
       var total = 0;
       for (var i = 0; i < axes.length; i++) {
-        var h = hMap[i];
-        var fc = floorCount(h);
-        var residential = Math.max(0, fc - 1);
-        total += axes[i].fpArea * AREA_COEFF * residential;
+        total += axes[i].fpArea * AREA_COEFF * Math.max(0, floorCount(hMap[i]) - 1);
       }
       return total;
     }
 
-    function getTiers(ax) {
-      if (ax.isTower) return TOWER_HEIGHTS;
-      if (ax.isLat) return LAT_HEIGHTS;
-      return MERID_HEIGHTS;
-    }
-
-    // Start: towers at max, merid at max, lat at min
+    // Standard start: towers=112, merid=55, lat=28
     var hMap = [];
     for (var i = 0; i < axes.length; i++) {
-      var tiers = getTiers(axes[i]);
-      hMap.push(axes[i].isTower ? tiers[0] : (axes[i].isLat ? tiers[tiers.length - 1] : tiers[0]));
+      if (axes[i].isTower) hMap.push(112);
+      else if (axes[i].isLat) hMap.push(28);
+      else hMap.push(55);
     }
 
     var spp = computeSPP(hMap);
-    console.log('[SPP] initial=' + Math.round(spp) + ' target=' + targetSPP);
+    console.log('[SPP] standard start: ' + Math.round(spp) + ' target: ' + targetSPP);
 
-    // If too high: downgrade from south to north (reverse order)
-    if (spp > targetSPP * 1.05) {
-      for (var pass = 0; pass < 5 && spp > targetSPP * 1.05; pass++) {
-        for (var i = axes.length - 1; i >= 0; i--) {
-          var tiers = getTiers(axes[i]);
-          var curIdx = tiers.indexOf(hMap[i]);
-          if (curIdx < 0) curIdx = 0;
-          if (curIdx < tiers.length - 1) {
-            hMap[i] = tiers[curIdx + 1]; // downgrade one step
+    // Phase 1: If SPP too low → upgrade merid north→south (55→75), then lat (28→55)
+    if (spp < targetSPP * 0.95) {
+      for (var i = 0; i < axes.length && spp < targetSPP * 0.95; i++) {
+        if (axes[i].isTower) continue; // towers already at max
+        if (!axes[i].isLat) {
+          // Merid: try 55→75
+          if (hMap[i] === 55) {
+            hMap[i] = 75;
             spp = computeSPP(hMap);
-            if (spp <= targetSPP * 1.05) break;
+            if (spp > targetSPP * 1.05) { hMap[i] = 55; spp = computeSPP(hMap); }
           }
         }
       }
     }
-
-    // If too low: upgrade from north to south
+    // Still low? Try lat 28→55
     if (spp < targetSPP * 0.95) {
-      for (var pass = 0; pass < 5 && spp < targetSPP * 0.95; pass++) {
-        for (var i = 0; i < axes.length; i++) {
-          var tiers = getTiers(axes[i]);
-          var curIdx = tiers.indexOf(hMap[i]);
-          if (curIdx < 0) curIdx = tiers.length - 1;
-          if (curIdx > 0) {
-            var oldH = hMap[i];
-            hMap[i] = tiers[curIdx - 1]; // upgrade one step
-            spp = computeSPP(hMap);
-            if (spp > targetSPP * 1.05) { hMap[i] = oldH; spp = computeSPP(hMap); }
-          }
-          if (spp >= targetSPP * 0.95) break;
+      for (var i = 0; i < axes.length && spp < targetSPP * 0.95; i++) {
+        if (axes[i].isLat && hMap[i] === 28) {
+          hMap[i] = 55;
+          spp = computeSPP(hMap);
+          if (spp > targetSPP * 1.05) { hMap[i] = 28; spp = computeSPP(hMap); }
+        }
+      }
+    }
+
+    // Phase 2: If SPP too high → downgrade south→north (merid 55→28, then 75→55)
+    if (spp > targetSPP * 1.05) {
+      for (var i = axes.length - 1; i >= 0 && spp > targetSPP * 1.05; i--) {
+        if (axes[i].isTower) continue;
+        if (!axes[i].isLat && hMap[i] === 75) {
+          hMap[i] = 55; spp = computeSPP(hMap);
+          if (spp <= targetSPP * 1.05) break;
+        }
+      }
+    }
+    if (spp > targetSPP * 1.05) {
+      for (var i = axes.length - 1; i >= 0 && spp > targetSPP * 1.05; i--) {
+        if (axes[i].isTower) continue;
+        if (!axes[i].isLat && hMap[i] === 55) {
+          hMap[i] = 28; spp = computeSPP(hMap);
+          if (spp <= targetSPP * 1.05) break;
+        }
+      }
+    }
+
+    // Phase 3: Staircase — max ±2 floors between adjacent merid sections
+    // (sort merid by northness, smooth)
+    var meridIdx = [];
+    for (var i = 0; i < axes.length; i++) {
+      if (!axes[i].isTower && !axes[i].isLat) meridIdx.push(i);
+    }
+    for (var pass = 0; pass < 3; pass++) {
+      for (var k = 1; k < meridIdx.length; k++) {
+        var a = meridIdx[k - 1]; var b = meridIdx[k];
+        var fA = floorCount(hMap[a]); var fB = floorCount(hMap[b]);
+        if (fA - fB > 2) {
+          // North too tall relative to south neighbor → try lowering north
+          var tiers = MERID_HEIGHTS;
+          var idx = tiers.indexOf(hMap[a]);
+          if (idx >= 0 && idx < tiers.length - 1) hMap[a] = tiers[idx + 1];
         }
       }
     }
 
     // Apply to features
     for (var i = 0; i < axes.length; i++) {
-      if (axes[i].isTower) {
-        axes[i].feature.properties.towerHeight = hMap[i];
-      } else {
-        axes[i].feature.properties.sectionHeight = hMap[i];
-      }
+      if (axes[i].isTower) axes[i].feature.properties.towerHeight = hMap[i];
+      else axes[i].feature.properties.sectionHeight = hMap[i];
     }
 
     spp = computeSPP(hMap);
-    var pct = targetSPP > 0 ? (spp / targetSPP * 100).toFixed(0) : '?';
-    console.log('[SPP] result=' + Math.round(spp) + 'm² (' + pct + '%) heights=' +
-      axes.map(function (a, i) { return (a.isLat ? 'Ш' : 'М') + ':' + hMap[i] + 'м'; }).join(' '));
+    console.log('[SPP] result=' + Math.round(spp) + 'm² (' + (targetSPP > 0 ? (spp / targetSPP * 100).toFixed(0) : '?') + '%) heights=' +
+      axes.map(function (a, i) { return (a.isTower ? 'Б' : a.isLat ? 'Ш' : 'М') + ':' + hMap[i] + 'м'; }).join(' '));
 
+    // Rebuild triggers insol (Live is active). Orphan check happens after insol results.
     eventBus.emit('features:changed');
   }
 
@@ -541,13 +643,16 @@ export class FeaturePanel {
     }
 
     var params = {
-      sw: val('ub-sw', 15),
+      sw: val('ub-sw', 18),
       fire: val('ub-fire', 14),
       endB: val('ub-end', 20),
-      insol: val('ub-insol', 30),
+      insol: val('ub-insol', 25),
       gapTarget: val('ub-gap', 22),
-      latLens: parseLens('ub-lat-lens', [27, 30]),
-      lonLens: parseLens('ub-lon-lens', [36, 39, 42, 46, 49])
+      latLens: parseLens('ub-lat-lens', [24, 27]),
+      lonLens: parseLens('ub-lon-lens', [30, 36, 39, 42, 46, 49]),
+      ctxRoll: (blockFeature.properties.blockParams || {}).ctxRoll || 0,
+      typo: (blockFeature.properties.blockParams || {}).typo || 0,
+      spp: (blockFeature.properties.blockParams || {}).spp || 80000
     };
 
     // Update blockParams on feature
@@ -592,30 +697,77 @@ export class FeaturePanel {
     var sw = params.sw;
     var created = 0;
 
+    // Detect tower edge when typo=1
+    var towerEdgeId = -1;
+    if (params.typo === 1) {
+      // Northernmost vertex (max Y in meters)
+      var northIdx = 0;
+      for (var ni = 1; ni < polyM.length; ni++) {
+        if (polyM[ni][1] > polyM[northIdx][1]) northIdx = ni;
+      }
+      var prevEI = (northIdx - 1 + polyM.length) % polyM.length;
+      var nextEI = northIdx;
+      var candidates = [];
+      for (var ci = 0; ci < axes.length; ci++) {
+        var te = axes[ci];
+        if (te.removed || te.length < 23.1 || !te.oi) continue;
+        if (te.id === prevEI || te.id === nextEI) candidates.push(te);
+      }
+      candidates.sort(function (a, b) { return b.orientation - a.orientation || b.length - a.length; });
+      if (candidates.length > 0) towerEdgeId = candidates[0].id;
+    }
+
+    // Overlays computed separately via computeOverlays
+
     for (var ai = 0; ai < axes.length; ai++) {
       var ax = axes[ai];
-      if (ax.removed || ax.length < 3 || !ax.oi || !ax.secs || ax.secs.length === 0) continue;
+      if (ax.removed || ax.length < 3 || !ax.oi) continue;
+      if (!ax.secs || ax.secs.length === 0) continue;
 
       var startLL = proj.toLngLat(ax.start[0], ax.start[1]);
       var endLL = proj.toLngLat(ax.end[0], ax.end[1]);
       var oriName = ax.oriName || (ax.orientation === 1 ? 'lon' : 'lat');
 
+      // Tower axis
+      if (params.typo === 1 && ax.id === towerEdgeId) {
+        var tProps = { cellSize: 3.3, towerGap: 20, flipped: false };
+        var startM = ax.start; var endM = ax.end;
+        var tFpM = computeTowerFootprints(startM, endM, tProps, null);
+        var tFpLL = computeTowerFootprints(startM, endM, tProps,
+          function (mx, my) { return proj.toLngLat(mx, my); });
+        if (tFpLL.length > 0) {
+          var northEnd = detectNorthEnd(startM, endM);
+          var tid = crypto.randomUUID();
+          this._featureStore._features.set(tid, {
+            type: 'Feature',
+            properties: {
+              id: tid, type: 'tower-axis',
+              createdAt: new Date().toISOString(),
+              orientation: oriName, axisLength: ax.length,
+              cellSize: 3.3, towerHeight: 112, towerGap: 20,
+              northEnd: northEnd, footprints: tFpLL,
+              blockId: bid, context: ax.context
+            },
+            geometry: { type: 'LineString', coordinates: [startLL, endLL] }
+          });
+          created++;
+          continue;
+        }
+      }
+
+      // Section axis
       var od = ax.oi.od;
       var dirV = [ax.end[0] - ax.start[0], ax.end[1] - ax.start[1]];
       var axLen = ax.length;
       var dirN = axLen > 0 ? [dirV[0] / axLen, dirV[1] / axLen] : [1, 0];
-      var ox = od[0] * sw;
-      var oy = od[1] * sw;
+      var ox = od[0] * sw; var oy = od[1] * sw;
 
-      var fpLngLat = [];
-      var pos = 0;
+      var fpLngLat = []; var pos = 0;
       for (var si = 0; si < ax.secs.length; si++) {
         var sec = ax.secs[si];
         if (sec.gap) { pos += sec.l; continue; }
-        var sx = ax.start[0] + dirN[0] * pos;
-        var sy = ax.start[1] + dirN[1] * pos;
-        var ex = ax.start[0] + dirN[0] * (pos + sec.l);
-        var ey = ax.start[1] + dirN[1] * (pos + sec.l);
+        var sx = ax.start[0] + dirN[0] * pos; var sy = ax.start[1] + dirN[1] * pos;
+        var ex = ax.start[0] + dirN[0] * (pos + sec.l); var ey = ax.start[1] + dirN[1] * (pos + sec.l);
         var pm = [[sx, sy], [ex, ey], [ex + ox, ey + oy], [sx + ox, sy + oy]];
         var pll = [];
         for (var j = 0; j < pm.length; j++) pll.push(proj.toLngLat(pm[j][0], pm[j][1]));
@@ -628,26 +780,47 @@ export class FeaturePanel {
       this._featureStore._features.set(id, {
         type: 'Feature',
         properties: {
-          id: id,
-          type: 'section-axis',
-          createdAt: new Date().toISOString(),
-          flipped: false,
-          orientation: oriName,
-          axisLength: axLen,
-          footprints: fpLngLat,
-          blockId: bid,
-          context: ax.context,
-          trimmed: ax.trimmed || false
+          id: id, type: 'section-axis',
+          createdAt: new Date().toISOString(), flipped: false,
+          orientation: oriName, axisLength: axLen,
+          footprints: fpLngLat, blockId: bid,
+          context: ax.context, trimmed: ax.trimmed || false
         },
-        geometry: {
-          type: 'LineString',
-          coordinates: [startLL, endLL]
-        }
+        geometry: { type: 'LineString', coordinates: [startLL, endLL] }
       });
       created++;
     }
 
-    console.log('[UrbanBlock] rebuilt ' + bid.slice(0, 6) + ': ' + created + ' axes');
+    // Store overlays on block feature
+    var overlays = computeOverlays(polyM, axes, params);
+    // Convert overlay polygons to lngLat
+    function polyToLL(p) { var r = []; for (var i = 0; i < p.length; i++) r.push(proj.toLngLat(p[i][0], p[i][1])); return r; }
+    function polysToLL(arr) { var r = []; for (var i = 0; i < arr.length; i++) r.push(polyToLL(arr[i])); return r; }
+    blockFeature.properties.overlays = {
+      secFire: polysToLL(overlays.secFire),
+      roadOuter: overlays.roadOuter.length >= 3 ? polyToLL(overlays.roadOuter) : [],
+      roadInner: overlays.roadInner.length >= 3 ? polyToLL(overlays.roadInner) : [],
+      connectors: overlays.connectors.map(function (c) { return { from: proj.toLngLat(c.from[0], c.from[1]), to: proj.toLngLat(c.to[0], c.to[1]) }; }),
+      graphNodes: overlays.graphNodes.map(function (n) { return { pt: proj.toLngLat(n.pt[0], n.pt[1]), type: n.type }; }),
+      graphEdges: overlays.graphEdges,
+      trashPad: overlays.trashPad ? { center: proj.toLngLat(overlays.trashPad.center[0], overlays.trashPad.center[1]), rect: polyToLL(overlays.trashPad.rect) } : null,
+      bufferZones: (function () {
+        var bz = [];
+        for (var ai2 = 0; ai2 < axes.length; ai2++) {
+          var ax2 = axes[ai2];
+          if (!ax2.bufs) continue;
+          var types = ['fire', 'end', 'insol'];
+          for (var ti2 = 0; ti2 < types.length; ti2++) {
+            var bp = ax2.bufs[types[ti2]];
+            if (bp && bp.length === 4) bz.push({ type: types[ti2], polygon: polyToLL(bp) });
+          }
+        }
+        return bz;
+      })()
+    };
+
+    console.log('[UrbanBlock] rebuilt ' + bid.slice(0, 6) + ': ' + created + ' axes, ' +
+      overlays.connectors.length + ' connectors, trash=' + (overlays.trashPad ? 'yes' : 'no'));
     this._selectedIds = [bid];
     eventBus.emit('features:changed');
   }

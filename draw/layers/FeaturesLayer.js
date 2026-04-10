@@ -52,7 +52,7 @@ export class FeaturesLayer {
       source: this.SOURCE_ID,
       paint: {
         'fill-color': Config.draw.fillColor,
-        'fill-opacity': Config.draw.fillOpacity
+        'fill-opacity': ['case', ['==', ['get', 'urbanBlock'], true], 0, Config.draw.fillOpacity]
       }
     });
 

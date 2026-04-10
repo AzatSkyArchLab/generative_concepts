@@ -15,6 +15,7 @@ import { AddFeatureCommand } from '../../core/commands/AddFeatureCommand.js';
 import { CompoundCommand } from '../../core/commands/CompoundCommand.js';
 import { createProjection } from '../../core/geo/projection.js';
 import { solveUrbanBlock, DEFAULT_PARAMS } from '../../core/urban-block/UrbanBlockSolver.js';
+import { computeOverlays } from '../../core/urban-block/UrbanBlockOverlays.js';
 
 var SECTION_WIDTH = 18.0;
 
@@ -83,12 +84,38 @@ export class UrbanBlockTool extends BaseDrawTool {
     var sw = DEFAULT_PARAMS.sw;
     var commands = [];
 
+    // Compute overlays (roads, graph, trash, buffers)
+    var overlays = computeOverlays(polyM, axes, DEFAULT_PARAMS);
+    function polyToLL(p) { var r = []; for (var i = 0; i < p.length; i++) r.push(proj.toLngLat(p[i][0], p[i][1])); return r; }
+    function polysToLL(arr) { var r = []; for (var i = 0; i < arr.length; i++) r.push(polyToLL(arr[i])); return r; }
+
     // Block polygon (first command)
     var blockFeature = {
       type: 'Feature',
       properties: {
         id: blockId, type: 'polygon', createdAt: new Date().toISOString(),
-        urbanBlock: true, blockParams: Object.assign({}, DEFAULT_PARAMS)
+        urbanBlock: true, blockParams: Object.assign({}, DEFAULT_PARAMS),
+        overlays: {
+          secFire: polysToLL(overlays.secFire),
+          roadOuter: overlays.roadOuter.length >= 3 ? polyToLL(overlays.roadOuter) : [],
+          roadInner: overlays.roadInner.length >= 3 ? polyToLL(overlays.roadInner) : [],
+          connectors: overlays.connectors.map(function (c) { return { from: proj.toLngLat(c.from[0], c.from[1]), to: proj.toLngLat(c.to[0], c.to[1]) }; }),
+          graphNodes: overlays.graphNodes.map(function (n) { return { pt: proj.toLngLat(n.pt[0], n.pt[1]), type: n.type }; }),
+          graphEdges: overlays.graphEdges,
+          trashPad: overlays.trashPad ? { center: proj.toLngLat(overlays.trashPad.center[0], overlays.trashPad.center[1]), rect: polyToLL(overlays.trashPad.rect) } : null,
+          bufferZones: (function () {
+            var bz = [];
+            for (var bi = 0; bi < axes.length; bi++) {
+              if (!axes[bi].bufs) continue;
+              var types = ['fire', 'end', 'insol'];
+              for (var ti = 0; ti < types.length; ti++) {
+                var bp = axes[bi].bufs[types[ti]];
+                if (bp && bp.length === 4) bz.push({ type: types[ti], polygon: polyToLL(bp) });
+              }
+            }
+            return bz;
+          })()
+        }
       },
       geometry: { type: 'Polygon', coordinates: [polyLL.concat([polyLL[0]])] }
     };

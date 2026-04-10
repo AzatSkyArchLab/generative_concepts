@@ -309,10 +309,10 @@ var DEFAULT_PARAMS = {
   sw: 18,        // section width (perpendicular) — 18м как в прототипе
   fire: 14,      // fire buffer
   endB: 20,      // end buffer
-  insol: 30,     // insolation buffer
+  insol: 25,     // insolation buffer (сокращён до 25м)
   gapTarget: 22, // gap target for long axes
-  latLens: [27, 30],
-  lonLens: [36, 39, 42, 46, 49],
+  latLens: [24, 27],
+  lonLens: [30, 36, 39, 42, 46, 49],
   towerLatLens: [23.1],
   towerLonLens: [23.1, 29.7, 39.6]
 };
@@ -338,7 +338,19 @@ export function solveUrbanBlock(polyM, params) {
 
   var edges = extractEdges(polyM);
   edges = classOri(edges);
-  edges = assignCtx(edges);
+
+  // Context assignment: default or random (ctxRoll)
+  var ctxRoll = params.ctxRoll || 0;
+  if (ctxRoll === 0) {
+    edges = assignCtx(edges);
+  } else {
+    var seed = ctxRoll * 7919;
+    for (var ci = 0; ci < edges.length; ci++) {
+      seed = (seed * 16807) % 2147483647;
+      edges[ci].context = Math.floor((seed / 2147483647) * 3);
+    }
+  }
+
   var sorted = sortPrio(edges);
   var trimmed = prioTrim(sorted, polyM, par);
   trimmed = boundTrim(trimmed, polyM, par);

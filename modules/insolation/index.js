@@ -1082,4 +1082,6 @@ var insolationModule = {
   }
 };
 
+export function isInsolLiveActive() { return _globalActive; }
+
 export default insolationModule;
