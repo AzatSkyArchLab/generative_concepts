@@ -5,9 +5,9 @@
 import { eventBus } from '../../core/EventBus.js';
 
 var BUFFER_DEFS = [
-  { key: 'fire', label: 'Fire', unit: 'м', step: 1, min: 1, max: 30, color: '#dc2626', def: 11 },
-  { key: 'end', label: 'End', unit: 'м', step: 1, min: 5, max: 40, color: '#2563eb', def: 20 },
-  { key: 'insolation', label: 'Insol', unit: 'м', step: 5, min: 10, max: 80, color: '#16a34a', def: 40 }
+  { key: 'fire', label: 'Fire', unit: 'm', step: 1, min: 1, max: 30, color: '#dc2626', def: 11 },
+  { key: 'end', label: 'End', unit: 'm', step: 1, min: 5, max: 40, color: '#2563eb', def: 20 },
+  { key: 'insolation', label: 'Insol', unit: 'm', step: 5, min: 10, max: 80, color: '#16a34a', def: 40 }
 ];
 
 export function renderBufferSection() {

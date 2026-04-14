@@ -3,6 +3,7 @@
  */
 
 export { computeFloorCount } from '../../core/SectionParams.js';
+import { corridorLabel as makeCorrLabel } from '../../core/apartments/CellTopology.js';
 
 export function computeZOffset(floor, firstH, typicalH) {
   if (floor === 0) return 0;
@@ -55,7 +56,7 @@ export function buildSectionGraph(N, nearCells, farCells, corridorCells,
     }
 
     for (var i = 0; i < N; i++) {
-      var corrId = i + '-' + (2 * N - 1 - i);
+      var corrId = makeCorrLabel(i, N);
       nodes[corrId + ':' + floor] = {
         cellId: corrId, floor: floor, type: 'corridor', side: 'center',
         polygon: corridorCells[i], lluTag: null,
@@ -73,14 +74,14 @@ export function buildSectionGraph(N, nearCells, farCells, corridorCells,
     }
     // Corridor links
     for (var i = 0; i < N; i++) {
-      var corrId = i + '-' + (2 * N - 1 - i);
+      var corrId = makeCorrLabel(i, N);
       edges.push({ from: i + ':' + floor, to: corrId + ':' + floor, type: 'corridor' });
       edges.push({ from: corrId + ':' + floor, to: (N + i) + ':' + floor, type: 'corridor' }); // fixed: was farId
     }
     // Horizontal corridors
     for (var i = 0; i < N - 1; i++) {
-      var corrA = i + '-' + (2 * N - 1 - i);
-      var corrB = (i + 1) + '-' + (2 * N - 2 - i);
+      var corrA = makeCorrLabel(i, N);
+      var corrB = makeCorrLabel(i + 1, N);
       edges.push({ from: corrA + ':' + floor, to: corrB + ':' + floor, type: 'horizontal' });
     }
   }

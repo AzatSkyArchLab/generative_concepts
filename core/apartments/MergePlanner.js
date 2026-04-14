@@ -24,7 +24,8 @@
  */
 
 import { validateApartment, getFlag } from './ApartmentSolver.js';
-
+import { livingCount as countLiving } from './ApartmentTypes.js';
+import { nearToFar } from './CellTopology.js';
 var TYPE_WIDTH = { '1K': 2, '2K': 3, '3K': 4, '4K': 5 };
 var LIVING_COUNT = { '1K': 1, '2K': 2, '3K': 3, '4K': 4 };
 
@@ -46,16 +47,6 @@ function copyApartments(apartments) {
     });
   }
   return result;
-}
-
-// ── Living Count ─────────────────────────────────────
-
-function countLiving(apt) {
-  var count = 0;
-  for (var i = 0; i < apt.cells.length; i++) {
-    if (typeof apt.cells[i] === 'number' && apt.cells[i] !== apt.wetCell) count++;
-  }
-  return count;
 }
 
 function aptType(livingCount) {
@@ -246,7 +237,7 @@ function reassignCorridors(apartments, sortedCorrNears, N) {
   var assigned = {};
   for (var cni = 0; cni < sortedCorrNears.length; cni++) {
     var nearC = sortedCorrNears[cni];
-    var farC = 2 * N - 1 - nearC;
+    var farC = nearToFar(nearC, N);
     var label = nearC + '-' + farC;
 
     var nearOwner = cellToApt[nearC];

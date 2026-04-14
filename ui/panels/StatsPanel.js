@@ -33,7 +33,7 @@ export function updateStats(stats) {
   h += '</div>';
   h += '<div class="stats-summary-row stats-summary-row--pop">';
   h += '<span class="stats-label">Population <small style="color:var(--text-muted)">/50 m²</small></span>';
-  h += '<span class="stats-value stats-value--pop">' + stats.totalPopulation + ' чел</span>';
+  h += '<span class="stats-value stats-value--pop">' + stats.totalPopulation + ' ppl</span>';
   h += '</div>';
   h += '</div>';
 
@@ -56,7 +56,7 @@ export function updateStats(stats) {
       axisApt += secs[si].totalAptArea;
     }
     h += '<div class="stats-axis-header">Axis ' + axId.slice(0, 5);
-    h += ' <span class="stats-axis-sum">' + axisPop + ' чел · ' + fmtArea(axisApt) + '</span></div>';
+    h += ' <span class="stats-axis-sum">' + axisPop + ' ppl · ' + fmtArea(axisApt) + '</span></div>';
 
     for (var si = 0; si < secs.length; si++) {
       var s = secs[si];
@@ -77,7 +77,7 @@ export function updateStats(stats) {
           wzLabel += ' · ' + wz.southOrphans + ' S-orph';
         }
         h += '<div class="stats-sec-metric stats-sec-wz ' + wzClass + '" style="grid-column:2/4">';
-        h += '<span class="stats-sec-metric-label">' + (wz.orientation === 'lon' ? 'мерид' : 'шир') + '</span>';
+        h += '<span class="stats-sec-metric-label">' + (wz.orientation === 'lon' ? 'merid' : 'lat') + '</span>';
         h += '<span class="stats-sec-metric-value">' + wzIcon + ' ' + wzLabel + '</span>';
         h += '</div>';
       }

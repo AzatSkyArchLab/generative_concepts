@@ -7,15 +7,7 @@
  * All coordinates in meters (local projection).
  */
 
-// ── Geometry helpers ──────────────────────────────────
-
-function vSub(a, b) { return [a[0] - b[0], a[1] - b[1]]; }
-function vAdd(a, b) { return [a[0] + b[0], a[1] + b[1]]; }
-function vSc(v, s) { return [v[0] * s, v[1] * s]; }
-function vLen(v) { return Math.sqrt(v[0] * v[0] + v[1] * v[1]); }
-function vNorm(v) { var l = vLen(v); return l > 1e-9 ? [v[0] / l, v[1] / l] : [0, 0]; }
-function vDot(a, b) { return a[0] * b[0] + a[1] * b[1]; }
-function vCross(a, b) { return a[0] * b[1] - a[1] * b[0]; }
+import { vSub, vAdd, vSc, vLen, vNorm, vDot, vCross } from '../geo/vec2.js';
 
 function ptIn(pt, poly) {
   var ins = false;
@@ -319,53 +311,138 @@ export function computeOverlays(polyM, axes, params) {
     }
   }
 
-  // Trash pad 6×3m (OBB grid search)
+  // Trash pad 6×3m — multi-pass placement (strict → relaxed → anywhere)
   var trashPad = null;
   if (trashOuter.length > 0) {
     var obb = computeOBB(polyM);
     var padW = 6, padH = 3;
     var cen = pCen(polyM);
-    var bestDist = -1;
     var step = 6;
     var hW = obb.w / 2 + 10, hH = obb.h / 2 + 10;
-    for (var gx = -hW; gx <= hW; gx += step) {
-      for (var gy = -hH; gy <= hH; gy += step) {
-        var cx = obb.cx + obb.d1[0] * gx + obb.d2[0] * gy;
-        var cy = obb.cy + obb.d1[1] * gx + obb.d2[1] * gy;
-        var center = [cx, cy];
-        var corners = [
-          vAdd(center, vAdd(vSc(obb.d1, -padW / 2), vSc(obb.d2, -padH / 2))),
-          vAdd(center, vAdd(vSc(obb.d1, padW / 2), vSc(obb.d2, -padH / 2))),
-          vAdd(center, vAdd(vSc(obb.d1, padW / 2), vSc(obb.d2, padH / 2))),
-          vAdd(center, vAdd(vSc(obb.d1, -padW / 2), vSc(obb.d2, padH / 2)))
-        ];
-        // All corners inside polygon
-        var allIn = true;
-        for (var ci2 = 0; ci2 < 4; ci2++) { if (!ptIn(corners[ci2], polyM)) { allIn = false; break; } }
-        if (!allIn) continue;
-        // Inside roadInner
-        if (roadInner.length >= 3) {
-          var inRoad = true;
-          for (var ci3 = 0; ci3 < 4; ci3++) { if (!ptIn(corners[ci3], roadInner)) { inRoad = false; break; } }
-          if (!inRoad) continue;
-        }
-        // In trashZone (20-100m): inside outer, outside inner
-        var inO = false;
-        for (var toi = 0; toi < trashOuter.length; toi++) { if (ptIn(center, trashOuter[toi])) { inO = true; break; } }
-        if (!inO) continue;
-        var inI = false;
-        for (var tii = 0; tii < trashInner.length; tii++) { if (ptIn(center, trashInner[tii])) { inI = true; break; } }
-        if (inI) continue;
-        // Not intersecting secFire
-        var hitsSec = false;
-        for (var sfi = 0; sfi < secFire.length && !hitsSec; sfi++) {
-          for (var ci4 = 0; ci4 < 4; ci4++) { if (ptIn(corners[ci4], secFire[sfi])) { hitsSec = true; break; } }
-        }
-        if (hitsSec) continue;
-        // Max distance from center
-        var dist = vLen(vSub(center, cen));
-        if (dist > bestDist) { bestDist = dist; trashPad = { center: center, rect: corners }; }
+
+    function segHitsQuad(sa, sb, quad) {
+      for (var qi = 0; qi < 4; qi++) {
+        if (segSeg(sa, sb, quad[qi], quad[(qi + 1) % 4])) return true;
       }
+      return false;
+    }
+    function tryPlaceTrash(pass) {
+      var best = null, bestDist2 = -1;
+      for (var gx = -hW; gx <= hW; gx += step) {
+        for (var gy = -hH; gy <= hH; gy += step) {
+          var cx = obb.cx + obb.d1[0] * gx + obb.d2[0] * gy;
+          var cy = obb.cy + obb.d1[1] * gx + obb.d2[1] * gy;
+          var center = [cx, cy];
+          var corners = [
+            vAdd(center, vAdd(vSc(obb.d1, -padW / 2), vSc(obb.d2, -padH / 2))),
+            vAdd(center, vAdd(vSc(obb.d1, padW / 2), vSc(obb.d2, -padH / 2))),
+            vAdd(center, vAdd(vSc(obb.d1, padW / 2), vSc(obb.d2, padH / 2))),
+            vAdd(center, vAdd(vSc(obb.d1, -padW / 2), vSc(obb.d2, padH / 2)))
+          ];
+          var allIn = true;
+          for (var ci2 = 0; ci2 < 4; ci2++) { if (!ptIn(corners[ci2], polyM)) { allIn = false; break; } }
+          if (!allIn) continue;
+          // Pass 0,1: outside roadInner (edge zone, not yard)
+          if (pass < 2 && roadInner.length >= 3) {
+            var anyInsideRI = false;
+            for (var ci3 = 0; ci3 < 4; ci3++) { if (ptIn(corners[ci3], roadInner)) { anyInsideRI = true; break; } }
+            if (anyInsideRI) continue;
+          }
+          // Not intersecting connectors
+          var hitsConn = false;
+          for (var cci = 0; cci < connectors.length && !hitsConn; cci++) {
+            var ccn = connectors[cci];
+            var ccdx = ccn.to[0] - ccn.from[0], ccdy = ccn.to[1] - ccn.from[1];
+            var cclen = Math.sqrt(ccdx * ccdx + ccdy * ccdy); if (cclen < 0.5) continue;
+            var cpAx = -ccdy / cclen, cpAy = ccdx / cclen;
+            var cmid = [(ccn.from[0] + ccn.to[0]) / 2, (ccn.from[1] + ccn.to[1]) / 2];
+            var cbc = ccn.bufCen || cmid;
+            var ctA = [cmid[0] + cpAx * 3, cmid[1] + cpAy * 3];
+            var ctB = [cmid[0] - cpAx * 3, cmid[1] - cpAy * 3];
+            var cti = (vLen(vSub(ctA, cbc)) < vLen(vSub(ctB, cbc))) ? 1 : -1;
+            var cipx = cpAx * cti * 6, cipy = cpAy * cti * 6;
+            var connQuad = [ccn.from, ccn.to, [ccn.to[0] + cipx, ccn.to[1] + cipy], [ccn.from[0] + cipx, ccn.from[1] + cipy]];
+            for (var pe = 0; pe < 4 && !hitsConn; pe++) {
+              if (segHitsQuad(corners[pe], corners[(pe + 1) % 4], connQuad)) hitsConn = true;
+            }
+            if (!hitsConn && ptIn(center, connQuad)) hitsConn = true;
+          }
+          if (hitsConn) continue;
+          // Pass 0: strict trashZone 20-100m
+          if (pass === 0) {
+            var inO = false;
+            for (var toi = 0; toi < trashOuter.length; toi++) { if (ptIn(center, trashOuter[toi])) { inO = true; break; } }
+            if (!inO) continue;
+            var inI = false;
+            for (var tii = 0; tii < trashInner.length; tii++) { if (ptIn(center, trashInner[tii])) { inI = true; break; } }
+            if (inI) continue;
+          }
+          // Not intersecting secFire
+          var hitsSec = false;
+          for (var sfi = 0; sfi < secFire.length && !hitsSec; sfi++) {
+            for (var ci4 = 0; ci4 < 4; ci4++) { if (ptIn(corners[ci4], secFire[sfi])) { hitsSec = true; break; } }
+          }
+          if (hitsSec) continue;
+          var dist = vLen(vSub(center, cen));
+          if (dist > bestDist2) { bestDist2 = dist; best = { center: center, rect: corners }; }
+        }
+      }
+      return best;
+    }
+    trashPad = tryPlaceTrash(0);
+    if (!trashPad) trashPad = tryPlaceTrash(1);
+    if (!trashPad) trashPad = tryPlaceTrash(2);
+  }
+
+  // Pedestrian paths: section inner edges → nearest point on roadInner
+  var pedPaths = [];
+  if (roadInner.length >= 3) {
+    function nearestOnPoly(pt, ring) {
+      var bestPt = null, bestD = Infinity;
+      for (var i = 0; i < ring.length; i++) {
+        var a = ring[i], b = ring[(i + 1) % ring.length];
+        var ab = vSub(b, a), ap = vSub(pt, a);
+        var len2 = vDot(ab, ab);
+        var t = len2 > 1e-9 ? Math.max(0, Math.min(1, vDot(ap, ab) / len2)) : 0;
+        var proj = vAdd(a, vSc(ab, t));
+        var d = vLen(vSub(proj, pt));
+        if (d < bestD) { bestD = d; bestPt = proj; }
+      }
+      return bestPt;
+    }
+    for (var pwi = 0; pwi < axes.length; pwi++) {
+      var pwe = axes[pwi];
+      if (!pwe.secs || !pwe.oi || pwe.removed) continue;
+      for (var psi = 0; psi < pwe.secs.length; psi++) {
+        var ps = pwe.secs[psi];
+        if (ps.gap || !ps.start || !ps.end) continue;
+        // Inner edge: offset side (rect[2]↔rect[3])
+        var oS = vAdd(ps.start, vSc(pwe.oi.od, sw));
+        var oE = vAdd(ps.end, vSc(pwe.oi.od, sw));
+        var innerMid = vSc(vAdd(oS, oE), 0.5);
+        var nearest = nearestOnPoly(innerMid, roadInner);
+        if (!nearest) continue;
+        var pathLen = vLen(vSub(nearest, innerMid));
+        if (pathLen < 0.5 || pathLen > 100) continue;
+        pedPaths.push({ from: innerMid, to: nearest });
+      }
+    }
+    // Add ped edges to graph
+    for (var pgi = 0; pgi < pedPaths.length; pgi++) {
+      var pp = pedPaths[pgi];
+      var secNodeIdx = graphNodes.length;
+      graphNodes.push({ pt: pp.from, type: 'sec' });
+      var roadNodeIdx = graphNodes.length;
+      graphNodes.push({ pt: pp.to, type: 'pedRoad' });
+      graphEdges.push({ a: secNodeIdx, b: roadNodeIdx, type: 'ped' });
+      // Link pedRoad → closest ring node
+      var bestRI = -1, bestRD = Infinity;
+      for (var gri = 0; gri < graphNodes.length; gri++) {
+        if (graphNodes[gri].type !== 'ring' && graphNodes[gri].type !== 'junction') continue;
+        var dd = vLen(vSub(graphNodes[gri].pt, pp.to));
+        if (dd < bestRD) { bestRD = dd; bestRI = gri; }
+      }
+      if (bestRI >= 0 && bestRD > 0.3) graphEdges.push({ a: roadNodeIdx, b: bestRI, type: 'ring' });
     }
   }
 
@@ -404,6 +481,226 @@ export function computeOverlays(polyM, axes, params) {
     trashOuter: trashOuter,
     playBuf12: playBuf12,
     playBuf20: playBuf20,
-    playBuf40: playBuf40
+    playBuf40: playBuf40,
+    pedPaths: pedPaths
   };
+}
+
+// ── Grid generation (OBB-aligned, clipped to polygon) ─────
+
+function segT(p1, p2, p3, p4) {
+  var d1 = vSub(p2, p1), d2 = vSub(p4, p3), cr = vCross(d1, d2);
+  if (Math.abs(cr) < 1e-10) return null;
+  var d3 = vSub(p3, p1), t = vCross(d3, d2) / cr, u = vCross(d3, d1) / cr;
+  if (t >= -1e-9 && t <= 1 + 1e-9 && u >= -1e-9 && u <= 1 + 1e-9) return Math.max(0, Math.min(1, t));
+  return null;
+}
+
+function clipSegInside(p1, p2, poly) {
+  var ts = [];
+  for (var i = 0; i < poly.length; i++) {
+    var t = segT(p1, p2, poly[i], poly[(i + 1) % poly.length]);
+    if (t !== null) ts.push(t);
+  }
+  ts.sort(function (a, b) { return a - b; });
+  var uTs = [0];
+  for (var k = 0; k < ts.length; k++) { if (Math.abs(ts[k] - uTs[uTs.length - 1]) > 1e-9) uTs.push(ts[k]); }
+  if (Math.abs(uTs[uTs.length - 1] - 1) > 1e-9) uTs.push(1);
+  var segs = [], dir = vSub(p2, p1);
+  for (var i2 = 0; i2 < uTs.length - 1; i2++) {
+    var mid = (uTs[i2] + uTs[i2 + 1]) / 2;
+    var mp = vAdd(p1, vSc(dir, mid));
+    if (ptIn(mp, poly)) segs.push({ start: vAdd(p1, vSc(dir, uTs[i2])), end: vAdd(p1, vSc(dir, uTs[i2 + 1])) });
+  }
+  return segs;
+}
+
+/**
+ * Generate OBB-aligned grid lines clipped to polygon interior.
+ *
+ * @param {Array<[number,number]>} polyM - polygon in meters (CCW)
+ * @param {number} step - grid spacing in meters
+ * @param {Object} [obb] - precomputed OBB (optional, recomputed if null)
+ * @returns {{ h: Array<{start, end}>, v: Array<{start, end}> }}
+ */
+export function genGrid(polyM, step, obb) {
+  if (!obb) obb = computeOBB(polyM);
+  var h = [], v = [];
+  var d1 = obb.d1, d2 = obb.d2;
+  var center = [(obb.cx !== undefined ? obb.cx : 0), (obb.cy !== undefined ? obb.cy : 0)];
+  var halfW = obb.w / 2 + step, halfH = obb.h / 2 + step;
+  // Lines along d1 (shifted by d2)
+  for (var t = -halfH; t <= halfH; t += step) {
+    var origin = vAdd(center, vSc(d2, t));
+    var p1 = vAdd(origin, vSc(d1, -halfW));
+    var p2 = vAdd(origin, vSc(d1, halfW));
+    var sg = clipSegInside(p1, p2, polyM);
+    for (var i = 0; i < sg.length; i++) h.push(sg[i]);
+  }
+  // Lines along d2 (shifted by d1)
+  for (var t2 = -halfW; t2 <= halfW; t2 += step) {
+    var origin2 = vAdd(center, vSc(d1, t2));
+    var p3 = vAdd(origin2, vSc(d2, -halfH));
+    var p4 = vAdd(origin2, vSc(d2, halfH));
+    var sg2 = clipSegInside(p3, p4, polyM);
+    for (var j = 0; j < sg2.length; j++) v.push(sg2[j]);
+  }
+  return { h: h, v: v };
+}
+
+// ── External road connections ─────────────────────────────
+
+/**
+ * Project point onto nearest position along a polyline.
+ * @returns {{ pt: [number,number], dist: number }}
+ */
+function projOnPolyline(pt, line) {
+  var bestPt = null, bestD = Infinity;
+  for (var i = 0; i < line.length - 1; i++) {
+    var a = line[i], b = line[i + 1];
+    var ab = vSub(b, a), ap = vSub(pt, a);
+    var len2 = vDot(ab, ab);
+    var t = len2 > 1e-9 ? Math.max(0, Math.min(1, vDot(ap, ab) / len2)) : 0;
+    var proj = vAdd(a, vSc(ab, t));
+    var d = vLen(vSub(proj, pt));
+    if (d < bestD) { bestD = d; bestPt = proj; }
+  }
+  return { pt: bestPt, dist: bestD };
+}
+
+/**
+ * Compute connections from block boundary points to nearby road polylines.
+ *
+ * Ported from JSX prototype (ШАГ 19: Подключения к внешним дорогам).
+ *
+ * @param {Array<Object>} connectors - from computeOverlays (with .from boundary points)
+ * @param {Array<Array<[number,number]>>} roadPolylinesM - road polylines in meters
+ * @param {Array<[number,number]>} polyM - block polygon in meters
+ * @param {number} numEntries - desired number of active entries (1-8)
+ * @returns {{ connections: Array<{from, proj, dist, roadIdx, active}>, activeBoundary: Object }}
+ */
+export function computeExtConnections(connectors, roadPolylinesM, polyM, numEntries) {
+  if (!connectors || connectors.length === 0 || !roadPolylinesM || roadPolylinesM.length === 0) {
+    return { connections: [], activeBoundary: {} };
+  }
+
+  // Collect unique boundary points (connector .from points)
+  var boundaryPts = [];
+  var bpSet = {};
+  for (var i = 0; i < connectors.length; i++) {
+    var bp = connectors[i].from;
+    var bk = Math.round(bp[0] * 10) + '_' + Math.round(bp[1] * 10);
+    if (!bpSet[bk]) { bpSet[bk] = true; boundaryPts.push(bp); }
+  }
+
+  // For each boundary point, find nearest projection on each road
+  var extConns = [];
+  for (var ri = 0; ri < roadPolylinesM.length; ri++) {
+    var road = roadPolylinesM[ri];
+    if (road.length < 2) continue;
+    for (var bi = 0; bi < boundaryPts.length; bi++) {
+      var pr = projOnPolyline(boundaryPts[bi], road);
+      if (pr.pt && pr.dist < 300) {
+        extConns.push({ from: boundaryPts[bi], proj: pr.pt, dist: pr.dist, roadIdx: ri });
+      }
+    }
+  }
+
+  // Filter: remove connections that cross the polygon boundary
+  var filtered = [];
+  for (var fi = 0; fi < extConns.length; fi++) {
+    var ec = extConns[fi];
+    var dir = vNorm(vSub(ec.proj, ec.from));
+    var startPt = vAdd(ec.from, vSc(dir, 0.5)); // offset slightly to avoid self-intersection
+    var hitsP = false;
+    for (var pi = 0; pi < polyM.length; pi++) {
+      if (segSeg(startPt, ec.proj, polyM[pi], polyM[(pi + 1) % polyM.length])) { hitsP = true; break; }
+    }
+    if (!hitsP) filtered.push(ec);
+  }
+  extConns = filtered;
+
+  // Dedup: if two connections from same point, keep shorter
+  var deduped = [];
+  var seenFrom = {};
+  extConns.sort(function (a, b) { return a.dist - b.dist; });
+  for (var di = 0; di < extConns.length; di++) {
+    var dk = Math.round(extConns[di].from[0] * 10) + '_' + Math.round(extConns[di].from[1] * 10);
+    if (!seenFrom[dk]) { seenFrom[dk] = true; deduped.push(extConns[di]); }
+  }
+  extConns = deduped;
+
+  // Select N entries: brute-force for small sets, greedy otherwise
+  var ne = Math.min(numEntries || 2, extConns.length);
+  var activeEntries = [];
+
+  if (extConns.length > 0 && ne > 0) {
+    if (ne === 1) {
+      var bestI = 0;
+      for (var si = 1; si < extConns.length; si++) { if (extConns[si].dist < extConns[bestI].dist) bestI = si; }
+      activeEntries = [bestI];
+    } else {
+      var count = extConns.length;
+      var useBrute = (ne <= 4 && count <= 20);
+      if (useBrute) {
+        var bestCombo = null, bestScore = -Infinity;
+        function combos(arr, k, start, cur) {
+          if (cur.length === k) {
+            var minSp = Infinity;
+            for (var a2 = 0; a2 < cur.length; a2++) {
+              for (var b2 = a2 + 1; b2 < cur.length; b2++) {
+                var sp = vLen(vSub(extConns[cur[a2]].from, extConns[cur[b2]].from));
+                if (sp < minSp) minSp = sp;
+              }
+            }
+            var avgD = 0;
+            for (var c2 = 0; c2 < cur.length; c2++) avgD += extConns[cur[c2]].dist;
+            avgD /= cur.length;
+            var score = minSp * 2 - avgD;
+            if (score > bestScore) { bestScore = score; bestCombo = cur.slice(); }
+            return;
+          }
+          for (var i2 = start; i2 < arr; i2++) { cur.push(i2); combos(arr, k, i2 + 1, cur); cur.pop(); }
+        }
+        combos(count, ne, 0, []);
+        if (bestCombo) activeEntries = bestCombo;
+      } else {
+        // Greedy: start with shortest, then maximin spacing
+        var picked = [0];
+        for (var si2 = 1; si2 < extConns.length; si2++) { if (extConns[si2].dist < extConns[picked[0]].dist) picked[0] = si2; }
+        while (picked.length < ne) {
+          var bestIdx = -1, bestS = -Infinity;
+          for (var si3 = 0; si3 < extConns.length; si3++) {
+            var alr = false;
+            for (var pi2 = 0; pi2 < picked.length; pi2++) { if (picked[pi2] === si3) { alr = true; break; } }
+            if (alr) continue;
+            var minD = Infinity;
+            for (var pi3 = 0; pi3 < picked.length; pi3++) {
+              var d2 = vLen(vSub(extConns[si3].from, extConns[picked[pi3]].from));
+              if (d2 < minD) minD = d2;
+            }
+            var sc = minD * 2 - extConns[si3].dist;
+            if (sc > bestS) { bestS = sc; bestIdx = si3; }
+          }
+          if (bestIdx >= 0) picked.push(bestIdx); else break;
+        }
+        activeEntries = picked;
+      }
+    }
+  }
+
+  // Mark active
+  for (var mi = 0; mi < extConns.length; mi++) extConns[mi].active = false;
+  for (var mi2 = 0; mi2 < activeEntries.length; mi2++) extConns[activeEntries[mi2]].active = true;
+
+  // Build active boundary set
+  var activeBoundary = {};
+  for (var ai = 0; ai < extConns.length; ai++) {
+    if (extConns[ai].active) {
+      var abk = Math.round(extConns[ai].from[0] * 10) + '_' + Math.round(extConns[ai].from[1] * 10);
+      activeBoundary[abk] = true;
+    }
+  }
+
+  return { connections: extConns, activeBoundary: activeBoundary };
 }

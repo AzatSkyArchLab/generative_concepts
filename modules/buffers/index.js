@@ -8,6 +8,7 @@
 
 import { createProjection, centroid } from '../../core/geo/projection.js';
 import { autoFireDist } from '../../core/SectionParams.js';
+import { log } from '../../core/Logger.js';
 
 var _distances = { end: 20, insolation: 40 };
 
@@ -261,7 +262,7 @@ var buffersModule = {
     _unsubs.push(_eventBus.on('features:changed', onChanged));
     _unsubs.push(_eventBus.on('draw:section:complete', onChanged));
     _unsubs.push(_eventBus.on('section-gen:params:changed', onChanged));
-    console.log('[buffers] initialized');
+    log.debug('[buffers] initialized');
   },
   destroy: function () {
     for (var i = 0; i < _unsubs.length; i++) _unsubs[i]();

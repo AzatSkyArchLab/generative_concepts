@@ -22,6 +22,7 @@ import { ThreeOverlay } from './core/three/ThreeOverlay.js';
 import sectionGenModule from './modules/section-gen/index.js';
 import buffersModule from './modules/buffers/index.js';
 import insolationModule from './modules/insolation/index.js';
+import { log } from './core/Logger.js';
 
 var MODULES = [
   // urbanBlockModule,
@@ -114,7 +115,7 @@ async function bootstrap() {
     }
 
     eventBus.emit('app:ready');
-    console.log('U·B·SYSTEM started (' + MODULES.length + ' modules, Three.js enabled)');
+    log.debug('U·B·SYSTEM started (' + MODULES.length + ' modules, Three.js enabled)');
 
   } catch (err) {
     console.error('Failed to start U·B·SYSTEM:', err);

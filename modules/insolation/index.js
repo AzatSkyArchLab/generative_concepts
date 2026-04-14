@@ -14,21 +14,23 @@
 import * as THREE from 'three';
 import { getSunVectors } from '../../core/insolation/SunVectors.js';
 import { evaluateInsolation } from '../../core/insolation/InsolationCalc.js';
+import { INSOL_CONFIG } from '../../core/insolation/InsolationConfig.js';
 import { getParams, getSectionHeight, computeBuildingHeight, computeFloorCount } from '../../core/SectionParams.js';
 import { createProjection } from '../../core/geo/projection.js';
 import { getTowerDimensions, classifyCells, generateCellsFromFootprint } from '../../core/tower/TowerGenerator.js';
 import { walkRing } from '../../core/tower/TowerGraph.js';
 import { classifySegment } from '../../modules/urban-block/orientation.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
+import { log } from '../../core/Logger.js';
 
-// ── Config ─────────────────────────────────────────────
+// ── Config (from InsolationConfig, aliased for local brevity) ────
 
-var LATITUDE = 55;
-var NORMATIVE_MINUTES = 120;
-var FACADE_OFFSET = -0.4;  // 0.4m inward from fpM = 0.1m outside notch face (0.5m deep)
-var POINT_RADIUS = 0.6;
-var MAX_RAY_DISTANCE = 500;
-var RAY_FREE_LENGTH = 80;
+var LATITUDE = INSOL_CONFIG.latitude;
+var NORMATIVE_MINUTES = INSOL_CONFIG.normativeMinutes;
+var FACADE_OFFSET = INSOL_CONFIG.facadeOffset;
+var POINT_RADIUS = INSOL_CONFIG.pointRadius;
+var MAX_RAY_DISTANCE = INSOL_CONFIG.maxRayDistance;
+var RAY_FREE_LENGTH = INSOL_CONFIG.rayFreeLength;
 
 var COLORS = { PASS: 0x22c55e, WARNING: 0xf59e0b, FAIL: 0xef4444 };
 var RAY_COLORS = { free: 0xfbbf24, blocked: 0xef4444 };
@@ -145,11 +147,11 @@ function offsetAllSides(fpM, dist) {
   ];
 }
 
-var EXT_WALL_T = 0.6;
-var COL_WIN_W = 1.8;
-var COL_WIN_H = 1.5;
-var COL_WIN_SILL = 1.2;
-var COL_SLAB = 0.3;
+var EXT_WALL_T = INSOL_CONFIG.extWallThickness;
+var COL_WIN_W = INSOL_CONFIG.windowWidth;
+var COL_WIN_H = INSOL_CONFIG.windowHeight;
+var COL_WIN_SILL = INSOL_CONFIG.windowSillHeight;
+var COL_SLAB = INSOL_CONFIG.slabThickness;
 
 /**
  * Build pier box in window zone on one side of a window opening.
@@ -354,7 +356,7 @@ function buildAllCollisionMeshes(sections, towers, proj) {
       meshes.push(buildCollisionBoxRange(fpM, buildingH - 0.3, buildingH));
 
       // LLU rooftop extension: stairwell/elevator shaft above roof (2.5m)
-      var LLU_ABOVE = 2.5;
+      var LLU_ABOVE = INSOL_CONFIG.lluAboveRoof;
       var lluMin = N; var lluMax = -1;
       for (var lidx in lluIdx) {
         if (!lluIdx.hasOwnProperty(lidx)) continue;
@@ -590,7 +592,7 @@ function generateFacadePoints(fpM, params, secH, hasLeftNeighbor, hasRightNeighb
     }
   }
 
-  if (floorNum === 1) console.log('[insol] section N=' + cellCount + ' llu=' + lluSide + ' near=' + nearCount + ' far=' + farCount + ' ends=' + (points.length - nearCount - farCount));
+  if (floorNum === 1) log.debug('[insol] section N=' + cellCount + ' llu=' + lluSide + ' near=' + nearCount + ' far=' + farCount + ' ends=' + (points.length - nearCount - farCount));
   return points;
 }
 
@@ -795,7 +797,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
   }
   var proj = getProj();
   if (!proj) {
-    console.warn('[insolation] no projection origin yet — run section-gen first');
+    log.warn('[insolation] no projection origin yet — run section-gen first');
     return;
   }
   var sunData = getSunVectors(LATITUDE);
@@ -930,7 +932,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
 
       for (var tfl = floorStart; tfl <= actualMaxFloor; tfl++) {
         var tPoints = generateTowerFacadePoints(tfpM, tDims, exitSide, tfl);
-        console.log('[insol] tower ' + tfi + ' floor ' + tfl + ': ' + tPoints.length + ' facade points, dims=' + tDims.rows + '×' + tDims.cols + ' exit=' + exitSide);
+        log.debug('[insol] tower ' + tfi + ' floor ' + tfl + ': ' + tPoints.length + ' facade points, dims=' + tDims.rows + '×' + tDims.cols + ' exit=' + exitSide);
         for (var tpi = 0; tpi < tPoints.length; tpi++) {
           var tpt = tPoints[tpi];
           var tRayResults = castSunRays(tpt.position, sunVectors, _collisionMeshes);
@@ -955,7 +957,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
 
   _lastResults = facadeResults;
   _lastPointData = facadeResults;
-  console.log('[insol] TOTAL: ' + facadeResults.length + ' facade points (P:' + pass + ' W:' + warn + ' F:' + fail + ')');
+  log.debug('[insol] TOTAL: ' + facadeResults.length + ' facade points (P:' + pass + ' W:' + warn + ' F:' + fail + ')');
   displayResults(facadeResults);
   if (_raysVisible) showAllRays(sunVectors);
 
@@ -977,7 +979,7 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
   }
 
   var floorLabel = floorEnd > 1 ? ' (floors 1-' + floorEnd + ')' : '';
-  console.log('[insolation] ' + level + floorLabel + ': ' + facadeResults.length + ' pts — P:' + pass + ' W:' + warn + ' F:' + fail);
+  log.debug('[insolation] ' + level + floorLabel + ': ' + facadeResults.length + ' pts — P:' + pass + ' W:' + warn + ' F:' + fail);
   _eventBus.emit('insolation:results', {
     level: level, total: facadeResults.length,
     pass: pass, warning: warn, fail: fail,
@@ -1066,11 +1068,11 @@ var insolationModule = {
           if (fc - 1 > maxFloor) maxFloor = fc - 1; // -1 for commercial floor
         }
       }
-      console.log('[insolation] multi-floor: running floors 1-' + maxFloor);
+      log.debug('[insolation] multi-floor: running floors 1-' + maxFloor);
       runAnalysis('global', null, null, maxFloor);
     }));
 
-    console.log('[insolation] initialized (lat=' + LATITUDE + '°, norm=' + NORMATIVE_MINUTES + 'min)');
+    log.debug('[insolation] initialized (lat=' + LATITUDE + '°, norm=' + NORMATIVE_MINUTES + 'min)');
   },
   destroy: function () {
     for (var i = 0; i < _unsubs.length; i++) _unsubs[i]();

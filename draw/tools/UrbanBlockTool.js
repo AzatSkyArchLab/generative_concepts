@@ -14,8 +14,9 @@ import { commandManager } from '../../core/commands/CommandManager.js';
 import { AddFeatureCommand } from '../../core/commands/AddFeatureCommand.js';
 import { CompoundCommand } from '../../core/commands/CompoundCommand.js';
 import { createProjection } from '../../core/geo/projection.js';
-import { solveUrbanBlock, DEFAULT_PARAMS } from '../../core/urban-block/UrbanBlockSolver.js';
+import { solveUrbanBlockFull, DEFAULT_PARAMS } from '../../core/urban-block/UrbanBlockSolver.js';
 import { computeOverlays } from '../../core/urban-block/UrbanBlockOverlays.js';
+import { log } from '../../core/Logger.js';
 
 var SECTION_WIDTH = 18.0;
 
@@ -79,13 +80,15 @@ export class UrbanBlockTool extends BaseDrawTool {
     }
     if (area < 0) { polyM.reverse(); polyLL.reverse(); }
 
-    // Run solver with priority trimming + buffer subtraction
-    var axes = solveUrbanBlock(polyM, DEFAULT_PARAMS);
+    // Run solver with priority trimming + buffer subtraction + simplification
+    var solveResult = solveUrbanBlockFull(polyM, DEFAULT_PARAMS);
+    var axes = solveResult.axes;
+    var workPolyM = solveResult.polyM;
     var sw = DEFAULT_PARAMS.sw;
     var commands = [];
 
-    // Compute overlays (roads, graph, trash, buffers)
-    var overlays = computeOverlays(polyM, axes, DEFAULT_PARAMS);
+    // Compute overlays (roads, graph, trash, buffers) — use simplified polygon
+    var overlays = computeOverlays(workPolyM, axes, DEFAULT_PARAMS);
     function polyToLL(p) { var r = []; for (var i = 0; i < p.length; i++) r.push(proj.toLngLat(p[i][0], p[i][1])); return r; }
     function polysToLL(arr) { var r = []; for (var i = 0; i < arr.length; i++) r.push(polyToLL(arr[i])); return r; }
 
@@ -174,7 +177,7 @@ export class UrbanBlockTool extends BaseDrawTool {
     // Single compound command — one Ctrl+Z undoes entire block
     commandManager.execute(new CompoundCommand(commands, 'Add urban block'));
     eventBus.emit('draw:section:complete', blockFeature);
-    console.log('[UrbanBlock] block ' + blockId.slice(0, 6) + ': ' + (commands.length - 1) + ' axes');
+    log.debug('[UrbanBlock] block ' + blockId.slice(0, 6) + ': ' + (commands.length - 1) + ' axes');
 
     this._reset();
     this._manager.clearPreview();

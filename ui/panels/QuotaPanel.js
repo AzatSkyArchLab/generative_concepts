@@ -5,7 +5,6 @@
  * Temporary debug tool — will be removed after algorithm is finalized.
  */
 
-import { eventBus } from '../../core/EventBus.js';
 
 var _lastResults = {};
 

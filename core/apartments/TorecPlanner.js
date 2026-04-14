@@ -12,7 +12,9 @@
  */
 
 import { validateApartment, getFlag } from './ApartmentSolver.js';
+import { log } from '../Logger.js';
 
+import { nearToFar } from './CellTopology.js';
 // ── Step 2: Global Quota ─────────────────────────────
 
 /**
@@ -243,7 +245,7 @@ function buildTorecApt(pool, assignedType, insolMap, wzStacks, N, sortedCorrNear
   var corridorLabel = null;
   for (var i = 0; i < sortedCorrNears.length; i++) {
     var nearC = sortedCorrNears[i];
-    var farC = 2 * N - 1 - nearC;
+    var farC = nearToFar(nearC, N);
     if (cellSet[nearC] && cellSet[farC]) {
       var label = nearC + '-' + farC;
       cells.push(label);
@@ -304,12 +306,12 @@ export function planTorecs(params) {
   var aptsPerFloor = wzStacks.length + 2; // WZ + 2 torecs
   var K_total = aptsPerFloor * residentialFloors;
 
-  console.log('[TorecPlanner] K_total=' + K_total +
+  log.debug('[TorecPlanner] K_total=' + K_total +
     ' (WZ=' + wzStacks.length + ' + 2 torecs) × ' + residentialFloors + ' floors');
 
   // ── Step 2: Global quota ──
   var quota = computeGlobalQuota(K_total, mix);
-  console.log('[TorecPlanner] quota:', JSON.stringify(quota));
+  log.debug('[TorecPlanner] quota:', JSON.stringify(quota));
 
   // ── Build torec pools ──
   var leftPool = buildTorecPool('left', N, lluCellIds, orientation);
@@ -318,9 +320,9 @@ export function planTorecs(params) {
   var leftMaxLiving = torecMaxLiving(leftPool);
   var rightMaxLiving = torecMaxLiving(rightPool);
 
-  console.log('[TorecPlanner] leftPool:', leftPool.join(','),
+  log.debug('[TorecPlanner] leftPool:', leftPool.join(','),
     'maxLiving=' + leftMaxLiving);
-  console.log('[TorecPlanner] rightPool:', rightPool.join(','),
+  log.debug('[TorecPlanner] rightPool:', rightPool.join(','),
     'maxLiving=' + rightMaxLiving);
 
   // ── Step 3: Assign torecs bottom-up ──
@@ -361,7 +363,7 @@ export function planTorecs(params) {
     if (hasCellZero && leftTorecWZ === null) leftTorecWZ = apt.wetCell;
     if (hasCellNm1 && rightTorecWZ === null) rightTorecWZ = apt.wetCell;
   }
-  console.log('[TorecPlanner] fixed WZ: left=' + leftTorecWZ + ' right=' + rightTorecWZ);
+  log.debug('[TorecPlanner] fixed WZ: left=' + leftTorecWZ + ' right=' + rightTorecWZ);
 
   var floors = [];
   // Floor 1: keep as-is
@@ -379,7 +381,7 @@ export function planTorecs(params) {
   var maxCap = Math.max(leftMaxLiving, rightMaxLiving);
   var torecSeq = buildTorecSequence(remaining, torecCount, maxCap);
 
-  console.log('[TorecPlanner] torec sequence (' + torecSeq.length + '):', torecSeq.join(','));
+  log.debug('[TorecPlanner] torec sequence (' + torecSeq.length + '):', torecSeq.join(','));
 
   var seqIdx = 0;
   for (var fl = 2; fl <= residentialFloors; fl++) {
@@ -443,8 +445,8 @@ export function planTorecs(params) {
     };
   }
 
-  console.log('[TorecPlanner] totalPlaced:', JSON.stringify(totalPlaced));
-  console.log('[TorecPlanner] remaining after torecs:', JSON.stringify(remaining));
+  log.debug('[TorecPlanner] totalPlaced:', JSON.stringify(totalPlaced));
+  log.debug('[TorecPlanner] remaining after torecs:', JSON.stringify(remaining));
 
   return {
     floors: floors,

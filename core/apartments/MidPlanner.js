@@ -13,7 +13,9 @@
  */
 
 import { validateApartment, getFlag } from './ApartmentSolver.js';
+import { livingCells, livingCount } from './ApartmentTypes.js';
 
+import { nearToFar } from './CellTopology.js';
 var LIVING_COUNT = { '1K': 1, '2K': 2, '3K': 3, '4K': 4 };
 
 // ── Gap Division ─────────────────────────────────────
@@ -317,10 +319,7 @@ function absorbOrphans(midApts, torecApts, rowStart, rowEnd, torecCellSet, lluSe
   // Recount types for all modified torecs
   for (var ti = 0; ti < torecApts.length; ti++) {
     var apt = torecApts[ti];
-    var livCount = 0;
-    for (var ci = 0; ci < apt.cells.length; ci++) {
-      if (typeof apt.cells[ci] === 'number' && apt.cells[ci] !== apt.wetCell) livCount++;
-    }
+    var livCount = livingCount(apt);
     apt.type = livCount >= 4 ? '4K' : livCount >= 3 ? '3K' : livCount >= 2 ? '2K' : '1K';
   }
 }
@@ -340,7 +339,7 @@ function assignCorridors(apartments, sortedCorrNears, N) {
     }
     for (var cni = 0; cni < sortedCorrNears.length; cni++) {
       var nearC = sortedCorrNears[cni];
-      var farC = 2 * N - 1 - nearC;
+      var farC = nearToFar(nearC, N);
       if (cellSet[nearC] && cellSet[farC]) {
         var label = nearC + '-' + farC;
         apt.cells.push(label);
@@ -482,11 +481,7 @@ function postProcess(apartments, insolMap, remaining, N) {
   for (var ai = 0; ai < apartments.length; ai++) {
     var apt = apartments[ai];
     if (apt.type === 'orphan') continue;
-    var livCount = 0;
-    for (var ci = 0; ci < apt.cells.length; ci++) {
-      var c = apt.cells[ci];
-      if (typeof c === 'number' && c !== apt.wetCell) livCount++;
-    }
+    var livCount = livingCount(apt);
     var correctType = livCount >= 4 ? '4K' : livCount >= 3 ? '3K' : livCount >= 2 ? '2K' : livCount >= 1 ? '1K' : 'orphan';
     if (apt.type !== correctType) {
       if (remaining[apt.type] !== undefined) remaining[apt.type]++;
@@ -494,13 +489,9 @@ function postProcess(apartments, insolMap, remaining, N) {
       if (remaining[correctType] !== undefined) remaining[correctType]--;
     }
     // Re-validate insolation
-    var livingCells = [];
-    for (var ci = 0; ci < apt.cells.length; ci++) {
-      var c = apt.cells[ci];
-      if (typeof c === 'number' && c !== apt.wetCell) livingCells.push(c);
-    }
+    var aptLiving = livingCells(apt);
     var flags = [];
-    for (var ci = 0; ci < livingCells.length; ci++) flags.push(getFlag(insolMap, livingCells[ci]));
+    for (var ci = 0; ci < aptLiving.length; ci++) flags.push(getFlag(insolMap, aptLiving[ci]));
     var v = validateApartment(flags);
     apt.valid = v.valid;
   }
@@ -521,11 +512,7 @@ function postProcess(apartments, insolMap, remaining, N) {
       if ((remaining[t] || 0) >= 0) continue; // not over quota
 
       // Over quota for this type — try to shrink by donating 1 cell to neighbor
-      var livCells = [];
-      for (var ci = 0; ci < apt.cells.length; ci++) {
-        var c = apt.cells[ci];
-        if (typeof c === 'number' && c !== apt.wetCell) livCells.push(c);
-      }
+      var livCells = livingCells(apt);
       if (livCells.length < 2) continue; // can't shrink 1K
 
       // Find boundary living cell adjacent to another apartment

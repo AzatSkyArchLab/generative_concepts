@@ -15,6 +15,7 @@
 import { planFloorByMerge, computeGlobalQuota } from './MergePlanner.js';
 import { planMergeSchedule } from './TrajectoryPlanner.js';
 import { resolveQuota, WIDTHS } from './QuotaResolver.js';
+import { log } from '../Logger.js';
 
 /**
  * Main entry point.
@@ -79,7 +80,7 @@ export function planBuilding(params) {
   }
   var mergeSchedule = planMergeSchedule(floor1Count, initRemaining, residentialFloors, quotaSum);
 
-  console.log('[BuildingPlanner v8] totalCells:', totalCells,
+  log.debug('[BuildingPlanner v8] totalCells:', totalCells,
     'quota:', JSON.stringify(quota), 'quotaSum:', quotaSum);
 
   // ── Step 5: Floor-by-floor ──
@@ -133,7 +134,7 @@ export function planBuilding(params) {
     prevApartments = result.apartments;
   }
 
-  console.log('[BuildingPlanner v8] profile:', profileLog.join(' → '));
+  log.debug('[BuildingPlanner v8] profile:', profileLog.join(' → '));
 
   // ── Step 6: Final deviation ──
   var totalPlaced = { '1K': 0, '2K': 0, '3K': 0, '4K': 0, orphan: 0 };

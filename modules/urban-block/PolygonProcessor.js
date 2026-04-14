@@ -325,6 +325,9 @@ export function edgesShareVertex(edgeA, edgeB, tolerance) {
   return false;
 }
 
+import { simplifyPolygon } from '../../core/geo/PolygonSimplifier.js';
+import { log } from '../../core/Logger.js';
+
 // ═══════════════════════════════════════════════════════
 // Full processing pipeline
 // ═══════════════════════════════════════════════════════
@@ -335,12 +338,28 @@ export function edgesShareVertex(edgeA, edgeB, tolerance) {
  * @param {Array<[number, number]>} ring - meter coordinates (no closing duplicate)
  * @param {boolean} isClosed
  * @param {number} sectionWidth
- * @returns {{ edges: Array<Object>, mergedRing: Array<[number, number]> }}
+ * @param {Object} [simplifyOpts] - { areaTol, collinearTol } for simplification, null to skip
+ * @returns {{ edges: Array<Object>, mergedRing: Array<[number, number]>, simplifyResult: Object|null }}
  */
-export function processPolygon(ring, isClosed, sectionWidth) {
-  var mergedRing = ring;
+export function processPolygon(ring, isClosed, sectionWidth, simplifyOpts) {
+  var simplifyResult = null;
+  var workRing = ring;
+
+  // Step 0: optional Visvalingam-Whyatt simplification
+  if (simplifyOpts && isClosed && ring.length > 4) {
+    var sr = simplifyPolygon(ring, simplifyOpts);
+    simplifyResult = sr;
+    workRing = sr.simplified;
+    if (sr.origCount !== sr.newCount) {
+      log.info('[PolygonProcessor] simplified:', sr.origCount, '→', sr.newCount, 'verts,',
+        'ΔS=' + (sr.areaError * 100).toFixed(2) + '%');
+    }
+  }
+
+  // Step 1: merge collinear edges
+  var mergedRing = workRing;
   if (isClosed) {
-    mergedRing = mergeCollinearEdges(ring, 5.0);
+    mergedRing = mergeCollinearEdges(workRing, 5.0);
   }
 
   var edges = buildEdges(mergedRing, isClosed);
@@ -352,6 +371,7 @@ export function processPolygon(ring, isClosed, sectionWidth) {
 
   return {
     edges: sorted,
-    mergedRing: mergedRing
+    mergedRing: mergedRing,
+    simplifyResult: simplifyResult
   };
 }

@@ -5,7 +5,6 @@
  * Rotates the arrow icon to match current map bearing.
  */
 
-import { eventBus } from '../core/EventBus.js';
 
 var ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
   '<path d="M12 2l3 10H9l3-10z" fill="currentColor" stroke="none"/>' +

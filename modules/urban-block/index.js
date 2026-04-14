@@ -12,6 +12,7 @@
 import { createProjection, centroid } from './projection.js';
 import { processPolygon } from './PolygonProcessor.js';
 import { UrbanBlockLayer } from './UrbanBlockLayer.js';
+import { log } from '../../core/Logger.js';
 
 // ── Configuration ──────────────────────────────────────
 
@@ -100,12 +101,12 @@ function _processFeature(feature) {
   // Process
   var result = processPolygon(metersRing, isClosed, PARAMS.sectionWidth);
 
-  console.log('=== URBAN BLOCK ===');
-  console.log('Edges:', result.edges.length, 'Closed:', isClosed);
+  log.debug('=== URBAN BLOCK ===');
+  log.debug('Edges:', result.edges.length, 'Closed:', isClosed);
   for (var i = 0; i < result.edges.length; i++) {
     var e = result.edges[i];
     var ori = e.orientation === 1 ? 'мерид' : 'шир';
-    console.log('  Ось ' + e.id + ': ' + ori + ', ctx=' + e.context + ', ' + e.length.toFixed(1) + 'м');
+    log.debug('  Ось ' + e.id + ': ' + ori + ', ctx=' + e.context + ', ' + e.length.toFixed(1) + 'м');
   }
 
   // Visualize
@@ -133,7 +134,7 @@ var urbanBlockModule = {
     _unsubs.push(_eventBus.on('draw:line:complete', onLineComplete));
     _unsubs.push(_eventBus.on('features:changed', onFeaturesChanged));
 
-    console.log('[urban-block] module initialized');
+    log.debug('[urban-block] module initialized');
   },
 
   destroy: function () {
@@ -151,7 +152,7 @@ var urbanBlockModule = {
 
     _eventBus = null;
     _featureStore = null;
-    console.log('[urban-block] module destroyed');
+    log.debug('[urban-block] module destroyed');
   }
 };
 

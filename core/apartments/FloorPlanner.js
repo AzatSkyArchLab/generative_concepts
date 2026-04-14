@@ -14,7 +14,8 @@
  */
 
 import { validateApartment, getFlag } from './ApartmentSolver.js';
-
+import { numericCells, corridorCells, livingCells, livingCount } from './ApartmentTypes.js';
+import { nearToFar } from './CellTopology.js';
 var TYPE_LIVING = { '4K': 4, '3K': 3, '2K': 2, '1K': 1 };
 
 export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sortedCorrNears, orientation) {
@@ -526,10 +527,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
       if (apt.valid !== false || apt.type === 'orphan') continue;
 
       // Dissolve: collect numeric cells
-      var freedCells = [];
-      for (var ci = 0; ci < apt.cells.length; ci++) {
-        if (typeof apt.cells[ci] === 'number') freedCells.push(apt.cells[ci]);
-      }
+      var freedCells = numericCells(apt);
       if (freedCells.length === 0) continue;
 
       // Remove from placed count
@@ -606,7 +604,7 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     }
     for (var cni = 0; cni < sortedCorrNears.length; cni++) {
       var nearC = sortedCorrNears[cni];
-      var farC = 2 * N - 1 - nearC;
+      var farC = nearToFar(nearC, N);
       if (aptCellSet[nearC] && aptCellSet[farC]) {
         var corrLabel = nearC + '-' + farC;
         apt.cells.push(corrLabel);
@@ -636,16 +634,9 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
   for (var ai = apartments.length - 1; ai >= 0; ai--) {
     var apt = apartments[ai];
     if (!apt.torec) continue;
-    var numCells = [];
-    var corrLabels = [];
-    for (var ci = 0; ci < apt.cells.length; ci++) {
-      if (typeof apt.cells[ci] === 'number') numCells.push(apt.cells[ci]);
-      else corrLabels.push(apt.cells[ci]);
-    }
-    var living = [];
-    for (var ci = 0; ci < numCells.length; ci++) {
-      if (numCells[ci] !== apt.wetCell) living.push(numCells[ci]);
-    }
+    var numCells = numericCells(apt);
+    var corrLabels = corridorCells(apt);
+    var living = livingCells(apt);
     if (living.length <= 4) continue; // normal 4K or smaller, skip
 
     // Split: keep WZ + corridor + closest 3 living cells, split off the rest
@@ -726,16 +717,9 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     var apt = apartments[ai];
 
       // Count numeric cells and living
-      var aNumCells = [];
-      var aCorrLabels = [];
-      for (var ci = 0; ci < apt.cells.length; ci++) {
-        if (typeof apt.cells[ci] === 'number') aNumCells.push(apt.cells[ci]);
-        else aCorrLabels.push(apt.cells[ci]);
-      }
-      var aLiving = [];
-      for (var ci = 0; ci < aNumCells.length; ci++) {
-        if (aNumCells[ci] !== apt.wetCell) aLiving.push(aNumCells[ci]);
-      }
+      var aNumCells = numericCells(apt);
+      var aCorrLabels = corridorCells(apt);
+      var aLiving = livingCells(apt);
 
       // ── Check A: oversized (>4 living) — split ──
       if (aLiving.length > 4) {
@@ -914,14 +898,8 @@ export function planFloor(allWZ, activeWZ, insolMap, N, lluCells, floorPlan, sor
     var apt = apartments[ai];
     if (apt.type === 'orphan') continue;
     // Count numeric cells and living
-    var rcNumCells = [];
-    for (var ci = 0; ci < apt.cells.length; ci++) {
-      if (typeof apt.cells[ci] === 'number') rcNumCells.push(apt.cells[ci]);
-    }
-    var rcLivCount = 0;
-    for (var ci = 0; ci < rcNumCells.length; ci++) {
-      if (rcNumCells[ci] !== apt.wetCell) rcLivCount++;
-    }
+    var rcNumCells = numericCells(apt);
+    var rcLivCount = livingCount(apt);
     // Fix type
     var rcType = rcLivCount >= 4 ? '4K' : rcLivCount >= 3 ? '3K' : rcLivCount >= 2 ? '2K' : rcLivCount >= 1 ? '1K' : 'orphan';
     if (rcType === 'orphan' && rcNumCells.length < 2) {
@@ -1070,7 +1048,7 @@ function buildTorecApt(nearEnd, farEnd, N, activeSet, usedCells, blocked, insolM
   var corridors = [];
   for (var i = 0; i < sortedCorrNears.length; i++) {
     var nearC = sortedCorrNears[i];
-    var farC = 2 * N - 1 - nearC;
+    var farC = nearToFar(nearC, N);
     if (aptCellSet[nearC] && aptCellSet[farC]) {
       corridors.push(nearC + '-' + farC);
     }

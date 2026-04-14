@@ -11,6 +11,8 @@
  * Output: per-section adjusted mix that sums to the global target.
  */
 
+import { log } from '../Logger.js';
+
 /**
  * Compute section potential from floor 1 results.
  * Returns {1K, 2K, 3K, 4K} weights — higher = more natural fit.
@@ -145,10 +147,10 @@ export function allocateQuotas(sectionProfiles, globalMix) {
   }
 
   // Log allocation
-  console.log('[QuotaAllocator] global mix:', JSON.stringify(globalMix));
+  log.debug('[QuotaAllocator] global mix:', JSON.stringify(globalMix));
   for (var si = 0; si < sectionProfiles.length; si++) {
     var p = sectionProfiles[si];
-    console.log('[QuotaAllocator]', p.key, p.orientation,
+    log.debug('[QuotaAllocator]', p.key, p.orientation,
       'apts≈' + p.totalEstimate,
       '→ mix:', JSON.stringify(result[p.key]));
   }

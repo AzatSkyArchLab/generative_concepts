@@ -7,17 +7,8 @@
  * All geometry in meters (local projection).
  */
 
-// ── 2D Vector helpers ─────────────────────────────────
-
-function vec(x, y) { return [x, y]; }
-function vSub(a, b) { return [a[0] - b[0], a[1] - b[1]]; }
-function vAdd(a, b) { return [a[0] + b[0], a[1] + b[1]]; }
-function vSc(v, s) { return [v[0] * s, v[1] * s]; }
-function vLen(v) { return Math.sqrt(v[0] * v[0] + v[1] * v[1]); }
-function vNorm(v) { var l = vLen(v); return l > 1e-9 ? [v[0] / l, v[1] / l] : [0, 0]; }
-function vDot(a, b) { return a[0] * b[0] + a[1] * b[1]; }
-function vPerp(v) { return [-v[1], v[0]]; }
-function vCross(a, b) { return a[0] * b[1] - a[1] * b[0]; }
+import { vSub, vAdd, vSc, vLen, vNorm, vDot, vPerp, vCross } from '../geo/vec2.js';
+import { simplifyPolygon } from '../geo/PolygonSimplifier.js';
 
 function ptIn(pt, poly) {
   var ins = false;
@@ -314,7 +305,8 @@ var DEFAULT_PARAMS = {
   latLens: [24, 27],
   lonLens: [30, 36, 39, 42, 46, 49],
   towerLatLens: [23.1],
-  towerLonLens: [23.1, 29.7, 39.6]
+  towerLonLens: [23.1, 29.7, 39.6],
+  simplify: null // polygon simplification — use Simplify button in properties
 };
 
 /**
@@ -336,7 +328,15 @@ export function solveUrbanBlock(polyM, params) {
   var latLens = params.latLens || DEFAULT_PARAMS.latLens;
   var lonLens = params.lonLens || DEFAULT_PARAMS.lonLens;
 
-  var edges = extractEdges(polyM);
+  // Step 0: optional polygon simplification
+  var simplifyOpts = params.simplify !== undefined ? params.simplify : DEFAULT_PARAMS.simplify;
+  var workPoly = polyM;
+  if (simplifyOpts && polyM.length > 4) {
+    var sr = simplifyPolygon(polyM, simplifyOpts);
+    workPoly = sr.simplified;
+  }
+
+  var edges = extractEdges(workPoly);
   edges = classOri(edges);
 
   // Context assignment: default or random (ctxRoll)
@@ -352,8 +352,8 @@ export function solveUrbanBlock(polyM, params) {
   }
 
   var sorted = sortPrio(edges);
-  var trimmed = prioTrim(sorted, polyM, par);
-  trimmed = boundTrim(trimmed, polyM, par);
+  var trimmed = prioTrim(sorted, workPoly, par);
+  trimmed = boundTrim(trimmed, workPoly, par);
 
   // Filter short edges
   for (var i = 0; i < trimmed.length; i++) {
@@ -376,6 +376,34 @@ export function solveUrbanBlock(polyM, params) {
   }
 
   return trimmed;
+}
+
+/**
+ * Solve and return both axes and the (possibly simplified) polygon.
+ * Use this when the caller needs the working polygon for overlays.
+ *
+ * @param {Array<[number,number]>} polyM
+ * @param {Object} [params]
+ * @returns {{ axes: Array<Object>, polyM: Array<[number,number]> }}
+ */
+export function solveUrbanBlockFull(polyM, params) {
+  if (!params) params = {};
+  var simplifyOpts = params.simplify !== undefined ? params.simplify : DEFAULT_PARAMS.simplify;
+  var workPoly = polyM;
+  if (simplifyOpts && polyM.length > 4) {
+    var sr = simplifyPolygon(polyM, simplifyOpts);
+    workPoly = sr.simplified;
+  }
+  // Pass simplify: null to avoid double-simplification
+  var paramsNoSimp = {};
+  for (var k in params) {
+    if (params.hasOwnProperty(k)) paramsNoSimp[k] = params[k];
+  }
+  paramsNoSimp.simplify = null;
+
+  // Use workPoly for solving — override polyM
+  var axes = solveUrbanBlock(workPoly, paramsNoSimp);
+  return { axes: axes, polyM: workPoly };
 }
 
 export { DEFAULT_PARAMS, makeTowerSeq };

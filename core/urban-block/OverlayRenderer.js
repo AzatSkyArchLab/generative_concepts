@@ -8,15 +8,9 @@
  * All input coordinates in meters (local projection).
  */
 
+import { vSub, vAdd, vSc, vLen, vNorm } from '../geo/vec2.js';
+
 var CANVAS_PX_PER_M = 4; // resolution: 4 pixels per meter
-
-// ── Geometry helpers (same as prototype, adapted to [x,y] arrays) ────
-
-function vSub(a, b) { return [a[0] - b[0], a[1] - b[1]]; }
-function vAdd(a, b) { return [a[0] + b[0], a[1] + b[1]]; }
-function vSc(v, s) { return [v[0] * s, v[1] * s]; }
-function vLen(v) { return Math.sqrt(v[0] * v[0] + v[1] * v[1]); }
-function vNorm(v) { var l = vLen(v); return l > 1e-9 ? [v[0] / l, v[1] / l] : [0, 0]; }
 
 function roundQuad(ctx, pts, r, mv) {
   for (var i = 0; i < 4; i++) {

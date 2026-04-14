@@ -17,6 +17,7 @@ import { generateReport } from '../../ui/FloorPlanReport.js';
 import { state, resetState } from './state.js';
 import { highlightIds, removeAllMapHandlers } from './clickHandler.js';
 import { processAllSections } from './processor.js';
+import { log } from '../../core/Logger.js';
 
 // ── Event handlers ──────────────────────────────────
 
@@ -144,7 +145,7 @@ var sectionGenModule = {
       state.eventBus.emit('underground:visibility', { visible: state.undergroundVisible });
     }));
 
-    console.log('[section-gen] initialized');
+    log.debug('[section-gen] initialized');
   },
 
   destroy: function () {

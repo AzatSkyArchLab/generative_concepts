@@ -17,6 +17,7 @@
  */
 
 import { PERIMETER_DEPTH } from './TowerGenerator.js';
+import { nearToFar } from '../apartments/CellTopology.js';
 
 // ── Ring Walk ────────────────────────────────────────
 
@@ -173,7 +174,7 @@ export function buildTowerGraph(pairs, cellPolygons, cols, floorCount) {
       };
 
       // Far cell = inner → always LLU
-      var farCid = 2 * N - 1 - cid;
+      var farCid = nearToFar(cid, N);
       nodes[farCid + ':' + floor] = {
         cellId: farCid,
         floor: floor,

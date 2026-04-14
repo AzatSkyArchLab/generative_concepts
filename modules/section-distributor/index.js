@@ -11,6 +11,7 @@ import { createProjection, centroid } from '../urban-block/projection.js';
 import { classifyPolyline } from './orientation.js';
 import { getSectionLengths, createSectionSequence, placeSections, polylineLength } from './distributor.js';
 import { SectionLayer } from './SectionLayer.js';
+import { log } from '../../core/Logger.js';
 
 // ── Config ─────────────────────────────────────────────
 
@@ -85,7 +86,7 @@ function processLine(feature) {
   }
 
   if (totalLen < minSL) {
-    console.log('[section-distributor] Axis too short: ' + totalLen.toFixed(1) + 'm < min ' + minSL + 'm');
+    log.debug('[section-distributor] Axis too short: ' + totalLen.toFixed(1) + 'm < min ' + minSL + 'm');
     _layer.clear();
     return;
   }
@@ -97,9 +98,9 @@ function processLine(feature) {
   var sections = placeSections(coordsM, sequence, totalLen);
 
   // Log
-  console.log('=== SECTION DISTRIBUTOR ===');
-  console.log('Orientation:', ori.orientationName, '| Length:', totalLen.toFixed(1) + 'm');
-  console.log('Available lengths:', sectionLengths);
+  log.debug('=== SECTION DISTRIBUTOR ===');
+  log.debug('Orientation:', ori.orientationName, '| Length:', totalLen.toFixed(1) + 'm');
+  log.debug('Available lengths:', sectionLengths);
   var secLabels = [];
   for (var i = 0; i < sections.length; i++) {
     var s = sections[i];
@@ -113,7 +114,7 @@ function processLine(feature) {
   for (var i = 0; i < sections.length; i++) {
     usedLen += sections[i].length;
   }
-  console.log('Sections:', secLabels.join(', '), '| Remainder:', (totalLen - usedLen).toFixed(1) + 'm');
+  log.debug('Sections:', secLabels.join(', '), '| Remainder:', (totalLen - usedLen).toFixed(1) + 'm');
 
   // Render
   _layer.update(sections, coordsM, ori, proj, SECTION_WIDTH);
@@ -134,7 +135,7 @@ var sectionDistributorModule = {
     _unsubs.push(_eventBus.on('draw:line:complete', onLineComplete));
     _unsubs.push(_eventBus.on('features:changed', onFeaturesChanged));
 
-    console.log('[section-distributor] module initialized');
+    log.debug('[section-distributor] module initialized');
   },
 
   destroy: function () {
@@ -150,7 +151,7 @@ var sectionDistributorModule = {
 
     _eventBus = null;
     _featureStore = null;
-    console.log('[section-distributor] module destroyed');
+    log.debug('[section-distributor] module destroyed');
   }
 };
 

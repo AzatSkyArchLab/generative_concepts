@@ -15,8 +15,9 @@ import { SectionPreviewLayer } from '../layers/SectionPreviewLayer.js';
 import { createProjection } from '../../core/geo/projection.js';
 import { classifySegment } from '../../modules/urban-block/orientation.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
-import { TOWER_SIZES, DEFAULT_CELL_SIZE } from '../../core/tower/TowerGenerator.js';
+import { DEFAULT_CELL_SIZE } from '../../core/tower/TowerGenerator.js';
 import { computeTowerFootprints } from '../../core/tower/TowerFootprints.js';
+import { log } from '../../core/Logger.js';
 
 export class TowerTool extends BaseTool {
   constructor(manager, featureStore, mapManager) {
@@ -79,7 +80,7 @@ export class TowerTool extends BaseTool {
       self._forcedSize = cycle[(idx + 1) % cycle.length];
 
       var label = self._forcedSize || 'auto';
-      console.log('[TowerTool] size: ' + label + ' (' + ori.orientationName + ')');
+      log.debug('[TowerTool] size: ' + label + ' (' + ori.orientationName + ')');
       self._updatePreview(cursorLL);
     };
     this._mapManager.getMap().getCanvas().addEventListener('contextmenu', this._rightClickHandler);

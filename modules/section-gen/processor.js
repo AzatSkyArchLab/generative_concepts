@@ -13,7 +13,7 @@ import {
 } from './cells.js';
 import { buildSectionGraph } from './graph.js';
 import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1, buildLLURoof, buildCellMeshColored, buildDetailedTowerFloor1 } from '../../core/three/MeshBuilder.js';
-import { solveFloor } from '../../core/apartments/ApartmentSolver.js';
+import { solveFloor, validateApartment, getFlag } from '../../core/apartments/ApartmentSolver.js';
 import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
 import { allocateQuotas } from '../../core/apartments/QuotaAllocator.js';
@@ -31,6 +31,7 @@ import { state } from './state.js';
 import { setupClickHandler, highlightIds } from './clickHandler.js';
 import { updateEditHighlight } from './editMode.js';
 import { pointsToInsolMap, buildInsolMap, buildPerFloorInsol } from './insolHelpers.js';
+import { log } from '../../core/Logger.js';
 
 // ── Geometry helpers ──────────────────────────────────
 
@@ -221,13 +222,13 @@ export function processAllSections() {
             var f = insolMap[ci];
             farFlags.push(ci + ':' + (f || '-'));
           }
-          console.log('[InsolMap] sec=' + fi + ' ori=' + sectionOri + ' N=' + N +
+          log.debug('[InsolMap] sec=' + fi + ' ori=' + sectionOri + ' N=' + N +
             ' north=' + northSide + ' LLU=[' + lluIndices.join(',') + ']' +
             (axisFlipped ? ' FLIPPED' : ''));
-          console.log('  near: ' + nearFlags.join(' '));
-          console.log('  far:  ' + farFlags.join(' '));
+          log.debug('  near: ' + nearFlags.join(' '));
+          log.debug('  far:  ' + farFlags.join(' '));
         } else {
-          console.log('[InsolMap] sec=' + fi + ' — no insolation data');
+          log.debug('[InsolMap] sec=' + fi + ' — no insolation data');
         }
 
         aptResult = solveFloor(graph.nodes, N, 1, insolMap, sectionOri);
@@ -626,6 +627,18 @@ export function processAllSections() {
               if (!mergedHasCore && wzEligible[orphanCid]) mergedHasCore = true;
 
               if (mergedHasCore) {
+                // Validate insolation before merging
+                var mergedLiving = [];
+                for (var ci2 = 0; ci2 < nApt.cells.length; ci2++) {
+                  if (typeof nApt.cells[ci2] === 'number' && nApt.cells[ci2] !== nApt.wetCell)
+                    mergedLiving.push(nApt.cells[ci2]);
+                }
+                mergedLiving.push(orphanCid);
+                var mFlags = [];
+                for (var mfi = 0; mfi < mergedLiving.length; mfi++) mFlags.push(getFlag(tInsolMap, mergedLiving[mfi]));
+                var mValid = validateApartment(mFlags);
+                if (!mValid.valid) continue;
+
                 // Merge orphan into neighbor apartment
                 for (var ci2 = 0; ci2 < orphanCells.length; ci2++) {
                   nApt.cells.push(orphanCells[ci2]);
@@ -637,6 +650,7 @@ export function processAllSections() {
                   if (typeof nApt.cells[ci3] === 'number') mergedCount++;
                 }
                 nApt.type = typeFromCount(mergedCount);
+                nApt.valid = true;
                 apts[ai].type = '_merged';
                 apts[ai].cells = [];
                 merged = true;
@@ -669,7 +683,7 @@ export function processAllSections() {
             diagTypes[apts[ai].type] = (diagTypes[apts[ai].type] || 0) + 1;
             if (apts[ai].type === 'orphan') diagOrphans++;
           }
-          console.log('[Tower] twi=' + twi + ' K=' + K + ' N=' + N + ' apts=' + apts.length +
+          log.debug('[Tower] twi=' + twi + ' K=' + K + ' N=' + N + ' apts=' + apts.length +
             ' orphans=' + diagOrphans + ' mix=' + JSON.stringify(diagTypes));
 
           // Build cellId → apt info map
@@ -830,7 +844,7 @@ export function processAllSections() {
       }
       corrNears.sort(function (a, b) { return a - b; });
 
-      console.log('[section-gen] planBuilding input:', dp.planKey,
+      log.debug('[section-gen] planBuilding input:', dp.planKey,
         'wzStacks:', dp.wzStacks.length,
         'fl1Apts:', dp.floor1Apartments.length,
         'lluCells:', lluCellIds.join(','),
@@ -854,17 +868,17 @@ export function processAllSections() {
         fl1Placed, 1
       );
 
-      console.log('[QuotaResolver] section:', dp.planKey,
+      log.debug('[QuotaResolver] section:', dp.planKey,
         'cells/floor:', cellsPerFloor, 'floors:', residentialFloors, 'totalCells:', totalCells);
-      console.log(formatQuotaReport(qResult));
-      console.log('[QuotaResolver] Floor 2 placed:', JSON.stringify(fl1Placed));
-      console.log('[QuotaResolver] Remainder for floors 3..K:', JSON.stringify(remainResult.remainder),
+      log.debug(formatQuotaReport(qResult));
+      log.debug('[QuotaResolver] Floor 2 placed:', JSON.stringify(fl1Placed));
+      log.debug('[QuotaResolver] Remainder for floors 3..K:', JSON.stringify(remainResult.remainder),
         remainResult.feasible ? '(feasible)' : '(SHORTFALL: ' + JSON.stringify(remainResult.shortfall) + ')');
 
       var phase0Quota = null;
       if (qResult.best) {
         phase0Quota = qResult.best.counts;
-        console.log('[section-gen] using Phase 0 quota:', JSON.stringify(phase0Quota));
+        log.debug('[section-gen] using Phase 0 quota:', JSON.stringify(phase0Quota));
       }
 
       // Save for UI panel
@@ -899,7 +913,7 @@ export function processAllSections() {
 
       // Render floors 2..N
       var bPlan = state.buildingPlans[dp.planKey];
-      console.log('[section-gen] building plan:', dp.planKey,
+      log.debug('[section-gen] building plan:', dp.planKey,
         'floors:', bPlan.floors.length,
         'placed:', JSON.stringify(bPlan.totalPlaced));
 
@@ -1041,7 +1055,7 @@ export function processAllSections() {
     state.undergroundGroup = ugGroup;
     ugGroup.visible = state.undergroundVisible;
     state.threeOverlay.addMesh(ugGroup);
-    console.log('[underground] group created: ' + ugGroup.children.length + ' meshes, visible=' + ugGroup.visible);
+    log.debug('[underground] group created: ' + ugGroup.children.length + ' meshes, visible=' + ugGroup.visible);
 
     // Urban block overlays — canvas-based rendering (exact prototype compositing)
     if (state._blockOverlayGroup) { state.threeOverlay.removeMesh(state._blockOverlayGroup); state._blockOverlayGroup = null; }
@@ -1061,7 +1075,7 @@ export function processAllSections() {
           bf.properties._params || {},
           vis
         );
-      } catch (e) { console.error('[overlay] canvas render error:', e); }
+      } catch (e) { log.error('[overlay] canvas render error:', e); }
 
       if (!result || !result.canvas) continue;
 

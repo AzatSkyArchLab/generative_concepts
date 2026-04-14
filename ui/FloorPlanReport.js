@@ -5,6 +5,7 @@
  */
 
 import { APT_COLORS_REPORT as APT_COLORS } from '../core/constants/ApartmentColors.js';
+import { corridorLabel as makeCorrLabel, farToNear } from '../core/apartments/CellTopology.js';
 
 // Pixels per meter for report rendering
 var PX_PER_M = 14;
@@ -169,7 +170,7 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
     var prevApt = i > 0 ? aptIdx(nearCells[i - 1].cellId) : -2;
     var nextApt = i < nearCells.length - 1 ? aptIdx(nearCells[i + 1].cellId) : -2;
     var myApt = aptIdx(cid);
-    var corrId = cid + '-' + (2 * N - 1 - cid);
+    var corrId = makeCorrLabel(cid, N);
     var corrApt = aptIdx(corrId);
     var borders = {
       left: i === 0 || myApt !== prevApt || myApt === -1,
@@ -213,7 +214,7 @@ function renderFloorPlan(floorData, graphData, aptDepth, insolMap) {
     var prevApt = i < farCells.length - 1 ? aptIdx(farCells[i + 1].cellId) : -2;
     var nextApt = i > 0 ? aptIdx(farCells[i - 1].cellId) : -2;
     var myApt = aptIdx(cid);
-    var nearC = 2 * N - 1 - cid;
+    var nearC = farToNear(cid, N);
     var corrId = nearC + '-' + cid;
     var corrApt = aptIdx(corrId);
     var borders = {

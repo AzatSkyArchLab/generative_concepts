@@ -18,8 +18,11 @@
  * Pure logic — no rendering, no Three.js.
  */
 
+import { log } from '../Logger.js';
+
 import { validateApartment, getFlag } from './ApartmentSolver.js';
 
+import { nearToFar } from './CellTopology.js';
 var TYPES = ['1K', '2K', '3K', '4K'];
 var WIDTHS = { '1K': 2, '2K': 3, '3K': 4, '4K': 5 };
 var LIVING = { '1K': 1, '2K': 2, '3K': 3, '4K': 4 };
@@ -185,17 +188,15 @@ function placeTorec(side, N, activeWZ, insolMap, corrNears, remainder) {
 
   if (side === 'left') {
     nearCell = 0;
-    farCell = 2 * N - 1;
+    farCell = nearToFar(0, N);
     corrNear = corrNears.length > 0 ? corrNears[0] : 0;
   } else {
     nearCell = N - 1;
-    farCell = N;
+    farCell = nearToFar(N - 1, N);
     corrNear = corrNears.length > 0 ? corrNears[corrNears.length - 1] : N - 1;
   }
 
-  var corridorLabel = corrNear + '-' + (corrNear < N ? (2 * N - 1 - corrNear) : corrNear);
-  if (side === 'left') corridorLabel = nearCell + '-' + farCell;
-  else corridorLabel = nearCell + '-' + farCell;
+  var corridorLabel = nearCell + '-' + farCell;
 
   // Base torec: 1K (near + far through corridor)
   var baseCells = [nearCell, farCell];
@@ -308,7 +309,7 @@ function packRow(rowStart, rowEnd, wzInRow, insolMap, target) {
 
   if (valid.length === 0) {
     // Fallback: try without validation (log warning)
-    console.warn('[FloorPacker] no valid partition for row', rowStart, '-', rowEnd,
+    log.warn('[FloorPacker] no valid partition for row', rowStart, '-', rowEnd,
       'WZ:', wzInRow.join(','), '— using first raw partition');
     valid = partitions.length > 0 ? [partitions[0]] : [];
   }
@@ -462,7 +463,7 @@ export function packFloor(params) {
   var currentWZ = [];
   // Iterate far in "near-parallel" order: 2N-1, 2N-2, ..., N
   for (var pos = 0; pos < N; pos++) {
-    var c = 2 * N - 1 - pos;
+    var c = nearToFar(pos, N);
     if (usedCells[c] || lluSet[c]) {
       if (currentSeg.length > 0 && currentWZ.length > 0) {
         farSegments.push({ cells: currentSeg.slice(), wz: currentWZ.slice() });
@@ -710,7 +711,7 @@ export function packBuilding(params) {
     remainder[t] = Math.max(0, (quota[t] || 0) - fl1Placed[t]);
   }
 
-  console.log('[FloorPacker] building start: Q=' + JSON.stringify(quota) +
+  log.debug('[FloorPacker] building start: Q=' + JSON.stringify(quota) +
     ' fl1=' + JSON.stringify(fl1Placed) +
     ' R=' + JSON.stringify(remainder) +
     ' floors=' + residentialFloors);
@@ -755,7 +756,7 @@ export function packBuilding(params) {
       remainder[t] = Math.max(0, remainder[t] - (result.placed[t] || 0));
     }
 
-    console.log('[FloorPacker] floor', fl,
+    log.debug('[FloorPacker] floor', fl,
       'WZ:', prevWZ.length + '→' + activeWZ.length,
       'placed:', JSON.stringify(result.placed),
       'R:', JSON.stringify(remainder));
@@ -781,7 +782,7 @@ export function packBuilding(params) {
     };
   }
 
-  console.log('[FloorPacker] TOTAL placed:', JSON.stringify(totalPlaced),
+  log.debug('[FloorPacker] TOTAL placed:', JSON.stringify(totalPlaced),
     'target:', JSON.stringify(quota),
     'deviation:', JSON.stringify(deviation));
 
