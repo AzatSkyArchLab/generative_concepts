@@ -6,7 +6,7 @@
         "dev": "vite",
         "build": "vite build",
         "preview": "vite preview",
-        "test": "node --test test/apartments.test.js test/tower.test.js test/urban-block.test.js test/insolation.test.js"
+        "test": "node --test test/apartments.test.js test/tower.test.js test/urban-block.test.js test/insolation.test.js test/trajectory_invariants.test.js test/tower_ring_segments.test.js"
     },
     "dependencies": {
         "maplibre-gl": "^4.7.1",
