@@ -80,6 +80,18 @@ export function planBuilding(params) {
   }
   var mergeSchedule = planMergeSchedule(floor1Count, initRemaining, residentialFloors, quotaSum);
 
+  // Warn if the trajectory planner clamped the target — this means the
+  // requested mix + floor1Count + residentialFloors is physically infeasible.
+  // Type-distribution deviation from the mix will be large regardless of
+  // what the solver does; the caller should either adjust mix, add floors,
+  // or start with a larger floor 1 (more 1K apartments).
+  if (mergeSchedule.feasible === false) {
+    log.warn('[BuildingPlanner v8] infeasible configuration: quotaSum=' + quotaSum
+      + ', clamped ' + mergeSchedule.clampDirection + ' to ' + mergeSchedule.effectiveTotal
+      + ' (minTT=' + mergeSchedule.minTotal + ', maxTT=' + mergeSchedule.maxTotal + '). '
+      + 'Type distribution will deviate from mix — consider adjusting mix or floor count.');
+  }
+
   log.debug('[BuildingPlanner v8] totalCells:', totalCells,
     'quota:', JSON.stringify(quota), 'quotaSum:', quotaSum);
 

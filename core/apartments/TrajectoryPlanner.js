@@ -128,13 +128,32 @@ export function planMergeSchedule(floor1Count, remaining, residentialFloors, tar
     }
   }
 
-  // Clamp: can't have fewer than 2 apts per floor
+  // Clamp targetTotal to physical limits and report when clamping occurred.
+  //
+  // A silent clamp used to cause tricky bugs: BuildingPlanner would pass
+  // quotaSum=40 expecting 40 apartments, TrajectoryPlanner would clamp
+  // internally to minTT=52 and return a profile for 52 — then actual
+  // merges followed the 52-plan while `remaining` bookkeeping followed
+  // the 40-plan. Result: large type-distribution drift on infeasible
+  // configurations (e.g. small floor1Count + many floors + heavy 4K mix).
+  //
+  // Now we report the clamp explicitly so callers can either adjust the
+  // quota or warn the user that the configuration is physically infeasible.
   var minTotal = floor1Count + 2 * (residentialFloors - 1);
-  if (targetTotal < minTotal) targetTotal = minTotal;
-
-  // Can't exceed no-merge total
   var noMergeTotal = floor1Count * residentialFloors;
-  if (targetTotal > noMergeTotal) targetTotal = noMergeTotal;
+  var requestedTotal = targetTotal;
+  var feasible = true;
+  var clampDirection = null;
+
+  if (targetTotal < minTotal) {
+    targetTotal = minTotal;
+    feasible = false;
+    clampDirection = 'below';
+  } else if (targetTotal > noMergeTotal) {
+    targetTotal = noMergeTotal;
+    feasible = false;
+    clampDirection = 'above';
+  }
 
   var profile = computeIdealProfile(floor1Count, targetTotal, residentialFloors);
   var schedule = profileToSchedule(profile);
@@ -149,6 +168,13 @@ export function planMergeSchedule(floor1Count, remaining, residentialFloors, tar
   return {
     budget: budget,
     schedule: schedule,
-    profile: profile
+    profile: profile,
+    // Feasibility reporting — see comment above
+    feasible: feasible,
+    requestedTotal: requestedTotal,
+    effectiveTotal: targetTotal,
+    clampDirection: clampDirection,
+    minTotal: minTotal,
+    maxTotal: noMergeTotal
   };
 }
