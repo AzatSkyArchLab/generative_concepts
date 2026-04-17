@@ -129,17 +129,27 @@ export function buildTowerGraph(pairs, cellPolygons, cols, floorCount) {
     }
   }
 
-  // Decide which transitions to break
+  // Decide which transitions to break.
+  //
+  // Side transitions (corners) must ALWAYS produce a break — otherwise
+  // cells on different sides of the ring get connected by a horizontal
+  // edge and the solver may build L-shape apartments that span a corner.
+  //
+  // Earlier versions skipped breaks when either neighbor was length 1,
+  // trying to avoid degenerate single-cell segments. But that trades a
+  // topology violation for a size issue: a length-1 segment is fine —
+  // the solver will resolve it as a 1K apartment or via corridor access.
+  // A cross-side edge is a physical lie about cell adjacency.
+  //
+  // Special case: when an exit splits one side into two runs on opposite
+  // ends of the rotated ring (e.g. col-low on a small tower splits `left`
+  // into `left(1)` at start and `left(1)` at end), both runs are still
+  // on the same physical side but separated by the exit — they already
+  // do not touch, so no edge is generated across them regardless.
   var breakBefore = {};  // position index → true if break before it
   for (var si = 1; si < sideRuns.length; si++) {
-    var prevRun = sideRuns[si - 1];
     var curRun = sideRuns[si];
-    var prevLen = prevRun.end - prevRun.start + 1;
-    var curLen = curRun.end - curRun.start + 1;
-    // Only break if both segments ≥ 2
-    if (prevLen >= 2 && curLen >= 2) {
-      breakBefore[curRun.start] = true;
-    }
+    breakBefore[curRun.start] = true;
   }
 
   var posToCellId = [];
