@@ -7,20 +7,22 @@
  */
 
 import { createProjection, centroid } from '../../core/geo/projection.js';
-import { autoFireDist } from '../../core/SectionParams.js';
+import { buildGroupBuffers, FIRE_DIST, END_DIST, INSOL_DIST, ROAD_DIST } from '../../core/buffers/Buffers.js';
 import { log } from '../../core/Logger.js';
 
-var _distances = { end: 20, insolation: 40 };
+var _distances = { fire: FIRE_DIST, end: END_DIST, insolation: INSOL_DIST, road: ROAD_DIST };
+var _shape = { insolCornerR: 15 };
 
 var STYLES = {
   insolation: { fill: 'rgba(22, 163, 74, 0.12)', line: '#16a34a' },
   end:        { fill: 'rgba(37, 99, 235, 0.15)', line: '#2563eb' },
-  fire:       { fill: 'rgba(220, 38, 38, 0.15)', line: '#dc2626' }
+  fire:       { fill: 'rgba(220, 38, 38, 0.15)', line: '#dc2626' },
+  road:       { fill: 'rgba(245, 158, 11, 0.15)', line: '#f59e0b' }
 };
 
-var SOURCES = { fire: 'buf-fire', end: 'buf-end', insolation: 'buf-insol' };
-var FILL_LAYERS = { fire: 'buf-fire-fill', end: 'buf-end-fill', insolation: 'buf-insol-fill' };
-var LINE_LAYERS = { fire: 'buf-fire-line', end: 'buf-end-line', insolation: 'buf-insol-line' };
+var SOURCES = { fire: 'buf-fire', end: 'buf-end', insolation: 'buf-insol', road: 'buf-road' };
+var FILL_LAYERS = { fire: 'buf-fire-fill', end: 'buf-end-fill', insolation: 'buf-insol-fill', road: 'buf-road-fill' };
+var LINE_LAYERS = { fire: 'buf-fire-line', end: 'buf-end-line', insolation: 'buf-insol-line', road: 'buf-road-line' };
 
 var _map, _mapManager, _featureStore, _eventBus;
 var _visible = false;
@@ -33,7 +35,8 @@ function initLayers() {
   if (!map) return;
   _map = map;
   var emptyFC = { type: 'FeatureCollection', features: [] };
-  var order = ['insolation', 'end', 'fire'];
+  // Draw order: insolation (widest) → end → road → fire (narrowest on top)
+  var order = ['insolation', 'end', 'road', 'fire'];
   for (var oi = 0; oi < order.length; oi++) {
     var key = order[oi];
     var st = STYLES[key];
@@ -48,61 +51,13 @@ function initLayers() {
 
 function removeLayers() {
   if (!_map) return;
-  var keys = ['fire', 'end', 'insolation'];
+  var keys = ['fire', 'end', 'insolation', 'road'];
   for (var i = 0; i < keys.length; i++) {
     var k = keys[i];
     if (_map.getLayer(FILL_LAYERS[k])) _map.removeLayer(FILL_LAYERS[k]);
     if (_map.getLayer(LINE_LAYERS[k])) _map.removeLayer(LINE_LAYERS[k]);
     if (_map.getSource(SOURCES[k])) _map.removeSource(SOURCES[k]);
   }
-}
-
-function polyCentroid(poly) {
-  var cx = 0; var cy = 0;
-  for (var i = 0; i < poly.length; i++) { cx += poly[i][0]; cy += poly[i][1]; }
-  return [cx / poly.length, cy / poly.length];
-}
-
-function outwardNormal(p1, p2, cx, cy) {
-  var dx = p2[0]-p1[0]; var dy = p2[1]-p1[1];
-  var len = Math.sqrt(dx*dx+dy*dy);
-  if (len < 1e-10) return [0,0];
-  var n1x = -dy/len; var n1y = dx/len;
-  var mx = (p1[0]+p2[0])/2; var my = (p1[1]+p2[1])/2;
-  if (n1x*(mx-cx)+n1y*(my-cy) >= 0) return [n1x, n1y];
-  return [-n1x, -n1y];
-}
-
-function offsetEdgeOutward(p1, p2, dist, cx, cy) {
-  var n = outwardNormal(p1, p2, cx, cy);
-  return [[p1[0],p1[1]], [p2[0],p2[1]], [p2[0]+n[0]*dist,p2[1]+n[1]*dist], [p1[0]+n[0]*dist,p1[1]+n[1]*dist]];
-}
-
-function bufferPolygonRounded(poly, dist, segments) {
-  if (!segments) segments = 8;
-  var n = poly.length;
-  if (n < 3) return poly;
-  var c = polyCentroid(poly);
-  var result = [];
-  for (var i = 0; i < n; i++) {
-    var prev = (i-1+n)%n; var next = (i+1)%n;
-    var n0 = outwardNormal(poly[prev], poly[i], c[0], c[1]);
-    var n1 = outwardNormal(poly[i], poly[next], c[0], c[1]);
-    var a0 = Math.atan2(n0[1], n0[0]); var a1 = Math.atan2(n1[1], n1[0]);
-    var da = a1-a0;
-    if (da > Math.PI) da -= 2*Math.PI;
-    if (da < -Math.PI) da += 2*Math.PI;
-    var px = poly[i][0]; var py = poly[i][1];
-    if (Math.abs(da) < 0.01) { result.push([px+n0[0]*dist, py+n0[1]*dist]); }
-    else {
-      var segs = Math.max(2, Math.round(Math.abs(da)/(Math.PI/2)*segments));
-      for (var s = 0; s <= segs; s++) {
-        var a = a0 + da*(s/segs);
-        result.push([px+Math.cos(a)*dist, py+Math.sin(a)*dist]);
-      }
-    }
-  }
-  return result;
 }
 
 function mergeConsecutive(fpMs) {
@@ -128,8 +83,11 @@ function computeBuffers() {
     else if (all[i].properties.type === 'tower-axis') towers.push(all[i]);
   }
 
-  var firePolys = []; var endPolys = []; var insolPolys = [];
-  if (sects.length === 0 && towers.length === 0) { updateSources(firePolys, endPolys, insolPolys); return; }
+  var byType = { fire: [], end: [], insolation: [], road: [] };
+  if (sects.length === 0 && towers.length === 0) {
+    updateSources(byType);
+    return;
+  }
 
   var allCoords = [];
   for (var i = 0; i < sects.length; i++) {
@@ -140,15 +98,30 @@ function computeBuffers() {
     var c = towers[i].geometry.coordinates;
     for (var j = 0; j < c.length; j++) allCoords.push(c[j]);
   }
-  if (allCoords.length === 0) { updateSources(firePolys, endPolys, insolPolys); return; }
+  if (allCoords.length === 0) { updateSources(byType); return; }
   var gc = centroid(allCoords);
   var proj = createProjection(gc[0], gc[1]);
+
+  // Uniform opts for all groups — single source of truth with
+  // computeOverlays (urban-block).
+  var opts = { fire: _distances.fire, insol: _distances.insolation,
+               end: _distances.end, road: _distances.road,
+               insolCornerR: _shape.insolCornerR };
+
+  function emit(groupRect) {
+    var gb = buildGroupBuffers(groupRect, opts);
+    for (var bi = 0; bi < gb.length; bi++) {
+      var b = gb[bi];
+      // Map internal type name to MapLibre source key ('insol' → 'insolation')
+      var key = b.type === 'insol' ? 'insolation' : b.type;
+      if (byType[key]) byType[key].push(polyMToLL(b.polygon, proj));
+    }
+  }
 
   for (var si = 0; si < sects.length; si++) {
     var feature = sects[si];
     var storedFP = feature.properties.footprints;
     if (!storedFP || storedFP.length === 0) continue;
-    var axisH = feature.properties.sectionHeight || 28;
 
     var fpMs = [];
     for (var fi = 0; fi < storedFP.length; fi++) {
@@ -158,14 +131,8 @@ function computeBuffers() {
       fpMs.push(fpM);
     }
 
-    var fullMerged = mergeConsecutive(fpMs);
-    if (!fullMerged) continue;
-    var fcx = polyCentroid(fullMerged);
-
-    endPolys.push(polyMToLL(bufferPolygonRounded(fullMerged, _distances.end, 8), proj));
-    insolPolys.push(polyMToLL(offsetEdgeOutward(fullMerged[0], fullMerged[1], _distances.insolation, fcx[0], fcx[1]), proj));
-    insolPolys.push(polyMToLL(offsetEdgeOutward(fullMerged[2], fullMerged[3], _distances.insolation, fcx[0], fcx[1]), proj));
-
+    // Independent-height footprints emit their own buffers; consecutive
+    // shared-height footprints are merged into one group.
     var grouped = [];
     var independent = [];
     for (var fi = 0; fi < storedFP.length; fi++) {
@@ -174,15 +141,14 @@ function computeBuffers() {
     }
 
     for (var ii = 0; ii < independent.length; ii++) {
-      var idx = independent[ii];
-      firePolys.push(polyMToLL(bufferPolygonRounded(fpMs[idx], autoFireDist(storedFP[idx].sectionHeight), 6), proj));
+      emit(fpMs[independent[ii]]);
     }
 
     if (grouped.length > 0) {
       var runs = [];
       var currentRun = [grouped[0]];
       for (var gi = 1; gi < grouped.length; gi++) {
-        if (grouped[gi] === grouped[gi-1] + 1) currentRun.push(grouped[gi]);
+        if (grouped[gi] === grouped[gi - 1] + 1) currentRun.push(grouped[gi]);
         else { runs.push(currentRun); currentRun = [grouped[gi]]; }
       }
       runs.push(currentRun);
@@ -190,48 +156,38 @@ function computeBuffers() {
         var runFpMs = [];
         for (var rfi = 0; rfi < runs[ri].length; rfi++) runFpMs.push(fpMs[runs[ri][rfi]]);
         var merged = mergeConsecutive(runFpMs);
-        if (merged) firePolys.push(polyMToLL(bufferPolygonRounded(merged, autoFireDist(axisH), 6), proj));
+        if (merged) emit(merged);
       }
     }
   }
 
-  // Tower buffers
+  // Tower buffers — each tower footprint is a group.
   for (var ti = 0; ti < towers.length; ti++) {
     var tFeature = towers[ti];
     var tFP = tFeature.properties.footprints;
     if (!tFP || tFP.length === 0) continue;
-
     for (var tfi = 0; tfi < tFP.length; tfi++) {
       var tfpM = [];
       for (var j = 0; j < tFP[tfi].polygon.length; j++)
         tfpM.push(proj.toMeters(tFP[tfi].polygon[j][0], tFP[tfi].polygon[j][1]));
-
-      // Fire buffer (14m for towers — always high-rise)
-      firePolys.push(polyMToLL(bufferPolygonRounded(tfpM, 14, 8), proj));
-
-      // End buffer (torec)
-      endPolys.push(polyMToLL(bufferPolygonRounded(tfpM, _distances.end, 8), proj));
-
-      // Insolation buffer on all 4 sides
-      var tcx = polyCentroid(tfpM);
-      for (var ei = 0; ei < tfpM.length; ei++) {
-        var enext = (ei + 1) % tfpM.length;
-        insolPolys.push(polyMToLL(
-          offsetEdgeOutward(tfpM[ei], tfpM[enext], _distances.insolation, tcx[0], tcx[1]), proj));
-      }
+      emit(tfpM);
     }
   }
 
-  updateSources(firePolys, endPolys, insolPolys);
+  updateSources(byType);
 }
 
-function updateSources(fire, end, insol) {
-  var sets = [{ key: 'fire', polys: fire }, { key: 'end', polys: end }, { key: 'insolation', polys: insol }];
-  for (var i = 0; i < sets.length; i++) {
+function updateSources(byType) {
+  var keys = ['fire', 'end', 'insolation', 'road'];
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    var polys = byType[k] || [];
     var features = [];
-    for (var j = 0; j < sets[i].polys.length; j++)
-      features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [sets[i].polys[j]] } });
-    _mapManager.updateGeoJSONSource(SOURCES[sets[i].key], { type: 'FeatureCollection', features: features });
+    for (var j = 0; j < polys.length; j++) {
+      features.push({ type: 'Feature', properties: {},
+        geometry: { type: 'Polygon', coordinates: [polys[j]] } });
+    }
+    _mapManager.updateGeoJSONSource(SOURCES[k], { type: 'FeatureCollection', features: features });
   }
 }
 
@@ -239,7 +195,7 @@ function setVisible(vis) {
   _visible = vis;
   if (!_map) return;
   var v = vis ? 'visible' : 'none';
-  var keys = ['fire', 'end', 'insolation'];
+  var keys = ['fire', 'end', 'insolation', 'road'];
   for (var i = 0; i < keys.length; i++) {
     if (_map.getLayer(FILL_LAYERS[keys[i]])) _map.setLayoutProperty(FILL_LAYERS[keys[i]], 'visibility', v);
     if (_map.getLayer(LINE_LAYERS[keys[i]])) _map.setLayoutProperty(LINE_LAYERS[keys[i]], 'visibility', v);
@@ -248,7 +204,18 @@ function setVisible(vis) {
 }
 
 function onToggle() { setVisible(!_visible); _eventBus.emit('buffers:visibility', { visible: _visible }); }
-function onDistanceChanged(d) { if (d.key && d.value !== undefined) { _distances[d.key] = d.value; if (_visible) computeBuffers(); } }
+function onDistanceChanged(d) {
+  if (!d || !d.key || d.value == null) return;
+  // Shape params go to _shape; main distances to _distances.
+  if (d.key === 'insolCornerR') {
+    _shape.insolCornerR = d.value;
+  } else if (d.key in _distances) {
+    _distances[d.key] = d.value;
+  } else {
+    return;
+  }
+  if (_visible) computeBuffers();
+}
 function onChanged() { if (_visible) computeBuffers(); }
 
 var buffersModule = {

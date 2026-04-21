@@ -19,7 +19,7 @@ import { getParams, getSectionHeight, computeBuildingHeight, computeFloorCount }
 import { createProjection } from '../../core/geo/projection.js';
 import { getTowerDimensions, classifyCells, generateCellsFromFootprint } from '../../core/tower/TowerGenerator.js';
 import { walkRing } from '../../core/tower/TowerGraph.js';
-import { classifySegment } from '../../modules/urban-block/orientation.js';
+import { classifySegment } from '../../core/geo/orientation.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
 import { log } from '../../core/Logger.js';
 

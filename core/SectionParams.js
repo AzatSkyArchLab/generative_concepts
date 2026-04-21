@@ -66,12 +66,3 @@ export function getSectionHeight(fp, axisParams) {
   if (fp.sectionHeight !== undefined) return fp.sectionHeight;
   return axisParams.sectionHeight;
 }
-
-/**
- * Auto fire buffer distance from height.
- * @param {number} sectionHeight
- * @returns {number}
- */
-export function autoFireDist(sectionHeight) {
-  return sectionHeight <= 28 ? 11 : 14;
-}

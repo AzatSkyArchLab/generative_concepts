@@ -11,12 +11,16 @@ import { commandManager } from '../../core/commands/CommandManager.js';
 import { AddFeatureCommand } from '../../core/commands/AddFeatureCommand.js';
 import { SectionPreviewLayer } from '../layers/SectionPreviewLayer.js';
 import { createProjection } from '../../core/geo/projection.js';
-import { classifySegment } from '../../modules/urban-block/orientation.js';
-import { getSectionLengths, createSectionSequence } from '../../modules/urban-block/distributor.js';
+import { classifySegment } from '../../core/geo/orientation.js';
+import { getSectionLengths, createSectionSequence } from '../../core/urban-block/distributor.js';
 
 var SECTION_WIDTH = 18.0;
 
 export class SectionTool extends BaseTool {
+  // Static toggle — insert courtyard gap on axes >= 150m. Off by
+  // default; flip through UI before drawing. Mirrors UrbanBlockTool.useGap.
+  static useGap = false;
+
   constructor(manager, featureStore, mapManager) {
     super(manager);
     this.id = 'section';
@@ -112,7 +116,7 @@ export class SectionTool extends BaseTool {
     }
     if (totalLen < minSL) return { fpMeters: [], fpLngLat: [], oriName: ori.orientationName, totalLen: totalLen };
 
-    var sequence = createSectionSequence(sectionLengths, totalLen);
+    var sequence = createSectionSequence(sectionLengths, totalLen, undefined, SectionTool.useGap);
     var dirX = dx / totalLen;
     var dirY = dy / totalLen;
     var perpX = this._flipped ? dirY : -dirY;

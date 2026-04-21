@@ -29,7 +29,7 @@ export var state = {
   graphDataMap: {},      // { lineId_fi: { nodes, N, params, floorCount } }
   sectionMixes: null,     // { lineId_fi: adjustedMix } — computed by QuotaAllocator
   undergroundGroup: null,
-  undergroundVisible: true
+  undergroundVisible: false
 };
 
 /**
@@ -59,5 +59,5 @@ export function resetState() {
   state.graphDataMap = {};
   state.sectionMixes = null;
   state.undergroundGroup = null;
-  state.undergroundVisible = true;
+  state.undergroundVisible = false;
 }

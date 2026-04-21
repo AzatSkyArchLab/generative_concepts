@@ -13,7 +13,7 @@ import { commandManager } from '../../core/commands/CommandManager.js';
 import { AddFeatureCommand } from '../../core/commands/AddFeatureCommand.js';
 import { SectionPreviewLayer } from '../layers/SectionPreviewLayer.js';
 import { createProjection } from '../../core/geo/projection.js';
-import { classifySegment } from '../../modules/urban-block/orientation.js';
+import { classifySegment } from '../../core/geo/orientation.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
 import { DEFAULT_CELL_SIZE } from '../../core/tower/TowerGenerator.js';
 import { computeTowerFootprints } from '../../core/tower/TowerFootprints.js';

@@ -8,7 +8,7 @@
 import { eventBus } from '../../core/EventBus.js';
 import { Config } from '../../core/Config.js';
 import { createProjection } from '../../core/geo/projection.js';
-import { offsetPolyline } from '../../modules/urban-block/geometry.js';
+import { offsetPolyline } from '../../core/geo/geometry.js';
 
 export class FeaturesLayer {
   /**

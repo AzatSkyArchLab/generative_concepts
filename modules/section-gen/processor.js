@@ -18,20 +18,19 @@ import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
 import { allocateQuotas } from '../../core/apartments/QuotaAllocator.js';
 import { resolveQuota, computeRemainder, formatReport as formatQuotaReport } from '../../core/apartments/QuotaResolver.js';
-import { renderOverlayCanvas } from '../../core/urban-block/OverlayRenderer.js';
+import { log } from '../../core/Logger.js';
 import { generateReport } from '../../ui/FloorPlanReport.js';
 
 import { getTowerDimensions, classifyCells, generateCellsFromFootprint } from '../../core/tower/TowerGenerator.js';
 import { walkRing, buildTowerGraph } from '../../core/tower/TowerGraph.js';
 import { computeTowerFootprints } from '../../core/tower/TowerFootprints.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
-import { classifySegment } from '../../modules/urban-block/orientation.js';
+import { classifySegment } from '../../core/geo/orientation.js';
 
 import { state } from './state.js';
 import { setupClickHandler, highlightIds } from './clickHandler.js';
 import { updateEditHighlight } from './editMode.js';
 import { pointsToInsolMap, buildInsolMap, buildPerFloorInsol } from './insolHelpers.js';
-import { log } from '../../core/Logger.js';
 
 // ── Geometry helpers ──────────────────────────────────
 
@@ -393,8 +392,33 @@ export function processAllSections() {
         state.threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
         state.threeOverlay.addMesh(buildFloorLabel(floorCount + 'F', fpM, buildingH));
       }
-      if (state.threeOverlay && fi > 0)
-        state.threeOverlay.addMesh(buildDividerWall(fpM[3], fpM[0], 0, renderH + 0.05, 0.12));
+      if (state.threeOverlay && fi > 0) {
+        // Skip the divider wall if there's a gap between sections —
+        // i.e. the previous section's end edge is not flush with the
+        // current section's start edge. Solver emits such gaps on
+        // axes >= 150m (when useGap=true) by dropping middle sections.
+        var prevFp = storedFP[fi - 1];
+        var prevFpM = null;
+        if (prevFp && prevFp.polygon && prevFp.polygon.length >= 4) {
+          prevFpM = [];
+          for (var pj = 0; pj < prevFp.polygon.length; pj++) {
+            prevFpM.push(globalProj.toMeters(prevFp.polygon[pj][0], prevFp.polygon[pj][1]));
+          }
+        }
+        var flush = false;
+        if (prevFpM) {
+          // Current section's left edge is between fpM[0] and fpM[3].
+          // Previous section's right edge is between prevFpM[1] and prevFpM[2].
+          var d0x = fpM[0][0] - prevFpM[1][0], d0y = fpM[0][1] - prevFpM[1][1];
+          var d3x = fpM[3][0] - prevFpM[2][0], d3y = fpM[3][1] - prevFpM[2][1];
+          var gap0 = Math.sqrt(d0x * d0x + d0y * d0y);
+          var gap3 = Math.sqrt(d3x * d3x + d3y * d3y);
+          flush = gap0 < 0.5 && gap3 < 0.5; // 0.5m tolerance
+        }
+        if (flush) {
+          state.threeOverlay.addMesh(buildDividerWall(fpM[3], fpM[0], 0, renderH + 0.05, 0.12));
+        }
+      }
     }
     state.lineFootprints[lineId] = lineFPsLL;
   }
@@ -1056,72 +1080,6 @@ export function processAllSections() {
     ugGroup.visible = state.undergroundVisible;
     state.threeOverlay.addMesh(ugGroup);
     log.debug('[underground] group created: ' + ugGroup.children.length + ' meshes, visible=' + ugGroup.visible);
-
-    // Urban block overlays — canvas-based rendering (exact prototype compositing)
-    if (state._blockOverlayGroup) { state.threeOverlay.removeMesh(state._blockOverlayGroup); state._blockOverlayGroup = null; }
-    var ovGroup = new THREE.Group();
-    var allFeatures = state.featureStore.toArray();
-
-    for (var bfi = 0; bfi < allFeatures.length; bfi++) {
-      var bf = allFeatures[bfi];
-      if (!bf.properties.urbanBlock || !bf.properties._overlaysM || !bf.properties._polyM) continue;
-      var vis = bf.properties.overlayVisibility || {};
-
-      var result = null;
-      try {
-        result = renderOverlayCanvas(
-          bf.properties._overlaysM,
-          bf.properties._polyM,
-          bf.properties._params || {},
-          vis
-        );
-      } catch (e) { log.error('[overlay] canvas render error:', e); }
-
-      if (!result || !result.canvas) continue;
-
-      // Compute offset: local projection center → globalProj meters
-      var projCenter = bf.properties._projCenter || [0, 0];
-      var offset = globalProj.toMeters(projCenter[0], projCenter[1]);
-
-      // Create texture from canvas
-      var texture = new THREE.CanvasTexture(result.canvas);
-      texture.minFilter = THREE.LinearFilter;
-      texture.magFilter = THREE.LinearFilter;
-
-      // Create plane mesh covering the overlay bounds (in local meters + offset to global)
-      var planeW = result.width;
-      var planeH = result.height;
-      var planeCx = (result.minX + result.maxX) / 2 + offset[0];
-      var planeCy = (result.minY + result.maxY) / 2 + offset[1];
-
-      var geo = new THREE.PlaneGeometry(planeW, planeH);
-      var mat = new THREE.MeshBasicMaterial({
-        map: texture, transparent: true,
-        side: THREE.DoubleSide, depthWrite: false
-      });
-      var mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(planeCx, planeCy, 0.15);
-      ovGroup.add(mesh);
-
-      // ТКО 3D pad (always visible, offset to global coords)
-      var ovM = bf.properties._overlaysM;
-      if (ovM.trashPad && ovM.trashPad.rect && ovM.trashPad.rect.length >= 4) {
-        var tpm = ovM.trashPad.rect;
-        var tpW = Math.sqrt(Math.pow(tpm[1][0]-tpm[0][0],2) + Math.pow(tpm[1][1]-tpm[0][1],2));
-        var tpD = Math.sqrt(Math.pow(tpm[3][0]-tpm[0][0],2) + Math.pow(tpm[3][1]-tpm[0][1],2));
-        var tpCx = (tpm[0][0]+tpm[2][0])/2 + offset[0];
-        var tpCy = (tpm[0][1]+tpm[2][1])/2 + offset[1];
-        var tpAngle = Math.atan2(tpm[1][1]-tpm[0][1], tpm[1][0]-tpm[0][0]);
-        var tpMesh = new THREE.Mesh(
-          new THREE.BoxGeometry(tpW, tpD, 2),
-          new THREE.MeshLambertMaterial({ color: 0xc88c1e, transparent: true, opacity: 0.85 })
-        );
-        tpMesh.position.set(tpCx, tpCy, 1);
-        tpMesh.rotation.z = tpAngle;
-        ovGroup.add(tpMesh);
-      }
-    }
-    if (ovGroup.children.length > 0) { state._blockOverlayGroup = ovGroup; state.threeOverlay.addMesh(ovGroup); }
   }
 
   state.layer.update(allCellsLL, allFootLL);

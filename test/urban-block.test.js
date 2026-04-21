@@ -9,12 +9,7 @@ import assert from 'node:assert/strict';
 import {
   signedArea, ensureCCW, ringCentroid, pointInPolygon,
   vecSub, vecAdd, vecLength, vecDist, angleBetween, vecPerp
-} from '../modules/urban-block/geometry.js';
-
-import {
-  buildEdges, mergeCollinearEdges, assignOrientation,
-  sortByPriority, processPolygon
-} from '../modules/urban-block/PolygonProcessor.js';
+} from '../core/geo/geometry.js';
 
 import {
   simplifyVW, simplifyPoly, removeCollinear, simplifyPolygon
@@ -108,72 +103,6 @@ describe('geometry basics', function () {
 
 // ═══════════════════════════════════════════════════════
 // PolygonProcessor
-// ═══════════════════════════════════════════════════════
-
-describe('PolygonProcessor', function () {
-  it('buildEdges — rectangle has 4 edges', function () {
-    var edges = buildEdges(RECT, true);
-    assert.strictEqual(edges.length, 4);
-    // Total perimeter
-    var total = 0;
-    for (var i = 0; i < edges.length; i++) total += edges[i].length;
-    assert.ok(Math.abs(total - 2 * (180 + 120)) < 1);
-  });
-
-  it('buildEdges — L-shape has 6 edges', function () {
-    var edges = buildEdges(L_SHAPE, true);
-    assert.strictEqual(edges.length, 6);
-  });
-
-  it('mergeCollinearEdges — rectangle with midpoints → 4 verts', function () {
-    var merged = mergeCollinearEdges(RECT_MID, 5.0);
-    assert.strictEqual(merged.length, 4, 'midpoints should be removed');
-  });
-
-  it('mergeCollinearEdges — L-shape stays 6 verts', function () {
-    var merged = mergeCollinearEdges(L_SHAPE, 5.0);
-    assert.strictEqual(merged.length, 6, 'all corners are real, none collinear');
-  });
-
-  it('assignOrientation — horizontal edge = lat(0), vertical = lon(1)', function () {
-    var edges = [
-      { start: [0, 0], end: [100, 0], length: 100 },  // horizontal
-      { start: [0, 0], end: [0, 100], length: 100 },   // vertical
-      { start: [0, 0], end: [70, 70], length: 99 },    // diagonal
-    ];
-    assignOrientation(edges);
-    assert.strictEqual(edges[0].orientation, 0, 'horizontal = lat');
-    assert.strictEqual(edges[1].orientation, 1, 'vertical = lon');
-  });
-
-  it('sortByPriority — context 0 before 1 before 2', function () {
-    var edges = [
-      { context: 2, orientation: 1, length: 100 },
-      { context: 0, orientation: 0, length: 50 },
-      { context: 1, orientation: 1, length: 80 },
-    ];
-    var sorted = sortByPriority(edges);
-    assert.strictEqual(sorted[0].context, 0);
-    assert.strictEqual(sorted[1].context, 1);
-    assert.strictEqual(sorted[2].context, 2);
-  });
-
-  it('processPolygon — end to end on rectangle', function () {
-    var result = processPolygon(RECT, true, 15);
-    assert.ok(result.edges.length >= 3, 'should produce edges');
-    assert.ok(result.mergedRing.length >= 4, 'merged ring should have verts');
-  });
-
-  it('processPolygon — with simplification', function () {
-    var result = processPolygon(RECT_MID, true, 15, { areaTol: 0.02, collinearTol: 0.01 });
-    assert.ok(result.simplifyResult, 'should have simplify result');
-    assert.ok(result.simplifyResult.newCount <= result.simplifyResult.origCount);
-  });
-});
-
-
-// ═══════════════════════════════════════════════════════
-// PolygonSimplifier
 // ═══════════════════════════════════════════════════════
 
 describe('PolygonSimplifier', function () {

@@ -226,14 +226,14 @@ function distribute(lens, axLen) {
   return { counts: bc, rem: br, sorted: sorted };
 }
 
-function makeSectionSeq(allowedLens, axLen, gapTarget) {
+function makeSectionSeq(allowedLens, axLen, gapTarget, useGap) {
   var r = distribute(allowedLens, axLen);
   var counts = r.counts, sorted = r.sorted;
   var res = [];
   for (var i = 0; i < counts.length; i++) {
     for (var j = 0; j < counts[i]; j++) res.push({ l: sorted[i], gap: false });
   }
-  if (axLen >= 150 && res.length >= 4) {
+  if (useGap && axLen >= 150 && res.length >= 4) {
     var removed = 0, mi = Math.floor(res.length / 2);
     while (removed < gapTarget && res.length > 2) {
       var rm = res.splice(mi, 1)[0]; removed += rm.l;
@@ -300,8 +300,9 @@ var DEFAULT_PARAMS = {
   sw: 18,        // section width (perpendicular) — 18м как в прототипе
   fire: 14,      // fire buffer
   endB: 20,      // end buffer
-  insol: 25,     // insolation buffer (сокращён до 25м)
-  gapTarget: 22, // gap target for long axes
+  insol: 30,     // insolation buffer
+  gapTarget: 22, // gap target for long axes (only used when useGap=true)
+  useGap: false, // insert a courtyard gap on axes >= 150m
   latLens: [24, 27],
   lonLens: [30, 36, 39, 42, 46, 49],
   towerLatLens: [23.1],
@@ -325,6 +326,7 @@ export function solveUrbanBlock(polyM, params) {
     insol: params.insol || DEFAULT_PARAMS.insol
   };
   var gapTarget = params.gapTarget || DEFAULT_PARAMS.gapTarget;
+  var useGap = params.useGap != null ? params.useGap : DEFAULT_PARAMS.useGap;
   var latLens = params.latLens || DEFAULT_PARAMS.latLens;
   var lonLens = params.lonLens || DEFAULT_PARAMS.lonLens;
 
@@ -339,9 +341,17 @@ export function solveUrbanBlock(polyM, params) {
   var edges = extractEdges(workPoly);
   edges = classOri(edges);
 
-  // Context assignment: default or random (ctxRoll)
+  // Context assignment — three modes in priority order:
+  //   1. ctxOverride: explicit array from ContextOptimizer (highest priority)
+  //   2. ctxRoll > 0: pseudo-random shuffle seeded by ctxRoll
+  //   3. default: assignCtx by edge length (longest = context 0)
+  var ctxOverride = params.ctxOverride;
   var ctxRoll = params.ctxRoll || 0;
-  if (ctxRoll === 0) {
+  if (ctxOverride && ctxOverride.length === edges.length) {
+    for (var co = 0; co < edges.length; co++) {
+      edges[co].context = ctxOverride[co];
+    }
+  } else if (ctxRoll === 0) {
     edges = assignCtx(edges);
   } else {
     var seed = ctxRoll * 7919;
@@ -371,7 +381,7 @@ export function solveUrbanBlock(polyM, params) {
     if (e.removed || e.length < 3 || !e.oi) { e.secs = []; continue; }
     var lens = e.orientation === 0 ? latLens : lonLens;
     e.oriName = e.orientation === 0 ? 'lat' : 'lon';
-    var seq = makeSectionSeq(lens, e.length, gapTarget);
+    var seq = makeSectionSeq(lens, e.length, gapTarget, useGap);
     e.secs = seq;
   }
 

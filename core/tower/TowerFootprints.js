@@ -7,7 +7,7 @@
 
 import { packTowers } from './TowerPlacer.js';
 import { DEFAULT_CELL_SIZE } from './TowerGenerator.js';
-import { classifySegment } from '../../modules/urban-block/orientation.js';
+import { classifySegment } from '../geo/orientation.js';
 
 /**
  * Compute tower footprint polygons from axis endpoints and properties.

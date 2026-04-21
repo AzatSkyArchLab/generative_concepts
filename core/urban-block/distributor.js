@@ -165,12 +165,14 @@ function fillWithGap(lengths, lineLength, targetGap) {
  * @param {number[]} sectionLengths - available standard lengths
  * @param {number} axisLength - total axis length in meters
  * @param {number} [targetGap=22]
+ * @param {boolean} [useGap=false] - insert courtyard gap on axes >= 150m
  * @returns {Array<{ length: number, isGap: boolean }>}
  */
-export function createSectionSequence(sectionLengths, axisLength, targetGap) {
+export function createSectionSequence(sectionLengths, axisLength, targetGap, useGap) {
   if (targetGap === undefined) targetGap = 22;
+  if (useGap === undefined) useGap = false;
 
-  var needGap = axisLength >= 150;
+  var needGap = useGap && axisLength >= 150;
   var minSL = Infinity;
   for (var i = 0; i < sectionLengths.length; i++) {
     if (sectionLengths[i] < minSL) minSL = sectionLengths[i];

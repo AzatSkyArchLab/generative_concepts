@@ -6,11 +6,12 @@
         "dev": "vite",
         "build": "vite build",
         "preview": "vite preview",
-        "test": "node --test test/apartments.test.js test/tower.test.js test/urban-block.test.js test/insolation.test.js test/trajectory_invariants.test.js test/tower_ring_segments.test.js"
+        "test": "node --test test/apartments.test.js test/tower.test.js test/urban-block.test.js test/insolation.test.js test/trajectory_invariants.test.js test/tower_ring_segments.test.js test/urban_block_overlays.test.js test/urban_block_scoring.test.js test/stylobates.test.js test/ground_cells.test.js test/stylobate_planner.test.js test/final_mode.test.js"
     },
     "dependencies": {
         "maplibre-gl": "^4.7.1",
         "onnxruntime-web": "^1.24.3",
+        "polygon-clipping": "^0.15.7",
         "three": "^0.170.0"
     },
     "devDependencies": {
