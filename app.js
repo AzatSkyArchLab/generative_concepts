@@ -4,6 +4,7 @@
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles/main.css';
 import './styles/insolation.css';
+import './styles/metatiler.css';
 import { eventBus } from './core/EventBus.js';
 import { MapManager } from './map/MapManager.js';
 import { DrawManager } from './draw/DrawManager.js';
@@ -26,11 +27,22 @@ import { getBufferDefaults } from './ui/panels/BufferPanel.js';
 import sectionGenModule from './modules/section-gen/index.js';
 import buffersModule from './modules/buffers/index.js';
 import insolationModule from './modules/insolation/index.js';
+import greenzoneModule from './modules/greenzone/index.js';
+import metatilerModule from './modules/metatiler/index.js';
 import { log } from './core/Logger.js';
 
 var MODULES = [
   // urbanBlockModule,
   sectionGenModule,
+  // Order matters for MapLibre render order: modules registered
+  // earlier add layers first and sit BELOW later ones on the map.
+  //
+  //   greenzone  → painted fill below everything operational
+  //   metatiler  → remote base data (kadastr + buildings) above green zone
+  //   buffers    → fire/insol/end/road zones on top of base data
+  //   insolation → rays and results on top of everything
+  greenzoneModule,
+  metatilerModule,
   buffersModule,
   insolationModule
 ];

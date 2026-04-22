@@ -1096,5 +1096,15 @@ export function processAllSections() {
   }
 
   state.eventBus.emit('section-gen:stats', allStats);
-  state.eventBus.emit('section-gen:rebuilt');
+  // Include footprints in the rebuilt payload so downstream consumers
+  // (notably metatiler's buildings extrusion) can compute inner-
+  // buffer keep-out zones around each section/tower footprint
+  // without duplicating the section-gen state.
+  //
+  // Shape: { lineId → [{ ring, lineId, secIdx, floorCount, buildingH,
+  //                      sectionHeight }, ...] }.
+  // Each ring is a closed LngLat polygon.
+  state.eventBus.emit('section-gen:rebuilt', {
+    lineFootprints: state.lineFootprints
+  });
 }

@@ -1,5 +1,18 @@
 /**
  * StatsPanel — per-section and summary statistics display.
+ *
+ * Summary rows: Footprint · Apt. area · GBA · Green zone · Population.
+ *
+ * Green zone display rules:
+ *   - no blocks / all zones zero → not shown
+ *   - exactly one block → single row  "Green zone: X m²"
+ *   - multiple blocks    → one row per block  "Block #k (id): X m²"
+ *                          followed by         "Green zone total: Y m²"
+ *
+ * greenZone argument shape:
+ *   { totalArea: number, perBlock: { [blockId]: area }, blockOrder: string[] }
+ * The legacy scalar form (a plain number) is still accepted for resilience
+ * in case a caller hasn't been updated.
  */
 
 function fmtArea(m2) {
@@ -7,7 +20,60 @@ function fmtArea(m2) {
   return Math.round(m2) + ' m²';
 }
 
-export function updateStats(stats) {
+// Green-zone palette lives in one spot to keep the per-block rows,
+// the summary row and the map layer visually consistent.
+var GZ_COLOR = '#15803d';
+
+function rowHTML(labelHTML, valueHTML) {
+  return '<div class="stats-summary-row">'
+    + '<span class="stats-label" style="color:' + GZ_COLOR + '">' + labelHTML + '</span>'
+    + '<span class="stats-value" style="color:' + GZ_COLOR + '">' + valueHTML + '</span>'
+    + '</div>';
+}
+
+function renderGreenZoneRows(gz) {
+  if (gz == null) return '';
+
+  // Back-compat: scalar value → one-row summary (no per-block data).
+  if (typeof gz === 'number') {
+    if (gz <= 0) return '';
+    return rowHTML('Green zone', fmtArea(gz));
+  }
+
+  var order = (gz && gz.blockOrder) ? gz.blockOrder : [];
+  var perBlock = (gz && gz.perBlock) ? gz.perBlock : {};
+  var total = typeof gz.totalArea === 'number' ? gz.totalArea : 0;
+
+  // Collect blocks with a positive area in the provided order.
+  // Zero-area blocks (fully covered by footprints + fire buffers) are
+  // skipped — a line with "0 m²" would be more noise than signal.
+  var visibleIds = [];
+  for (var i = 0; i < order.length; i++) {
+    var id = order[i];
+    if ((perBlock[id] || 0) > 0) visibleIds.push(id);
+  }
+
+  if (visibleIds.length === 0) return '';
+
+  // Single-block case — keep the terse look of the original design.
+  if (visibleIds.length === 1) {
+    return rowHTML('Green zone', fmtArea(perBlock[visibleIds[0]]));
+  }
+
+  // Multi-block case — one line per block plus a total.
+  var h = '';
+  for (var j = 0; j < visibleIds.length; j++) {
+    var bId = visibleIds[j];
+    var label = 'Green zone · Block #' + (j + 1)
+      + ' <small style="color:var(--text-muted)">' + bId.slice(0, 5) + '</small>';
+    h += rowHTML(label, fmtArea(perBlock[bId]));
+  }
+  h += rowHTML('<strong>Green zone total</strong>',
+               '<strong>' + fmtArea(total) + '</strong>');
+  return h;
+}
+
+export function updateStats(stats, greenZone) {
   var el = document.getElementById('stats-section');
   if (!el) return;
   if (!stats || stats.sections.length === 0) { el.innerHTML = ''; return; }
@@ -31,6 +97,10 @@ export function updateStats(stats) {
   for (var gi = 0; gi < stats.sections.length; gi++) totalGBA += stats.sections[gi].totalGBA;
   h += '<span class="stats-value">' + fmtArea(totalGBA) + '</span>';
   h += '</div>';
+
+  // Green zone rows — delegated to helper (handles single- and multi-block).
+  h += renderGreenZoneRows(greenZone);
+
   h += '<div class="stats-summary-row stats-summary-row--pop">';
   h += '<span class="stats-label">Population <small style="color:var(--text-muted)">/50 m²</small></span>';
   h += '<span class="stats-value stats-value--pop">' + stats.totalPopulation + ' ppl</span>';

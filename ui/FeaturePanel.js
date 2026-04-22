@@ -20,6 +20,7 @@ import { renderInsolSection, updateInsolButton, showInsolResults, onInsolClear, 
 import { renderAptMixSection, showBuildingPlan, resetBuildingPlans, updateAptMixVisibility, resetDistributeState } from './panels/AptMixPanel.js';
 import { renderQuotaSection, updateQuotaResults, injectQuotaStyles } from './panels/QuotaPanel.js';
 import { updateStats } from './panels/StatsPanel.js';
+import { renderLayersSection, initLayersPanelEvents } from './panels/LayersPanel.js';
 import { log } from '../core/Logger.js';
 
 var PARAM_DEFS = [
@@ -58,7 +59,8 @@ export class FeaturePanel {
       '<div id="underground-section"></div>' +
       '<div id="apt-mix-section"></div>' +
       '<div id="quota-section"></div>' +
-      '<div id="stats-section"></div></div>';
+      '<div id="stats-section"></div>' +
+      '<div id="layers-section"></div></div>';
     this._renderAxisOptions();
     this._renderBufferSectionConditional();
     renderInsolSection();
@@ -66,6 +68,11 @@ export class FeaturePanel {
     renderAptMixSection();
     renderQuotaSection();
     injectQuotaStyles();
+    // Remote-layers panel — independent of feature/section state.
+    // Rendered once at mount; re-renders driven by user toggles and
+    // metatiler:catalog events from the module.
+    renderLayersSection();
+    initLayersPanelEvents();
   }
 
   _renderAxisOptions() {
@@ -188,6 +195,8 @@ export class FeaturePanel {
       // full wipe) section-gen stops emitting and their innerHTML
       // would otherwise keep the last snapshot. Clear explicitly.
       if (!self._hasSectionOrBlock()) {
+        _lastStats = null;
+        _lastGreenZone = null;
         updateStats(null);
         var quotaEl = document.getElementById('quota-section');
         if (quotaEl) quotaEl.innerHTML = '';
@@ -281,8 +290,27 @@ export class FeaturePanel {
     eventBus.on('insolation:rays:visibility', onRaysVisibility);
     eventBus.on('draw:section:complete', function () { self._refreshInsolButton(); });
 
-    // Stats + building plan
-    eventBus.on('section-gen:stats', function (stats) { updateStats(stats); });
+    // Stats + building plan + green zone.
+    //
+    // StatsPanel takes two arguments (stats, greenZone) from two
+    // independent event streams:
+    //   - section-gen:stats      — per-section footprint / apt / pop
+    //   - greenzone:area:changed — { totalArea, perBlock, blockOrder }
+    // Cache both so a message on either channel can re-render with the
+    // latest known value of the other. greenZone is the full object so
+    // StatsPanel can render per-block rows when multiple blocks exist.
+    var _lastStats = null;
+    var _lastGreenZone = null;
+    function _renderStats() { updateStats(_lastStats, _lastGreenZone); }
+
+    eventBus.on('section-gen:stats', function (stats) {
+      _lastStats = stats;
+      _renderStats();
+    });
+    eventBus.on('greenzone:area:changed', function (d) {
+      _lastGreenZone = d || null;
+      _renderStats();
+    });
     eventBus.on('building:plans:reset', function () { resetBuildingPlans(); });
     eventBus.on('building:plan:result', function (data) { showBuildingPlan(data.sectionKey, data.plan); });
     eventBus.on('quota:resolved', function (data) { updateQuotaResults(data); });

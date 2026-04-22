@@ -1,0 +1,227 @@
+/* ============================================================
+   MetaTiler — popup + selection highlight styles
+   ============================================================
+   All overrides scoped under .metatiler-popup-container so other
+   MapLibre popups in the app (if any) are untouched. Colors come
+   from the CSS variables declared in main.css :root — light and
+   dark themes work transparently if the project adds a dark theme
+   later.
+*/
+
+.metatiler-popup-container .maplibregl-popup-content {
+  padding: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: var(--shadow-md);
+  min-width: 220px;
+  max-width: 320px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+}
+
+/* Popup arrow — match the content background so the tip doesn't
+   look disconnected from the body. */
+.metatiler-popup-container.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.metatiler-popup-container.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.metatiler-popup-container.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+  border-bottom-color: var(--bg-secondary);
+}
+.metatiler-popup-container.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.metatiler-popup-container.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.metatiler-popup-container.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+  border-top-color: var(--bg-primary);
+}
+.metatiler-popup-container.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: var(--bg-primary);
+}
+.metatiler-popup-container.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: var(--bg-primary);
+}
+
+.metatiler-popup-header {
+  background: var(--bg-secondary);
+  padding: 7px 28px 7px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-primary);
+}
+
+.metatiler-popup-header-id {
+  color: var(--text-muted);
+  font-family: "SF Mono", Consolas, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.metatiler-popup-attrs {
+  padding: 4px 0;
+  max-height: 280px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.metatiler-popup-attrs-empty {
+  padding: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+  font-size: 11px;
+}
+
+.metatiler-popup-attr {
+  display: flex;
+  padding: 3px 12px;
+  gap: 8px;
+  line-height: 1.4;
+  border-bottom: 1px solid transparent;
+}
+
+.metatiler-popup-attr:hover {
+  background: var(--bg-tertiary);
+}
+
+.metatiler-popup-attr-key {
+  color: var(--text-secondary);
+  font-family: "SF Mono", Consolas, Menlo, monospace;
+  font-size: 10px;
+  min-width: 90px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-top: 1px;
+}
+
+.metatiler-popup-attr-value {
+  color: var(--text-primary);
+  flex: 1;
+  word-break: break-word;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metatiler-popup-attr-value--null {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Override MapLibre's default close button to fit the themed popup. */
+.metatiler-popup-container .maplibregl-popup-close-button {
+  font-size: 18px;
+  padding: 0 6px;
+  top: 2px;
+  right: 2px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  line-height: 22px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.metatiler-popup-container .maplibregl-popup-close-button:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   Preset toggle buttons — attribute-substring highlight controls
+   sitting under an active layer row.
+   ============================================================ */
+
+.metatiler-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0 4px 26px; /* align with the layer name (checkbox+gap) */
+}
+
+.metatiler-preset {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 2px 10px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: background var(--transition-fast),
+              color var(--transition-fast),
+              border-color var(--transition-fast);
+  font-family: inherit;
+}
+
+.metatiler-preset:hover:not(:disabled) {
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.metatiler-preset:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* Active state colors are injected inline so each preset can carry
+   its own palette (teal for residential, different for future
+   presets). Inline style overrides the border/background; text
+   color must also flip for contrast. */
+.metatiler-preset--active {
+  color: #ffffff;
+}
+
+.metatiler-preset--active:hover:not(:disabled) {
+  color: #ffffff;
+  filter: brightness(1.08);
+}
+
+/* ============================================================
+   Layer legend — category swatches under typed layers (buildings).
+   ============================================================ */
+
+.metatiler-legend {
+  padding: 4px 0 6px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.metatiler-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.metatiler-legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.metatiler-legend-label {
+  flex: 1;
+}
+
+.metatiler-legend-note {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 3px;
+  line-height: 1.3;
+}

@@ -23,6 +23,13 @@ import { classifySegment } from '../../core/geo/orientation.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
 import { log } from '../../core/Logger.js';
 
+// Context mesh — real-world buildings (layer #104) extracted by the
+// metatiler module. Included in raycast alongside section/tower
+// collision boxes so sun rays collide with surrounding blocks too,
+// not just with user-built geometry.
+import { getExtractedBuildings } from '../metatiler/index.js';
+import { buildContextMeshData } from '../../core/metatiler/buildings-local.js';
+
 // ── Config (from InsolationConfig, aliased for local brevity) ────
 
 var LATITUDE = INSOL_CONFIG.latitude;
@@ -247,6 +254,32 @@ function addEndWallCollision(meshes, edgeP1, edgeP2, outN, aptDepth, corrWidth, 
     var frpL = [edgeP2[0] - ax * fPierW, edgeP2[1] - ay * fPierW];
     addPierBox(meshes, frpL, farR, outN, sillZ, winTopZ);
   }
+}
+
+/**
+ * Build a single merged THREE.Mesh from all buildings that metatiler
+ * has extracted for the current buffer. Geometry is in the same
+ * metre-space as the section collision boxes (same projection
+ * origin), so the mesh participates directly in raycast alongside
+ * section/tower boxes. The mesh is invisible — it exists only as a
+ * raycast target; map rendering of those buildings goes through the
+ * MapLibre fill-extrusion layer, which is a separate path.
+ *
+ * Returns null if no buildings are available (buffer empty, layer
+ * not active, or all features degenerate).
+ */
+function buildBuildingsContextMesh(proj) {
+  var features = getExtractedBuildings();
+  if (!features || features.length === 0) return null;
+  var data = buildContextMeshData(features, proj);
+  if (!data) return null;
+  var geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+  geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
+  geo.computeBoundingSphere();
+  var mesh = new THREE.Mesh(geo, _collisionMat);
+  mesh.userData = { vertexCount: data.vertexCount, triCount: data.triCount };
+  return mesh;
 }
 
 function buildAllCollisionMeshes(sections, towers, proj) {
@@ -805,6 +838,20 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
   var rayMinutes = sunData.timeStep;
 
   _collisionMeshes = buildAllCollisionMeshes(sections, collectTowers(), proj);
+
+  // Append the surrounding-buildings context mesh. This is a single
+  // merged geometry covering every building that the metatiler
+  // extracted into the outer buffer (minus those filtered out by
+  // inner collision). Represents Rhino/GH's "mesh join" of all
+  // context buildings — cast a ray against the collisionMeshes list
+  // and it hits both section boxes AND real surroundings.
+  var contextMesh = buildBuildingsContextMesh(proj);
+  if (contextMesh) {
+    _collisionMeshes.push(contextMesh);
+    console.log('[insolation] added buildings context mesh: '
+      + contextMesh.userData.vertexCount + ' vertices, '
+      + contextMesh.userData.triCount + ' triangles');
+  }
 
   var targets = [];
   if (level === 'global') { targets = sections; }
