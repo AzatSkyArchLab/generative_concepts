@@ -79,6 +79,9 @@ export function renderAptMixSection() {
       if (repBtn) repBtn.style.display = 'none';
       var dBtn = document.getElementById('apt-mix-distribute');
       if (dBtn) dBtn.style.display = 'block';
+      // Drop white-model on reset — RenderPanel listens to
+      // whitewash:changed and updates its own button.
+      eventBus.emit('whitewash:set', { enabled: false });
       resetBuildingPlans();
     });
   }

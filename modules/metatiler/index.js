@@ -1552,17 +1552,25 @@ var metatilerModule = {
     // Catch MapLibre errors so we actually see what "Map error: N" means.
     // This is important because setFilter with a malformed within-expression
     // can throw asynchronously and be swallowed otherwise.
+    //
+    // Filter to metatiler-owned sources only — MapLibre v4 emits a noisy
+    // "Unimplemented type: 4" for every GeoJSON-source tile that contains
+    // certain symbol features (sg-labels, sg-floor-labels, sp-label). The
+    // labels still render; the error is a known upstream warning and
+    // shouldn't drown the metatiler's diagnostics in console.
     var map = _mapManager && _mapManager.getMap();
     if (map) {
       map.on('error', function (e) {
+        var sid = e && e.sourceId;
+        if (sid && sid.indexOf('metatiler-') !== 0) return;
+        var msg = e && e.error && e.error.message;
+        if (msg && /^Unimplemented type:/.test(msg)) return;
         console.error('[metatiler] map error event:', e);
         if (e && e.error) {
           console.error('[metatiler] error message:', e.error.message);
           console.error('[metatiler] error stack:', e.error.stack);
         }
-        if (e && e.sourceId) {
-          console.error('[metatiler] error sourceId:', e.sourceId);
-        }
+        if (sid) console.error('[metatiler] error sourceId:', sid);
       });
     }
   },

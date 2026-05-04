@@ -762,6 +762,9 @@ function clearResults() {
 function displayResults(facadeResults) {
   if (_resultGroup && _threeOverlay) _threeOverlay.removeMesh(_resultGroup);
   _resultGroup = new THREE.Group();
+  // Insolation dots are an analysis overlay — hide in white-model mode
+  // so the AI-render screenshot shows clean architecture.
+  _resultGroup.userData.hideInWhitewash = true;
   for (var i = 0; i < facadeResults.length; i++) {
     var r = facadeResults[i];
     _resultGroup.add(createDotMesh(r.position, COLORS[r.status] || 0x888888));
@@ -773,6 +776,7 @@ function showAllRays(sunVectors) {
   clearRays();
   if (!_lastPointData || _lastPointData.length === 0) return;
   _raysGroup = new THREE.Group();
+  _raysGroup.userData.hideInWhitewash = true;
 
   for (var i = 0; i < _lastPointData.length; i++) {
     var pd = _lastPointData[i];

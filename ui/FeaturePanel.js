@@ -19,6 +19,7 @@ import { renderBufferSection, onBuffersVisibility, syncBufferInputs } from './pa
 import { renderInsolSection, updateInsolButton, showInsolResults, onInsolClear, onRaysVisibility } from './panels/InsolPanel.js';
 import { renderAptMixSection, showBuildingPlan, resetBuildingPlans, updateAptMixVisibility, resetDistributeState } from './panels/AptMixPanel.js';
 import { renderQuotaSection, updateQuotaResults, injectQuotaStyles } from './panels/QuotaPanel.js';
+import { renderRenderSection } from './panels/RenderPanel.js';
 import { updateStats } from './panels/StatsPanel.js';
 import { renderLayersSection, initLayersPanelEvents } from './panels/LayersPanel.js';
 import { log } from '../core/Logger.js';
@@ -43,6 +44,11 @@ export class FeaturePanel {
     this._editSelectedIndices = [];
     this._paramsOpen = false;
     this._undergroundVisible = false;
+    // Section-chain draw mode: when the SectionChainTool activates it
+    // emits `draw:section-chain:active` { width } and we render a
+    // width input in the right panel even when no feature is selected.
+    this._chainDrawActive = false;
+    this._chainDrawWidth = 15;
   }
 
   init() { this._render(); this._setupEvents(); }
@@ -58,6 +64,7 @@ export class FeaturePanel {
       '<div id="buffer-section"></div><div id="insol-section"></div>' +
       '<div id="underground-section"></div>' +
       '<div id="apt-mix-section"></div>' +
+      '<div id="render-section"></div>' +
       '<div id="quota-section"></div>' +
       '<div id="stats-section"></div>' +
       '<div id="layers-section"></div></div>';
@@ -66,6 +73,7 @@ export class FeaturePanel {
     renderInsolSection();
     this._renderUnderground();
     renderAptMixSection();
+    renderRenderSection();
     renderQuotaSection();
     injectQuotaStyles();
     // Remote-layers panel — independent of feature/section state.
@@ -290,18 +298,19 @@ export class FeaturePanel {
     eventBus.on('insolation:rays:visibility', onRaysVisibility);
     eventBus.on('draw:section:complete', function () { self._refreshInsolButton(); });
 
-    // Stats + building plan + green zone.
+    // Stats + building plan + green zone + playgrounds.
     //
-    // StatsPanel takes two arguments (stats, greenZone) from two
-    // independent event streams:
-    //   - section-gen:stats      — per-section footprint / apt / pop
-    //   - greenzone:area:changed — { totalArea, perBlock, blockOrder }
-    // Cache both so a message on either channel can re-render with the
-    // latest known value of the other. greenZone is the full object so
-    // StatsPanel can render per-block rows when multiple blocks exist.
+    // StatsPanel takes three arguments (stats, greenZone, playgrounds)
+    // from three independent event streams:
+    //   - section-gen:stats          — per-section footprint / apt / pop
+    //   - greenzone:area:changed     — { totalArea, perBlock, blockOrder }
+    //   - playgrounds:stats:changed  — { perBlock, total, blockOrder }
+    // Cache all so a message on any channel re-renders with the latest
+    // known values of the others.
     var _lastStats = null;
     var _lastGreenZone = null;
-    function _renderStats() { updateStats(_lastStats, _lastGreenZone); }
+    var _lastPlaygrounds = null;
+    function _renderStats() { updateStats(_lastStats, _lastGreenZone, _lastPlaygrounds); }
 
     eventBus.on('section-gen:stats', function (stats) {
       _lastStats = stats;
@@ -311,9 +320,24 @@ export class FeaturePanel {
       _lastGreenZone = d || null;
       _renderStats();
     });
+    eventBus.on('playgrounds:stats:changed', function (d) {
+      _lastPlaygrounds = d || null;
+      _renderStats();
+    });
     eventBus.on('building:plans:reset', function () { resetBuildingPlans(); });
     eventBus.on('building:plan:result', function (data) { showBuildingPlan(data.sectionKey, data.plan); });
     eventBus.on('quota:resolved', function (data) { updateQuotaResults(data); });
+
+    // Section-chain draw mode wiring
+    eventBus.on('draw:section-chain:active', function (d) {
+      self._chainDrawActive = true;
+      if (d && d.width != null) self._chainDrawWidth = d.width;
+      self._updateProps();
+    });
+    eventBus.on('draw:section-chain:inactive', function () {
+      self._chainDrawActive = false;
+      self._updateProps();
+    });
 
     eventBus.on('underground:visibility', function (d) {
       self._undergroundVisible = d.visible;
@@ -344,8 +368,13 @@ export class FeaturePanel {
     for (var i = 0; i < features.length; i++) {
       var f = features[i]; var id = f.properties.id;
       var ftype = f.properties.type || 'feature';
-      var icon = ftype === 'section-axis' ? '▦' : (ftype === 'tower-axis' ? '⊞' : (ftype === 'road' ? '🛤' : '╱'));
-      var label = ftype === 'section-axis' ? 'section' : (ftype === 'tower-axis' ? 'tower' : (ftype === 'road' ? 'road' : 'line'));
+      var icon, label;
+      if (ftype === 'section-axis')              { icon = '▦'; label = 'section'; }
+      else if (ftype === 'tower-axis')           { icon = '⊞'; label = 'tower'; }
+      else if (ftype === 'road')                 { icon = '🛤'; label = 'road'; }
+      else if (ftype === 'section-chain')        { icon = '⌐'; label = 'chain'; }
+      else if (ftype === 'section-chain-corner') { icon = '∟'; label = 'corner'; }
+      else                                       { icon = '╱'; label = 'line'; }
       var sel = this._selectedIds.indexOf(id) >= 0 ? ' selected' : '';
       var editBadge = (this._editAxisId === id) ? ' <small style="color:var(--primary)">[edit]</small>' : '';
       html += '<div class="feature-item' + sel + '" data-id="' + id + '"><span class="feature-icon">' + icon + '</span>' +
@@ -359,7 +388,18 @@ export class FeaturePanel {
   _updateProps() {
     var propsEl = document.getElementById('section-props');
     if (!propsEl) return;
-    if (this._selectedIds.length === 0 && !this._editAxisId) { propsEl.innerHTML = ''; eventBus.emit('block:ghost:update', null); return; }
+    // Section-chain draw mode: show width input even with nothing selected.
+    if (this._selectedIds.length === 0 && !this._editAxisId) {
+      if (this._chainDrawActive) {
+        propsEl.innerHTML = this._renderSectionChainDrawProps();
+        this._bindChainDrawInput();
+        eventBus.emit('block:ghost:update', null);
+        return;
+      }
+      propsEl.innerHTML = '';
+      eventBus.emit('block:ghost:update', null);
+      return;
+    }
 
     if (this._editAxisId && this._editSelectedIndices.length > 0) {
       var editF = this._featureStore.get(this._editAxisId);
@@ -383,11 +423,13 @@ export class FeaturePanel {
 
     var sectionFeatures = []; var lineFeatures = []; var towerFeatures = [];
     var blockFeature = null; var roadFeatures = [];
+    var chainFeatures = [];
     for (var i = 0; i < this._selectedIds.length; i++) {
       var f = this._featureStore.get(this._selectedIds[i]);
       if (!f) continue;
       if (f.properties.type === 'section-axis') sectionFeatures.push(f);
       else if (f.properties.type === 'tower-axis') towerFeatures.push(f);
+      else if (f.properties.type === 'section-chain') chainFeatures.push(f);
       else if (f.properties.urbanBlock) blockFeature = f;
       else if (f.properties.type === 'road') roadFeatures.push(f);
       else if (f.geometry.type === 'LineString') lineFeatures.push(f);
@@ -399,12 +441,14 @@ export class FeaturePanel {
     }
     if (sectionFeatures.length > 0) html += this._renderSectionProps(sectionFeatures);
     if (towerFeatures.length > 0) html += this._renderTowerProps(towerFeatures);
+    if (chainFeatures.length > 0) html += this._renderChainProps(chainFeatures);
     if (roadFeatures.length > 0) html += this._renderRoadProps(roadFeatures);
     if (lineFeatures.length > 0) html += this._renderLineProps(lineFeatures);
     propsEl.innerHTML = html;
     this._bindInputs();
     this._bindBlockInputs(blockFeature);
     this._bindRoadInputs(roadFeatures);
+    this._bindChainInputs(chainFeatures);
     // Show ghost contour if block has original (pre-simplification) polygon
     if (blockFeature) {
       this._updateGhostContour(blockFeature);
@@ -434,6 +478,9 @@ export class FeaturePanel {
     var rollN = f.properties.solverParams && f.properties.solverParams.ctxRoll
       ? f.properties.solverParams.ctxRoll
       : 0;
+    var targetSPP = f.properties.solverParams && f.properties.solverParams.targetSPP
+      ? f.properties.solverParams.targetSPP
+      : 0;
     var h = '<div class="props-section"><div class="props-header">Urban block</div>';
     h += '<div class="props-computed" style="padding:0 12px">';
     h += '<div class="props-row"><span class="props-label">Area</span><span class="props-value">' + areaM2.toFixed(0) + ' m² <small>(' + areaHa.toFixed(2) + ' ha)</small></span></div>';
@@ -441,6 +488,18 @@ export class FeaturePanel {
     h += '<div class="props-row"><span class="props-label">Sections</span><span class="props-value">' + secCount + '</span></div>';
     h += '<div class="props-row"><span class="props-label">Total length</span><span class="props-value">' + totalLen.toFixed(1) + ' m</span></div>';
     h += '<div class="props-row"><span class="props-label">Gap &gt; 150m</span><span class="props-value">' + (useGap ? 'Yes' : 'No') + '</span></div>';
+    // Target SPP (СПП) — user-editable. 0 means "disabled" (default
+    // section heights are used). When set, the height-distributor
+    // assigns per-section floors to approximate this target while
+    // respecting orientation-based bounds and preferring taller
+    // northern sections.
+    h += '<div class="props-row">';
+    h += '<span class="props-label">Target SPP <small style="color:var(--text-muted)">m²</small></span>';
+    h += '<span class="props-value">';
+    h += '<input type="number" min="0" step="1000" data-block-target-spp="' + bid + '" ';
+    h += 'value="' + targetSPP + '" style="width:78px;text-align:right" ';
+    h += 'placeholder="0 = off">';
+    h += '</span></div>';
     h += '</div>';
     h += '<div style="padding:8px 12px;display:flex;gap:6px">';
     h += '<button class="ug-toggle-btn" data-block-shuffle="' + bid + '" ';
@@ -501,6 +560,19 @@ export class FeaturePanel {
       var sBid = shufBtn.getAttribute('data-block-shuffle');
       shufBtn.addEventListener('click', function () {
         eventBus.emit('block:shuffle-ctx', { id: sBid });
+      });
+    }
+    // Target SPP input — debounced commit on change to avoid rebuilding
+    // axes on every keystroke. Uses 'change' (fires on blur or Enter)
+    // rather than 'input' because a partial number like "80" shouldn't
+    // trigger a rebuild for the final "80000".
+    var sppInput = document.querySelector('[data-block-target-spp]');
+    if (sppInput) {
+      var spBid = sppInput.getAttribute('data-block-target-spp');
+      sppInput.addEventListener('change', function () {
+        var v = parseFloat(sppInput.value);
+        if (isNaN(v) || v < 0) v = 0;
+        eventBus.emit('block:target-spp:changed', { id: spBid, value: v });
       });
     }
   }
@@ -842,6 +914,122 @@ export class FeaturePanel {
     return '<div class="props-section"><div class="props-header">' + label + '</div>' +
       '<div class="props-computed"><div class="props-row"><span class="props-label">Length</span><span class="props-value">' + totalLen.toFixed(1) + ' m</span></div></div>' +
       '<div class="param-row"><label class="param-label">Color</label><div class="param-input-wrap"><input type="color" class="param-color" data-key="color" data-target="line" value="' + color + '"></div></div></div>';
+  }
+
+  // ── Section-chain ──────────────────────────────────
+
+  _renderSectionChainDrawProps() {
+    var w = this._chainDrawWidth;
+    var h = '<div class="props-section">';
+    h += '<div class="props-header">Section chain · drawing</div>';
+    h += '<div style="padding:0 12px 4px;font-size:10px;color:var(--text-muted)">Click to add points · Right-click flips side · Double-click to finish</div>';
+    h += '<div class="param-row"><label class="param-label">Width</label>';
+    h += '<div class="param-input-wrap">';
+    h += '<input type="number" class="param-input" id="chain-draw-width"';
+    h += ' value="' + w + '" step="0.5" min="10" max="30">';
+    h += '<span class="param-unit">m</span></div></div>';
+    h += '<div style="padding:0 12px 8px;display:flex;gap:4px">';
+    h += '<button class="ug-toggle-btn" data-chain-w="15" style="flex:1' + (Math.abs(w - 15) < 1e-3 ? ';border-color:rgba(99,102,241,0.6);background:rgba(99,102,241,0.15);color:#6366f1;font-weight:700' : '') + '">15 m</button>';
+    h += '<button class="ug-toggle-btn" data-chain-w="18" style="flex:1' + (Math.abs(w - 18) < 1e-3 ? ';border-color:rgba(99,102,241,0.6);background:rgba(99,102,241,0.15);color:#6366f1;font-weight:700' : '') + '">18 m</button>';
+    h += '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  _renderChainProps(features) {
+    var f = features[0];
+    var p = f.properties;
+    var w = p.secWidth != null ? p.secWidth : 15;
+    // Children are separate features tagged with chainId — count them
+    // here rather than reading stale arrays off the holder.
+    var all = this._featureStore.toArray();
+    var nAxes = 0, nSecs = 0, nCors = 0;
+    for (var i = 0; i < all.length; i++) {
+      var pp = all[i].properties;
+      if (!pp || pp.chainId !== p.id) continue;
+      if (pp.type === 'section-axis') {
+        nAxes++;
+        nSecs += (pp.footprints && pp.footprints.length) || 0;
+      } else if (pp.type === 'section-chain-corner') {
+        nCors++;
+      }
+    }
+    var label = features.length === 1
+      ? 'Section chain ' + p.id.slice(0, 6)
+      : features.length + ' chains';
+
+    var h = '<div class="props-section"><div class="props-header">' + label + '</div>';
+    h += '<div class="props-computed">';
+    h += '<div class="props-row"><span class="props-label">Axes</span><span class="props-value">' + nAxes + '</span></div>';
+    h += '<div class="props-row"><span class="props-label">Sections</span><span class="props-value">' + nSecs + '</span></div>';
+    h += '<div class="props-row"><span class="props-label">Corners</span><span class="props-value">' + nCors + '</span></div>';
+    h += '</div>';
+    h += '<div class="props-divider"></div>';
+    h += '<div class="param-row"><label class="param-label">Width</label>';
+    h += '<div class="param-input-wrap">';
+    h += '<input type="number" class="param-input" data-chain-width="' + p.id + '"';
+    h += ' value="' + w + '" step="0.5" min="10" max="30">';
+    h += '<span class="param-unit">m</span></div></div>';
+    h += '<div style="padding:0 12px 8px;display:flex;gap:4px">';
+    h += '<button class="ug-toggle-btn" data-chain-w-set="15" data-chain-id="' + p.id + '" style="flex:1' + (Math.abs(w - 15) < 1e-3 ? ';border-color:rgba(99,102,241,0.6);background:rgba(99,102,241,0.15);color:#6366f1;font-weight:700' : '') + '">15 m</button>';
+    h += '<button class="ug-toggle-btn" data-chain-w-set="18" data-chain-id="' + p.id + '" style="flex:1' + (Math.abs(w - 18) < 1e-3 ? ';border-color:rgba(99,102,241,0.6);background:rgba(99,102,241,0.15);color:#6366f1;font-weight:700' : '') + '">18 m</button>';
+    h += '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  _bindChainDrawInput() {
+    var self = this;
+    var input = document.getElementById('chain-draw-width');
+    function commit(val) {
+      var v = parseFloat(val);
+      if (isNaN(v) || v <= 0) return;
+      self._chainDrawWidth = v;
+      eventBus.emit('section-chain:width:set', { value: v });
+    }
+    if (input) {
+      input.addEventListener('change', function (e) { commit(e.target.value); });
+    }
+    var btns = this._container.querySelectorAll('[data-chain-w]');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function (e) {
+        var v = parseFloat(e.currentTarget.getAttribute('data-chain-w'));
+        if (input) input.value = v;
+        commit(v);
+        // refresh button-active styling without a full panel re-render
+        self._chainDrawWidth = v;
+        var ps = document.getElementById('section-props');
+        if (ps) {
+          ps.innerHTML = self._renderSectionChainDrawProps();
+          self._bindChainDrawInput();
+        }
+      });
+    }
+  }
+
+  _bindChainInputs(chainFeatures) {
+    if (!chainFeatures || chainFeatures.length === 0) return;
+    var self = this;
+    function commit(id, val) {
+      var v = parseFloat(val);
+      if (isNaN(v) || v <= 0) return;
+      eventBus.emit('section-chain:width:set', { id: id, value: v });
+    }
+    var inputs = this._container.querySelectorAll('[data-chain-width]');
+    for (var i = 0; i < inputs.length; i++) {
+      inputs[i].addEventListener('change', function (e) {
+        commit(e.target.getAttribute('data-chain-width'), e.target.value);
+      });
+    }
+    var btns = this._container.querySelectorAll('[data-chain-w-set]');
+    for (var bi = 0; bi < btns.length; bi++) {
+      btns[bi].addEventListener('click', function (e) {
+        var v = parseFloat(e.currentTarget.getAttribute('data-chain-w-set'));
+        var id = e.currentTarget.getAttribute('data-chain-id');
+        commit(id, v);
+        // updated feature will trigger features:changed → updateProps re-renders
+      });
+    }
   }
 
   _bindInputs() {

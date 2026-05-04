@@ -12,7 +12,7 @@ import {
   getNorthSide, getLLUParams, getCentralIndices
 } from './cells.js';
 import { buildSectionGraph } from './graph.js';
-import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1, buildLLURoof, buildCellMeshColored, buildDetailedTowerFloor1 } from '../../core/three/MeshBuilder.js';
+import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1, buildDetailedFloor0, buildLLURoof, buildCellMeshColored, buildDetailedTowerFloor1, buildDetailedTowerFloor0, buildTowerLLURoof, buildTopSlab } from '../../core/three/MeshBuilder.js';
 import { solveFloor, validateApartment, getFlag } from '../../core/apartments/ApartmentSolver.js';
 import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
@@ -26,6 +26,7 @@ import { walkRing, buildTowerGraph } from '../../core/tower/TowerGraph.js';
 import { computeTowerFootprints } from '../../core/tower/TowerFootprints.js';
 import { detectNorthEnd } from '../../core/tower/TowerPlacer.js';
 import { classifySegment } from '../../core/geo/orientation.js';
+import { distributeHeights } from '../../core/urban-block/height-distributor.js';
 
 import { state } from './state.js';
 import { setupClickHandler, highlightIds } from './clickHandler.js';
@@ -124,6 +125,119 @@ export function processAllSections() {
   var sectionProfiles = []; // for QuotaAllocator
   var quotaInputs = [];    // for Phase 0 QuotaResolver
 
+  // ── Height distribution (SPP-driven) ──────────────────────
+  //
+  // When an urban-block has solverParams.targetSPP > 0, the
+  // per-footprint height is assigned by the distributor rather than
+  // the axis default. The distributor groups all footprints of a
+  // block, sees their footprint area + orientation + centroid Y,
+  // and picks floor counts so that sum(area × floors) ≈ targetSPP.
+  //
+  // We store assignments in a map keyed by `axisId:footprintIndex`
+  // and consult it inside the main loop before falling back to
+  // axis-level sectionHeight. Blocks without targetSPP skip this
+  // pass entirely — existing behaviour is preserved.
+  var assignedHeightMap = {};  // "axisId:fi" → height (m)
+  var distributionStats = {};  // blockId → { achievedSPP, deltaSPP, targetSPP, feasible, aboveMaxCount }
+
+  // Build blockId → block feature lookup for solverParams.targetSPP.
+  var blockById = {};
+  for (var bi0 = 0; bi0 < all.length; bi0++) {
+    var f0 = all[bi0];
+    if (f0.properties && f0.properties.urbanBlock) {
+      blockById[f0.properties.id] = f0;
+    }
+  }
+
+  // Group section-axis features by their blockId.
+  var sectsByBlock = {};
+  for (var si0 = 0; si0 < sects.length; si0++) {
+    var sec0 = sects[si0];
+    var bId = sec0.properties && sec0.properties.blockId;
+    if (!bId) continue;
+    if (!sectsByBlock[bId]) sectsByBlock[bId] = [];
+    sectsByBlock[bId].push(sec0);
+  }
+
+  // For each block with a target, run the distributor.
+  var blockIds = Object.keys(sectsByBlock);
+  for (var bkIdx = 0; bkIdx < blockIds.length; bkIdx++) {
+    var blockIdKey = blockIds[bkIdx];
+    var blockF = blockById[blockIdKey];
+    if (!blockF) continue;
+    var sp = blockF.properties.solverParams || {};
+    var targetSPP = Number(sp.targetSPP) || 0;
+    if (!(targetSPP > 0)) continue; // distributor disabled for this block
+
+    var blockSects = sectsByBlock[blockIdKey];
+    var sectionsForDist = [];
+
+    // Build distributor input — one entry per (axis, footprint).
+    for (var bsi = 0; bsi < blockSects.length; bsi++) {
+      var ax = blockSects[bsi];
+      var axProps = ax.properties || {};
+      var orientation = axProps.orientation === 'lon' ? 'lon' : 'lat';
+      var fpList = axProps.footprints || [];
+      for (var fp0 = 0; fp0 < fpList.length; fp0++) {
+        var poly = fpList[fp0].polygon;
+        if (!poly || poly.length < 3) continue;
+        // Project to meters using the shared globalProj so centroid Y
+        // is comparable across blocks (same projection origin).
+        var cx = 0, cy = 0, ar = 0;
+        for (var pv = 0; pv < poly.length; pv++) {
+          var p2m = globalProj.toMeters(poly[pv][0], poly[pv][1]);
+          cx += p2m[0]; cy += p2m[1];
+        }
+        cx /= poly.length; cy /= poly.length;
+        // Footprint area via shoelace on projected coords.
+        var pmArr = [];
+        for (var pv2 = 0; pv2 < poly.length; pv2++) {
+          pmArr.push(globalProj.toMeters(poly[pv2][0], poly[pv2][1]));
+        }
+        var n2 = pmArr.length;
+        var acc = 0;
+        for (var pi3 = 0; pi3 < n2; pi3++) {
+          var j3 = (pi3 + 1) % n2;
+          acc += pmArr[pi3][0] * pmArr[j3][1] - pmArr[j3][0] * pmArr[pi3][1];
+        }
+        var area = Math.abs(acc) / 2;
+        sectionsForDist.push({
+          fpId: axProps.id + ':' + fp0,
+          axisId: axProps.id,
+          fpIndex: fp0,
+          orientation: orientation,
+          footprintArea: area,
+          centroidY: cy
+        });
+      }
+    }
+
+    if (sectionsForDist.length === 0) continue;
+
+    // Use the first section's axis params for firstFloor/typical
+    // heights — all sections in a block share these in practice.
+    var sampleParams = getParams(blockSects[0].properties);
+    var distResult = distributeHeights(sectionsForDist, targetSPP, sampleParams);
+    distributionStats[blockIdKey] = {
+      targetSPP: targetSPP,
+      achievedSPP: distResult.achievedSPP,
+      deltaSPP: distResult.deltaSPP,
+      feasible: distResult.feasible,
+      aboveMaxCount: distResult.aboveMaxCount,
+      sectionCount: sectionsForDist.length
+    };
+    for (var rIdx = 0; rIdx < distResult.perSection.length; rIdx++) {
+      var entry = distResult.perSection[rIdx];
+      var key = entry.axisId + ':' + entry.fpId.split(':')[1];
+      assignedHeightMap[key] = entry.assignedHeight;
+    }
+    console.log('[height-distributor] block ' + blockIdKey.slice(0, 6)
+      + ': target=' + Math.round(targetSPP) + 'm²'
+      + ', achieved=' + Math.round(distResult.achievedSPP) + 'm²'
+      + ', delta=' + Math.round(distResult.deltaSPP) + 'm²'
+      + ', aboveMax=' + distResult.aboveMaxCount + '/' + sectionsForDist.length);
+  }
+
   for (var si = 0; si < sects.length; si++) {
     var feature = sects[si];
     var lineId = feature.properties.id;
@@ -134,7 +248,17 @@ export function processAllSections() {
 
     for (var fi = 0; fi < storedFP.length; fi++) {
       var fp = storedFP[fi];
-      var secH = getSectionHeight(fp, params);
+      // Height precedence: distributor assignment > per-fp override > axis default.
+      // We don't mutate fp.sectionHeight on the stored feature (that would
+      // persist into saved state and bleed into future rebuilds without
+      // targetSPP); we just apply the override locally for this pass.
+      var distKey = lineId + ':' + fi;
+      var secH;
+      if (assignedHeightMap[distKey] !== undefined) {
+        secH = assignedHeightMap[distKey];
+      } else {
+        secH = getSectionHeight(fp, params);
+      }
       var floorCount = computeFloorCount(secH, params.firstFloorHeight, params.typicalFloorHeight);
       var renderFloors = Math.min(floorCount, 2);
       var renderH = params.firstFloorHeight;
@@ -352,9 +476,10 @@ export function processAllSections() {
       }
 
       if (state.threeOverlay) {
-        // Floor 0 (commercial) — standard meshes
-        state.threeOverlay.addMesh(buildSectionMeshes(graph.nodes, 0,
-          params.firstFloorHeight, params.typicalFloorHeight, 0.08, null));
+        // Floor 0 (commercial / non-residential) — concrete-grey base
+        // with storefront windows. Stays grey under White-model mode.
+        state.threeOverlay.addMesh(buildDetailedFloor0(graph.nodes, N,
+          0, params.firstFloorHeight));
 
         // Floor 1 (residential) — always detailed
         if (renderFloors >= 2) {
@@ -391,6 +516,28 @@ export function processAllSections() {
 
         state.threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
         state.threeOverlay.addMesh(buildFloorLabel(floorCount + 'F', fpM, buildingH));
+
+        // White-model fill for sections that haven't been distributed
+        // yet. After distribute, Pass 2 builds the same floors with
+        // apartment colours (no whiteModelExtra) — and main-loop reruns
+        // with state.distributed=true skip this branch, so no overlap.
+        if (!state.distributed && floorCount > 2) {
+          var wmGroup = new THREE.Group();
+          wmGroup.userData.whiteModelExtra = true;
+          for (var fl = 2; fl < floorCount; fl++) {
+            var fBaseZ = params.firstFloorHeight + (fl - 1) * params.typicalFloorHeight;
+            var fTopZ = fBaseZ + params.typicalFloorHeight;
+            // detailMap is empty here → cells use default MATERIALS;
+            // showLabels=false to avoid stamping labels on every floor.
+            wmGroup.add(buildDetailedFloor1(graph.nodes, N,
+              fBaseZ, fTopZ, detailMap, 0.08, false, false, false));
+          }
+          // Lift LLU stack to sit on top of the 0.5 m slab so the
+          // shaft and the slab body don't overlap in z (z-fight).
+          wmGroup.add(buildLLURoof(graph.nodes, N, buildingH + 0.5, 2.5));
+          wmGroup.add(buildTopSlab(fpM, buildingH, 0.5));
+          state.threeOverlay.addMesh(wmGroup);
+        }
       }
       if (state.threeOverlay && fi > 0) {
         // Skip the divider wall if there's a gap between sections —
@@ -790,33 +937,41 @@ export function processAllSections() {
 
       // ── 3D ──
       if (state.threeOverlay) {
-        // Wider exit for floor 0: ±1 around exit cells
-        var f0WiderExit = {};
-        for (var tci = 0; tci < tCells.length; tci++) {
-          if (tCells[tci].type === 'llu-exit') {
-            var er = tCells[tci].row; var ec = tCells[tci].col;
-            if (exitSide === 'row-start' || exitSide === 'row-end') {
-              if (ec > 0) f0WiderExit[er * tDims.cols + (ec - 1)] = true;
-              if (ec < tDims.cols - 1) f0WiderExit[er * tDims.cols + (ec + 1)] = true;
-            } else {
-              if (er > 0) f0WiderExit[(er - 1) * tDims.cols + ec] = true;
-              if (er < tDims.rows - 1) f0WiderExit[(er + 1) * tDims.cols + ec] = true;
-            }
-          }
-        }
-
-        // Floor 0: commercial + LLU (with wider exit)
-        for (var tci = 0; tci < tCells.length; tci++) {
-          var f0gid = tCells[tci].row * tDims.cols + tCells[tci].col;
-          var isF0LLU = tCells[tci].type === 'llu' || tCells[tci].type === 'llu-exit' || f0WiderExit[f0gid];
-          state.threeOverlay.addMesh(
-            buildCellMeshColored(tPolysM[f0gid], 0, firstFloorH,
-              isF0LLU ? TYPE_COLORS.llu : TYPE_COLORS.commercial, 0.03));
-        }
+        // Floor 0: storefronts on every exterior edge of the perimeter,
+        // entrance group at the llu-exit cell, solid grey on inner cells.
+        state.threeOverlay.addMesh(
+          buildDetailedTowerFloor0(tPolysM, tDims.cols, tDims.rows,
+            0, firstFloorH, tCells));
         // Floor 1: detailed — apartment-colored boxes with facade windows + labels
         state.threeOverlay.addMesh(
           buildDetailedTowerFloor1(ringResult.pairs, tPolysM, tDims.cols, tDims.rows,
             firstFloorH, tFloor1Top, gridAptColor, gridAptLabel, tCells));
+
+        // Floors 2..N-1 — replicate floor 1 detailed geometry on every
+        // residential floor. Heavy meshes, gated by whiteModelExtra so
+        // they only appear when the user enters White-model mode.
+        // gridAptLabel is empty here so per-cell A1/A2 labels don't get
+        // stamped on every floor.
+        for (var fl = 2; fl < thisTFloorCount; fl++) {
+          var fBaseZ = firstFloorH + (fl - 1) * typicalFloorH;
+          var fTopZ = fBaseZ + typicalFloorH;
+          var floorMesh = buildDetailedTowerFloor1(ringResult.pairs, tPolysM,
+            tDims.cols, tDims.rows, fBaseZ, fTopZ, gridAptColor, {}, tCells);
+          floorMesh.userData.whiteModelExtra = true;
+          state.threeOverlay.addMesh(floorMesh);
+        }
+        // Tower LLU roof extrusion — mirrors what sections get from
+        // buildLLURoof in Pass 2. Visible only in White-model mode.
+        // LLU stack starts at slab top (buildingH + 0.5) so the shaft
+        // doesn't z-fight with the slab body in the LLU footprint.
+        var tLluRoof = buildTowerLLURoof(tCells, tPolysM, tDims.cols,
+          thisTBuildingH + 0.5, 2.5);
+        tLluRoof.userData.whiteModelExtra = true;
+        state.threeOverlay.addMesh(tLluRoof);
+        // Tower top slab (0.5 m).
+        var tSlab = buildTopSlab(tfpM, thisTBuildingH, 0.5);
+        tSlab.userData.whiteModelExtra = true;
+        state.threeOverlay.addMesh(tSlab);
 
         state.threeOverlay.addMesh(buildSectionWireframe(tfpM, 0, thisTBuildingH));
         state.threeOverlay.addMesh(buildFloorLabel(thisTFloorCount + 'F', tfpM, thisTBuildingH));
@@ -963,7 +1118,11 @@ export function processAllSections() {
         }
 
         // LLU rooftop extension above last floor
-        state.threeOverlay.addMesh(buildLLURoof(dp.graphNodes, dp.N, dp.buildingH, 2.5));
+        // LLU stack lifted to slab top to avoid z-fight with the slab body.
+        state.threeOverlay.addMesh(buildLLURoof(dp.graphNodes, dp.N, dp.buildingH + 0.5, 2.5));
+        // Top slab — permanent for distributed sections (full-height
+        // building geometry already exists, slab is the natural roof).
+        state.threeOverlay.addMesh(buildTopSlab(dp.fpM, dp.buildingH, 0.5));
       }
 
       state.eventBus.emit('building:plan:result', {
@@ -1095,16 +1254,9 @@ export function processAllSections() {
     highlightIds(state.highlightedIds);
   }
 
+  // Attach per-block SPP distribution results so StatsPanel can
+  // show achieved vs target, delta, and feasibility markers.
+  allStats.perBlockSPP = distributionStats;
   state.eventBus.emit('section-gen:stats', allStats);
-  // Include footprints in the rebuilt payload so downstream consumers
-  // (notably metatiler's buildings extrusion) can compute inner-
-  // buffer keep-out zones around each section/tower footprint
-  // without duplicating the section-gen state.
-  //
-  // Shape: { lineId → [{ ring, lineId, secIdx, floorCount, buildingH,
-  //                      sectionHeight }, ...] }.
-  // Each ring is a closed LngLat polygon.
-  state.eventBus.emit('section-gen:rebuilt', {
-    lineFootprints: state.lineFootprints
-  });
+  state.eventBus.emit('section-gen:rebuilt');
 }

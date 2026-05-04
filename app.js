@@ -16,6 +16,7 @@ import { Toolbar } from './ui/Toolbar.js';
 import { StatusBar } from './ui/StatusBar.js';
 import { FeaturePanel } from './ui/FeaturePanel.js';
 import { CompassControl } from './ui/CompassControl.js';
+import { SunBar } from './ui/SunBar.js';
 import { ThreeOverlay } from './core/three/ThreeOverlay.js';
 import { UrbanBlockTool, rebuildAllBlocks, rebuildBlockAxes, collectBlockFeatureIds } from './draw/tools/UrbanBlockTool.js';
 import { SectionTool } from './draw/tools/SectionTool.js';
@@ -25,26 +26,34 @@ import { getBufferDefaults } from './ui/panels/BufferPanel.js';
 // import urbanBlockModule from './modules/urban-block/index.js';
 // section-distributor removed — code lives in urban-block
 import sectionGenModule from './modules/section-gen/index.js';
+import sectionChainModule from './modules/section-chain/index.js';
 import buffersModule from './modules/buffers/index.js';
 import insolationModule from './modules/insolation/index.js';
 import greenzoneModule from './modules/greenzone/index.js';
 import metatilerModule from './modules/metatiler/index.js';
+import playgroundsModule from './modules/playgrounds/index.js';
+import aiRenderModule from './modules/ai-render/index.js';
 import { log } from './core/Logger.js';
 
 var MODULES = [
   // urbanBlockModule,
   sectionGenModule,
-  // Order matters for MapLibre render order: modules registered
-  // earlier add layers first and sit BELOW later ones on the map.
-  //
-  //   greenzone  → painted fill below everything operational
-  //   metatiler  → remote base data (kadastr + buildings) above green zone
-  //   buffers    → fire/insol/end/road zones on top of base data
-  //   insolation → rays and results on top of everything
+  sectionChainModule,
+  // greenzone is registered BEFORE buffers so its fill layer sits
+  // underneath the buffer overlays (MapLibre render order = add order).
+  // The zone is a backdrop; the red/blue/orange buffer strips should
+  // read as overlays on top of it rather than underneath.
   greenzoneModule,
+  // metatiler → remote base data (kadastr + buildings) above green zone,
+  // below playground/buffer overlays.
   metatilerModule,
+  // playgrounds sits on top of greenzone so its yellow/orange/violet
+  // fills read as "playground zones inside the green zone", but still
+  // underneath the buffer strips added by the buffers module.
+  playgroundsModule,
   buffersModule,
-  insolationModule
+  insolationModule,
+  aiRenderModule
 ];
 
 // ── State ──────────────────────────────────────────────
@@ -80,6 +89,8 @@ async function bootstrap() {
     // Initialize Three.js overlay
     threeOverlay = new ThreeOverlay(mapManager);
     threeOverlay.init();
+    // Dev hook for inspecting shadow / sun state from the console.
+    try { window.__threeOverlay = threeOverlay; } catch (_e) { /* no-op */ }
 
     // UI
     // Cascading delete — if any selected feature is an urban-block
@@ -90,17 +101,31 @@ async function bootstrap() {
       if (!ids || ids.length === 0) return;
       var seen = {};
       var ordered = [];
+      function pushOnce(id) { if (!seen[id]) { seen[id] = true; ordered.push(id); } }
+      function collectChainIds(chainId) {
+        var arr = [chainId];
+        var all = featureStore.toArray();
+        for (var k = 0; k < all.length; k++) {
+          var pp = all[k].properties;
+          if (pp && pp.chainId === chainId &&
+              (pp.type === 'section-axis' || pp.type === 'section-chain-corner')) {
+            arr.push(pp.id);
+          }
+        }
+        return arr;
+      }
       for (var i = 0; i < ids.length; i++) {
         var id = ids[i];
         var f = featureStore.get(id);
         if (!f) continue;
         if (f.properties && f.properties.urbanBlock) {
           var block = collectBlockFeatureIds(featureStore, id);
-          for (var k = 0; k < block.length; k++) {
-            if (!seen[block[k]]) { seen[block[k]] = true; ordered.push(block[k]); }
-          }
+          for (var k = 0; k < block.length; k++) pushOnce(block[k]);
+        } else if (f.properties && f.properties.type === 'section-chain') {
+          var chain = collectChainIds(id);
+          for (var ci = 0; ci < chain.length; ci++) pushOnce(chain[ci]);
         } else {
-          if (!seen[id]) { seen[id] = true; ordered.push(id); }
+          pushOnce(id);
         }
       }
       if (ordered.length === 0) return;
@@ -148,6 +173,22 @@ async function bootstrap() {
       }
     });
 
+    // Target SPP edited in the block properties panel. We store the
+    // new value in solverParams and trigger a rebuild so the
+    // height-distributor runs on the next section-gen pass. Rebuild
+    // is lightweight (pure geometry + axis layout) — section heights
+    // come in at processor time.
+    eventBus.on('block:target-spp:changed', function (d) {
+      if (!d || !d.id) return;
+      var f = featureStore.get(d.id);
+      if (!f || !f.properties.urbanBlock) return;
+      try {
+        rebuildBlockAxes(featureStore, f, { targetSPP: d.value });
+      } catch (err) {
+        console.error('[UB] target-spp update failed:', err);
+      }
+    });
+
     var statusBar = new StatusBar('status-bar', featureStore);
     statusBar.init();
 
@@ -156,6 +197,15 @@ async function bootstrap() {
 
     var compass = new CompassControl();
     compass.init(mapManager);
+
+    // Sun controls — visible only in white-model mode. Wire its
+    // event into ThreeOverlay.setSunConfig so dragging the slider
+    // moves shadows in real time.
+    var sunBar = new SunBar();
+    sunBar.init();
+    eventBus.on('sun:config:changed', function (cfg) {
+      if (threeOverlay && cfg) threeOverlay.setSunConfig(cfg);
+    });
 
     eventBus.on('sidebar:feature:click', function (data) {
       var ids = drawManager.getSelectedIds();
@@ -179,6 +229,19 @@ async function bootstrap() {
       if (_inEditMode) return;
       _originalActivateTool(toolId);
     };
+
+    // Whitewash toggle from AptMixPanel (and any future trigger).
+    // ThreeOverlay tracks the mode itself and re-applies the white
+    // material to any meshes added afterwards, so we just forward
+    // the state and let the overlay handle the rest.
+    eventBus.on('whitewash:set', function (d) {
+      if (!threeOverlay) return;
+      var enabled = !!(d && d.enabled);
+      threeOverlay.setWhitewash(enabled);
+      // Broadcast the resulting state so any panel that owns a
+      // White-model toggle can sync its button label/enabled flag.
+      eventBus.emit('whitewash:changed', { enabled: enabled });
+    });
 
     // Initialize modules with threeOverlay in context
     var moduleCtx = {

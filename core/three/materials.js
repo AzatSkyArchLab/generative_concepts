@@ -8,12 +8,18 @@ export var MATERIALS = {
   commercial:    new THREE.MeshLambertMaterial({ color: 0xffb74d, side: THREE.DoubleSide }),
   apartment:     new THREE.MeshLambertMaterial({ color: 0xdce8f0, side: THREE.DoubleSide }),
   corridor:      new THREE.MeshLambertMaterial({ color: 0xc8c8c8, side: THREE.DoubleSide }),
-  llu:           new THREE.MeshLambertMaterial({ color: 0x4f81bd, side: THREE.DoubleSide }),
+  // LLU vertical stack — lighter mid-grey along the entire building
+  // height so the core reads as a clear vertical volume against the
+  // white residential walls without feeling visually heavy. Stays
+  // grey in white-model mode (skipWhitewash on the material).
+  llu:           new THREE.MeshLambertMaterial({ color: 0xb5b5b5, side: THREE.DoubleSide }),
   commercial_f0: new THREE.MeshLambertMaterial({ color: 0xffb74d, side: THREE.DoubleSide }),
   apartment_f0:  new THREE.MeshLambertMaterial({ color: 0xffb74d, side: THREE.DoubleSide }),
   corridor_f0:   new THREE.MeshLambertMaterial({ color: 0xe0a040, side: THREE.DoubleSide }),
   llu_f0:        new THREE.MeshLambertMaterial({ color: 0x4f81bd, side: THREE.DoubleSide })
 };
+// LLU stays grey under the white-model material swap.
+MATERIALS.llu.userData.skipWhitewash = true;
 
 export var DIVIDER_MATERIAL = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide });
 export var EDGE_MATERIAL = new THREE.LineBasicMaterial({ color: 0x666666 });
@@ -21,6 +27,19 @@ export var WIREFRAME_MATERIAL = new THREE.LineBasicMaterial({ color: 0x555555 })
 
 export var WALL_MAT = new THREE.MeshLambertMaterial({ color: 0xf0f0f0, side: THREE.DoubleSide });
 export var EXT_WALL_MAT = new THREE.MeshLambertMaterial({ color: 0x888888, side: THREE.DoubleSide });
+
+// Ground floor (cocoll) — DARKEST grey of the three-tier hierarchy.
+// Always stays grey, even in white-model mode (skipWhitewash flag).
+export var GROUND_FLOOR_MAT = new THREE.MeshLambertMaterial({ color: 0x707070, side: THREE.DoubleSide });
+GROUND_FLOOR_MAT.userData.skipWhitewash = true;
+
+// Top roof slab — body matches the LLU mid-grey, top "membrane" layer
+// is the lightest shade in the hierarchy ("покрытие"). Both stay grey
+// under the white-model material swap.
+export var ROOF_SLAB_BODY_MAT = new THREE.MeshLambertMaterial({ color: 0x9a9a9a, side: THREE.DoubleSide });
+ROOF_SLAB_BODY_MAT.userData.skipWhitewash = true;
+export var ROOF_TOP_MAT = new THREE.MeshLambertMaterial({ color: 0xbfbfbf, side: THREE.DoubleSide });
+ROOF_TOP_MAT.userData.skipWhitewash = true;
 export var GLASS_MAT = new THREE.MeshBasicMaterial({
   color: 0x6ec6e6, transparent: true, opacity: 0.45, side: THREE.DoubleSide
 });

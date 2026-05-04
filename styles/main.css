@@ -923,3 +923,90 @@ html, body {
 .bplan-sec-profile { font-size: 9px; color: var(--text-muted); margin-top: 2px; }
 
 /* (report button: uses .apt-mix-btn--secondary) */
+
+/* AI Render panel */
+.render-panel {
+  margin: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.render-panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.render-btn {
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--primary);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.render-btn:hover { background: var(--primary-hover); }
+.render-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.render-btn--secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+.render-btn--secondary:hover {
+  background: var(--border-color);
+  color: var(--text-primary);
+}
+.render-btn--secondary:disabled:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.render-btn--active {
+  background: var(--success, #22c55e);
+}
+.render-btn--active:hover {
+  background: var(--success, #22c55e);
+  filter: brightness(1.05);
+}
+
+/* Sun bar — bottom overlay, shown only in white-model mode. Sits on
+   top of the map, narrow strip with two sliders (hour, date). */
+#sun-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 50;
+  background: rgba(20, 20, 24, 0.78);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: #f0f0f0;
+  font-size: 11px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+}
+
+.sun-bar-row { display: flex; gap: 16px; align-items: center; }
+.sun-bar-ctrl { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+.sun-bar-label { display: flex; justify-content: space-between; font-weight: 500; }
+.sun-bar-label span { color: var(--primary, #7eb8da); font-variant-numeric: tabular-nums; }
+.sun-bar-ctrl input[type="range"] { width: 100%; accent-color: var(--primary, #7eb8da); }
+
+.render-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}

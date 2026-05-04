@@ -307,7 +307,14 @@ var DEFAULT_PARAMS = {
   lonLens: [30, 36, 39, 42, 46, 49],
   towerLatLens: [23.1],
   towerLonLens: [23.1, 29.7, 39.6],
-  simplify: null // polygon simplification — use Simplify button in properties
+  simplify: null, // polygon simplification — use Simplify button in properties
+  // Target gross building area (СПП) for this block in m².
+  // 0 means "disabled" — sections keep their default height.
+  // When > 0, the height-distributor assigns per-section heights
+  // to approximate this target, with a preference for taller
+  // northern sections and orientation-based soft bounds
+  // (meridional 55-75m, latitudinal 28-55m).
+  targetSPP: 0
 };
 
 /**

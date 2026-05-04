@@ -47,6 +47,9 @@ export function buildCellLabelSprite(text, polygon, topZ, inset) {
   var dy = poly[1][1] - poly[0][1];
   mesh.rotation.z = Math.atan2(dy, dx);
 
+  // UI overlay — drop in white-model mode so screenshots are clean.
+  mesh.userData.hideInWhitewash = true;
+
   return mesh;
 }
 
@@ -118,6 +121,10 @@ export function buildFloorLabel(text, footprintM, topZ) {
   sprite.position.set(cx, cy, topZ + 2);
   sprite.scale.set(7, 7, 1);
 
+  // Hide floor pills in white-model mode — they're a UI aid, not part
+  // of the architecture, and would confuse the AI render pass.
+  sprite.userData.hideInWhitewash = true;
+
   return sprite;
 }
 
@@ -156,5 +163,8 @@ export function buildDetailLabel(text, polygon, z, inset) {
 
   var ddx = poly[1][0] - poly[0][0]; var ddy = poly[1][1] - poly[0][1];
   mesh.rotation.z = Math.atan2(ddy, ddx);
+  // Apartment cell labels (A1 wz, A2 1Kw, etc.) — hide in white-model
+  // so the screenshot reads as clean architecture.
+  mesh.userData.hideInWhitewash = true;
   return mesh;
 }

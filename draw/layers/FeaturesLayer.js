@@ -218,13 +218,26 @@ export class FeaturesLayer {
     var map = this._mapManager.getMap();
     if (!map) return;
 
-    map.setFilter(this.FILL_LAYER, ['==', ['geometry-type'], 'Polygon']);
+    // section-chain holder carries the polyline only as a selection /
+    // data anchor — visuals come from section-gen (per-segment
+    // section-axis) and modules/section-chain (corners). Skip it on
+    // every line/fill layer to avoid double rendering on top.
+    var notChainHolder = ['!=', ['coalesce', ['get', 'type'], ''], 'section-chain'];
+    map.setFilter(this.FILL_LAYER, ['all',
+      ['==', ['geometry-type'], 'Polygon'],
+      notChainHolder
+    ]);
     map.setFilter(this.EXTRUSION_LAYER, [
       'all',
       ['==', ['geometry-type'], 'Polygon'],
-      ['>', ['coalesce', ['get', 'height'], 0], 0]
+      ['>', ['coalesce', ['get', 'height'], 0], 0],
+      notChainHolder
     ]);
-    map.setFilter(this.LINE_HITBOX_LAYER, ['==', ['geometry-type'], 'LineString']);
+    map.setFilter(this.LINE_LAYER, notChainHolder);
+    map.setFilter(this.LINE_HITBOX_LAYER, ['all',
+      ['==', ['geometry-type'], 'LineString'],
+      notChainHolder
+    ]);
     map.setFilter(this.SELECTED_LAYER, ['==', ['get', 'selected'], true]);
   }
 
