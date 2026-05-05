@@ -411,16 +411,20 @@ function _pickTowerEdge(polyM, polyLL, proj, startIdx) {
       { cellSize: DEFAULT_CELL_SIZE, towerGap: 20, flipped: flipped }, null);
     if (!fpsM || fpsM.length === 0) continue;
 
-    // All tower corners must lie inside the polygon.
+    // Verify each tower fits inside the polygon. Tower corners 0 and
+    // 1 sit exactly on the polygon edge — ray-cast point-in-polygon
+    // is unreliable for boundary points, so we test only the two
+    // INNER corners (indices 2 and 3) and the centroid. If those
+    // are inside, the tower's interior body is inside; the on-edge
+    // corners are accepted by construction.
     var fits = true;
     for (var fi = 0; fi < fpsM.length && fits; fi++) {
       var poly = fpsM[fi].polygon;
-      for (var pj = 0; pj < poly.length; pj++) {
-        if (!_pointInPolygon([poly[pj][0], poly[pj][1]], polyM)) {
-          fits = false;
-          break;
-        }
-      }
+      if (!_pointInPolygon([poly[2][0], poly[2][1]], polyM)) { fits = false; break; }
+      if (!_pointInPolygon([poly[3][0], poly[3][1]], polyM)) { fits = false; break; }
+      var cxF = (poly[0][0] + poly[1][0] + poly[2][0] + poly[3][0]) / 4;
+      var cyF = (poly[0][1] + poly[1][1] + poly[2][1] + poly[3][1]) / 4;
+      if (!_pointInPolygon([cxF, cyF], polyM)) { fits = false; break; }
     }
     if (!fits) continue;
 

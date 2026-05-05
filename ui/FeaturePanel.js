@@ -103,16 +103,21 @@ export class FeaturePanel {
     if (!el) return;
 
     var has = this._hasSectionOrBlock();
-    var alreadyRendered = el.innerHTML.trim().length > 0;
+    // Probe for the ACTUAL row elements rather than just innerHTML
+    // length — if any other code stuffed innerHTML or the structure
+    // got partially mangled, we want to rebuild rather than hit the
+    // sync-only fast path on a missing DOM.
+    var hasStructure = !!(
+      document.getElementById('ax-gap-row') &&
+      document.getElementById('ax-corners-row') &&
+      document.getElementById('ax-towers-row')
+    );
 
-    // Short-circuit: structure unchanged. Indicators are refreshed
-    // separately via _syncAxisOptionsIndicators() so selection
-    // changes drive ON/OFF state without losing event listeners.
-    if (has && alreadyRendered) {
+    if (has && hasStructure) {
       this._syncAxisOptionsIndicators();
       return;
     }
-    if (!has && !alreadyRendered) return;
+    if (!has && !hasStructure) return;
     if (!has) { el.innerHTML = ''; return; }
 
     var h = '<div class="props-divider"></div>';
@@ -144,30 +149,58 @@ export class FeaturePanel {
   _syncAxisOptionsIndicators() {
     var blocks = this._selectedBlocks();
     var selected = blocks.length > 0;
+    // Are there ANY urban-blocks on the map? If yes and none is in
+    // selection, the toggle's scope is ambiguous (it'd flip the
+    // global default for the NEXT block, not any existing one) —
+    // show an em-dash so a block whose useTowers=true doesn't read
+    // as OFF the moment you click away from it.
+    var anyBlockExists = false;
+    var allFeatures = this._featureStore.toArray();
+    for (var i = 0; i < allFeatures.length; i++) {
+      if (allFeatures[i].properties && allFeatures[i].properties.urbanBlock) {
+        anyBlockExists = true;
+        break;
+      }
+    }
+
     function flagFor(blocksArr, key, globalKey) {
-      if (blocksArr.length > 0) return blocksArr[0].properties[key] === true;
+      if (blocksArr.length > 0) {
+        // Multiple selected: ON only if every selected block has it.
+        for (var bi = 0; bi < blocksArr.length; bi++) {
+          if (blocksArr[bi].properties[key] !== true) return false;
+        }
+        return true;
+      }
       try {
         if (typeof window !== 'undefined' && window[globalKey] != null) return !!window[globalKey];
       } catch (_e) { /* no-op */ }
       return false;
     }
+
+    var ambiguous = !selected && anyBlockExists;
     var gap = flagFor(blocks, 'useGap', '__UB_USE_GAP__');
     var corners = flagFor(blocks, 'useCorners', '__UB_USE_CORNERS__');
     var towers = flagFor(blocks, 'useTowers', '__UB_USE_TOWERS__');
 
-    function paint(spanId, on) {
+    function paint(spanId, on, ambig) {
       var sp = document.getElementById(spanId);
       if (!sp) return;
+      if (ambig) {
+        sp.textContent = '—';
+        sp.style.color = 'var(--text-muted)';
+        sp.style.fontWeight = '400';
+        return;
+      }
       sp.textContent = on ? 'ON' : 'OFF';
       sp.style.color = on ? 'var(--primary)' : 'var(--text-muted)';
       sp.style.fontWeight = on ? '700' : '400';
     }
-    paint('ax-gap-indicator', gap);
-    paint('ax-corners-indicator', corners);
-    paint('ax-towers-indicator', towers);
+    paint('ax-gap-indicator', gap, ambiguous);
+    paint('ax-corners-indicator', corners, ambiguous);
+    paint('ax-towers-indicator', towers, ambiguous);
 
-    // Subtitle hint: clarify whether toggles act on selected block or
-    // the next-created default. Replace existing hint to avoid stacking.
+    // Subtitle hint: clarify whether toggles act on selected block,
+    // each existing block's own flag, or the next-created default.
     var el = document.getElementById('axis-options-section');
     if (!el) return;
     var hint = el.querySelector('.ax-opt-hint');
@@ -182,6 +215,8 @@ export class FeaturePanel {
         ? 'block ' + blocks[0].properties.id.slice(0, 6)
         : blocks.length + ' blocks';
       hint.textContent = 'Toggles affect: ' + label;
+    } else if (anyBlockExists) {
+      hint.textContent = 'Select a block to see its flags · click a toggle to flip the default for the next block';
     } else {
       hint.textContent = 'Toggles affect: default for next block';
     }
@@ -569,12 +604,19 @@ export class FeaturePanel {
     var areaM2 = this._computeBlockAreaM2(f);
     var areaHa = areaM2 / 10000;
     var useGap = f.properties.useGap === true;
-    var rollN = f.properties.solverParams && f.properties.solverParams.ctxRoll
-      ? f.properties.solverParams.ctxRoll
-      : 0;
-    var targetSPP = f.properties.solverParams && f.properties.solverParams.targetSPP
-      ? f.properties.solverParams.targetSPP
-      : 0;
+    var useCornersBlk = f.properties.useCorners === true;
+    var useTowersBlk = f.properties.useTowers === true;
+    var sp = f.properties.solverParams || {};
+    // Shuffle counter — we display whichever index this mode actually
+    // shuffles. In corners/towers modes shuffle advances the chain
+    // start vertex (cornersStartIdx); in plain sections-only mode it
+    // re-rolls ctxRoll. Without this the badge never updated when
+    // the user shuffled in corners mode.
+    var shuffleN = (useCornersBlk || useTowersBlk)
+      ? (sp.cornersStartIdx != null ? sp.cornersStartIdx : 0)
+      : (sp.ctxRoll || 0);
+    var shuffleLabel = (useCornersBlk || useTowersBlk) ? 'Shuffle start' : 'Shuffle ctx';
+    var targetSPP = sp.targetSPP || 0;
     var h = '<div class="props-section"><div class="props-header">Urban block</div>';
     h += '<div class="props-computed" style="padding:0 12px">';
     h += '<div class="props-row"><span class="props-label">Area</span><span class="props-value">' + areaM2.toFixed(0) + ' m² <small>(' + areaHa.toFixed(2) + ' ha)</small></span></div>';
@@ -598,7 +640,7 @@ export class FeaturePanel {
     h += '<div style="padding:8px 12px;display:flex;gap:6px">';
     h += '<button class="ug-toggle-btn" data-block-shuffle="' + bid + '" ';
     h += 'style="flex:1">';
-    h += 'Shuffle ctx' + (rollN > 0 ? ' <small style="color:var(--text-muted)">#' + rollN + '</small>' : '') + '</button>';
+    h += shuffleLabel + ' <small style="color:var(--text-muted)">#' + shuffleN + '</small></button>';
     h += '</div>';
     h += '<div style="padding:0 12px 8px">';
     h += '<button class="ug-toggle-btn" data-block-delete="' + bid + '" ';

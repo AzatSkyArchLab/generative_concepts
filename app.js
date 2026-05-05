@@ -166,22 +166,31 @@ async function bootstrap() {
       var f = featureStore.get(d.id);
       if (!f || !f.properties.urbanBlock) return;
       var override = {};
-      if (f.properties.useCorners || f.properties.useTowers) {
-        // Corners or Towers mode: shuffle advances cornersStartIdx by 1.
-        //   - In corners-only mode, this is the chain start vertex,
-        //     rotating which polygon vertex's corner is "killed" at
-        //     the polyline wrap-around.
-        //   - In towers (with or without corners) mode, the same index
-        //     drives _pickTowerEdge and selects the Nth-most-northern
-        //     eligible edge for the tower.
-        var coords = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
-        var N = coords ? Math.max(1, coords.length - 1) : 1;  // closed ring → N+1 coords
-        var prev = (f.properties.solverParams && f.properties.solverParams.cornersStartIdx) || 0;
-        override.cornersStartIdx = (prev + 1) % N;
+      var useCornersF = f.properties.useCorners === true;
+      var useTowersF = f.properties.useTowers === true;
+      var coords = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
+      var N = coords ? Math.max(1, coords.length - 1) : 1;  // closed ring → N+1 coords
+      var prev = (f.properties.solverParams && f.properties.solverParams.cornersStartIdx) || 0;
+      var nextIdx = (prev + 1) % N;
+      var nextRoll = 1 + Math.floor(Math.random() * 999999);
+
+      if (useTowersF && !useCornersF) {
+        // Towers-only: cycle tower edge AND re-roll section context.
+        // The chain isn't used here, but the per-edge solver still
+        // arranges sections — rerolling its priority makes the
+        // shuffle visibly do something even when only one edge
+        // qualifies for a tower (so the tower itself doesn't move).
+        override.cornersStartIdx = nextIdx;
+        override.ctxRoll = nextRoll;
+      } else if (useCornersF) {
+        // Corners-only OR towers+corners: rotate the chain start /
+        // tower-edge picker. ctxRoll doesn't apply — the chain
+        // pipeline ignores it.
+        override.cornersStartIdx = nextIdx;
       } else {
-        // Sections-only mode: shuffle = re-roll edge context for the
-        // priority solver. Same behaviour as before.
-        override.ctxRoll = 1 + Math.floor(Math.random() * 999999);
+        // Plain sections-only: re-roll the priority solver's edge
+        // context assignment.
+        override.ctxRoll = nextRoll;
       }
       try {
         rebuildBlockAxes(featureStore, f, override);
@@ -258,6 +267,15 @@ async function bootstrap() {
       // Broadcast the resulting state so any panel that owns a
       // White-model toggle can sync its button label/enabled flag.
       eventBus.emit('whitewash:changed', { enabled: enabled });
+    });
+
+    // Basemap switch — RenderPanel uses this to toggle between vector
+    // (osm) and satellite raster for AI-render screenshots.
+    eventBus.on('map:basemap:set', function (d) {
+      if (!mapManager) return;
+      var type = d && d.type;
+      if (type !== 'osm' && type !== 'satellite') return;
+      mapManager.setBasemap(type);
     });
 
     // Initialize modules with threeOverlay in context

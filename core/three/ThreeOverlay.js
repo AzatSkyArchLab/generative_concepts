@@ -99,12 +99,14 @@ export class ThreeOverlay {
     this._renderer.shadowMap.enabled = true;
     this._renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-    // Lighting
-    var ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    // Lighting — slightly brighter ambient so shadows on solid
+    // surfaces (block ground plane, context buildings) read as soft
+    // gray rather than near-black when the sun is behind a building.
+    var ambient = new THREE.AmbientLight(0xffffff, 0.7);
     this._scene.add(ambient);
 
     // Sun — astronomical direction. castShadow toggled with whitewash.
-    this._sunLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    this._sunLight = new THREE.DirectionalLight(0xffffff, 0.7);
     this._scene.add(this._sunLight);
     this._scene.add(this._sunLight.target);
     var SHADOW_HALF = 250;  // tighter ortho extent → better shadow texel density
@@ -129,7 +131,7 @@ export class ThreeOverlay {
     // under it and shadows appear as dark patches on the map.
     var planeGeo = new THREE.PlaneGeometry(2000, 2000);
     var planeMat = new THREE.ShadowMaterial({
-      color: 0x000000, opacity: 0.55, depthWrite: false
+      color: 0x000000, opacity: 0.30, depthWrite: false
     });
     this._groundPlane = new THREE.Mesh(planeGeo, planeMat);
     // Sit slightly below z=0 so cocoll's bottom face doesn't z-fight
@@ -332,7 +334,20 @@ export class ThreeOverlay {
     if (mat.userData && mat.userData.skipWhitewash) return;
     if (enabled) {
       if (!obj.userData.origMat) obj.userData.origMat = mat;
-      obj.material = this._whiteMat;
+      // Tower meshes get a distinct WARM-BEIGE white so the AI prompt
+      // can address them specifically as "the tower" — this gives the
+      // skyline a contrast cue between tower and the rest of the
+      // urban-block stack.
+      if (obj.userData.isTowerMesh) {
+        if (!this._whiteTowerMat) {
+          this._whiteTowerMat = new THREE.MeshLambertMaterial({
+            color: 0xe8d4a8, side: THREE.DoubleSide
+          });
+        }
+        obj.material = this._whiteTowerMat;
+      } else {
+        obj.material = this._whiteMat;
+      }
     } else if (obj.userData.origMat) {
       obj.material = obj.userData.origMat;
       obj.userData.origMat = null;
@@ -345,59 +360,114 @@ export class ThreeOverlay {
   }
 
   /**
-   * Set the surrounding-buildings shadow stand-in mesh. The actual
-   * building visuals are rendered by MapLibre's fill-extrusion layer
-   * (managed by modules/metatiler); this Three.js mesh exists purely
-   * to receive sun shadows on the side faces.
+   * Set the surrounding-buildings stand-in meshes. Visible only in
+   * white-model mode. Two meshes, two colors:
    *
-   * Material is `THREE.ShadowMaterial`, which renders fully transparent
-   * EXCEPT where shadows fall — so the MapLibre buildings stay fully
-   * visible underneath, with shadow patches darkening their walls.
+   *   - residential: light blue (color-codes apartment blocks for
+   *     the AI render prompt — "light blue = residential").
+   *   - other:       white (public/non-residential).
    *
-   * Pass `null` (or empty positions) to remove the existing mesh.
+   * Both meshes occlude correctly (opaque pass + depth write), cast
+   * and receive shadows, and are tagged so they're preserved across
+   * section-gen's threeOverlay.clear().
    *
-   * @param {Float32Array} positions - flat triangle vertices in meters
-   *   relative to overlay origin (matches buildContextMeshData output)
-   * @param {Uint16Array|Uint32Array} indices
+   * `flatShading: true` derives a face normal per triangle so the
+   * merged geometry doesn't look like a curved blob from averaged
+   * vertex normals at shared corners.
+   *
+   * @param {{ residential?: {positions:Float32Array, indices?:Uint*Array},
+   *           other?: {positions:Float32Array, indices?:Uint*Array} } | null} parts
+   *   Pass `null` to remove existing meshes.
    */
-  setContextBuildingsShadow(positions, indices) {
-    if (this._contextShadowMesh) {
-      this._scene.remove(this._contextShadowMesh);
-      if (this._contextShadowMesh.geometry) this._contextShadowMesh.geometry.dispose();
-      this._contextShadowMesh = null;
+  setContextBuildings(parts) {
+    var keys = ['residential', 'other'];
+    if (!this._contextMeshes) this._contextMeshes = {};
+
+    for (var ki = 0; ki < keys.length; ki++) {
+      var key = keys[ki];
+      // Dispose prior mesh for this key.
+      if (this._contextMeshes[key]) {
+        this._scene.remove(this._contextMeshes[key]);
+        if (this._contextMeshes[key].geometry) this._contextMeshes[key].geometry.dispose();
+        this._contextMeshes[key] = null;
+      }
     }
-    if (!positions || positions.length === 0) {
+    if (!parts) {
       if (this._map) this._map.triggerRepaint();
       return;
     }
-    var geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    if (indices) geo.setIndex(new THREE.BufferAttribute(indices, 1));
-    geo.computeVertexNormals();
-    geo.computeBoundingSphere();
 
-    if (!this._contextShadowMat) {
-      this._contextShadowMat = new THREE.ShadowMaterial({
-        color: 0x000000, opacity: 0.45, depthWrite: false
-      });
+    // Context buildings get NEUTRAL gray tones — distinct from the
+    // vivid white/light-blue used for the user's target volumes.
+    // The AI prompt then maps:
+    //   pure white / light-blue → new architecture (transform)
+    //   neutral gray             → existing context (preserve style)
+    var matsBySpec = {
+      residential: { color: 0xc4c8cc }, // muted gray-blue (residential context)
+      other:       { color: 0xd0d0d0 }  // neutral gray (other context)
+    };
+    if (!this._contextMatsByKey) this._contextMatsByKey = {};
+
+    for (var k = 0; k < keys.length; k++) {
+      var ck = keys[k];
+      var data = parts[ck];
+      if (!data || !data.positions || data.positions.length === 0) continue;
+
+      var geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+      if (data.indices) geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+
+      if (!this._contextMatsByKey[ck]) {
+        this._contextMatsByKey[ck] = new THREE.MeshStandardMaterial({
+          color: matsBySpec[ck].color,
+          roughness: 0.92,
+          metalness: 0,
+          side: THREE.DoubleSide,
+          flatShading: true
+        });
+        this._contextMatsByKey[ck].userData = { skipWhitewash: true };
+      }
+
+      var mesh = new THREE.Mesh(geo, this._contextMatsByKey[ck]);
+      mesh.receiveShadow = true;
+      mesh.castShadow = true;
+      mesh.userData.whiteModelExtra = true;
+      mesh.userData.skipWhitewash = true;
+      mesh.userData.preserveOnClear = true;
+      mesh.userData.contextKind = ck;
+      this._contextMeshes[ck] = mesh;
+      this._whitewashSubtree(mesh, this._whitewashed);
+      this._scene.add(mesh);
     }
-    var mesh = new THREE.Mesh(geo, this._contextShadowMat);
-    mesh.receiveShadow = true;
-    mesh.castShadow = true;  // also blocks rays so own/adjacent buildings shadow each other
-    mesh.userData.whiteModelExtra = true;
-    mesh.userData.skipWhitewash = true;
-    this._contextShadowMesh = mesh;
-    // Apply current whitewash state immediately (shows when WM is on).
-    this._whitewashSubtree(mesh, this._whitewashed);
-    this._scene.add(mesh);
+
     if (this._map) this._map.triggerRepaint();
+  }
+
+  // Back-compat alias — older callers pass a single (positions,
+  // indices) pair. Treats input as the "other" (non-residential) set.
+  setContextBuildingsShadow(positions, indices) {
+    if (!positions || positions.length === 0) {
+      this.setContextBuildings(null);
+      return;
+    }
+    this.setContextBuildings({ other: { positions: positions, indices: indices } });
   }
 
   clear() {
     var toRemove = [];
     for (var i = 0; i < this._scene.children.length; i++) {
       var child = this._scene.children[i];
-      if (!child.isLight) toRemove.push(child);
+      // Skip lights and the global ground plane (managed here).
+      if (child.isLight) continue;
+      if (child === this._groundPlane) continue;
+      // Skip meshes other modules manage themselves — they survive
+      // section-gen's full-scene clear so their disappearance->
+      // reappearance doesn't flash MapLibre's colored buildings
+      // through during a shuffle / section rebuild.
+      if (child.userData && child.userData.preserveOnClear) continue;
+      toRemove.push(child);
     }
     for (var i = 0; i < toRemove.length; i++) {
       this._scene.remove(toRemove[i]);

@@ -241,21 +241,37 @@ export function distributeHeights(sections, targetSPP, params, options) {
       gba -= bestAxisS.totalArea;
     }
   } else if (gba < adjTarget && axes.length > 0) {
+    // Tiered round-robin: meridional axes (rank 0) all grow uniformly
+    // by 1 floor per pass — northern first within the tier — until
+    // they all hit hLonMax OR target is met. Then latitudinal axes
+    // (rank 1) start. This produces a balanced "tall mer block,
+    // medium lat" silhouette instead of pumping a single axis to max
+    // before the rest start growing.
     var northFirst = axesByNorthern();
+    function rankOf(ax) { return ax.orientation === 'lon' ? 0 : 1; }
     var guardA = 0;
-    while (gba < adjTarget && guardA < 10000) {
-      guardA++;
-      var picked = null;
-      for (var m = 0; m < northFirst.length; m++) {
-        var axN = northFirst[m];
-        if (axN.assignedFloors < axN.maxFloors) { picked = axN; break; }
+    var tierRanks = [0, 1];
+    for (var ti = 0; ti < tierRanks.length && gba < adjTarget; ti++) {
+      var tier = tierRanks[ti];
+      while (gba < adjTarget && guardA < 100000) {
+        guardA++;
+        var changed = false;
+        for (var m = 0; m < northFirst.length; m++) {
+          var axN = northFirst[m];
+          if (rankOf(axN) !== tier) continue;
+          if (axN.assignedFloors >= axN.maxFloors) continue;
+          axN.assignedFloors += 1;
+          gba += axN.totalArea;
+          changed = true;
+          if (gba >= adjTarget) break;
+        }
+        if (!changed) break;
       }
-      if (!picked) break;
-      picked.assignedFloors += 1;
-      gba += picked.totalArea;
     }
 
-    // Step-back if overshot by one full axis.
+    // Step-back if the last increment overshoot by more than one axis.
+    // Choose the SMALLEST-area axis that, when -1, brings gba closest
+    // to target — keeps the silhouette stable while pulling SPP back.
     if (gba > adjTarget) {
       var overE = Math.abs(gba - adjTarget);
       for (var p = 0; p < northFirst.length; p++) {

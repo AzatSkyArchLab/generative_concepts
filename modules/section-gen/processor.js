@@ -1004,43 +1004,45 @@ export function processAllSections() {
 
       // ── 3D ──
       if (state.threeOverlay) {
+        // Tag every mesh in the tower stack with isTowerMesh=true so
+        // the WM material swap can give them a warm-beige tint
+        // distinct from the white sections — gives the AI prompt a
+        // clear visual cue for "this is the tower".
+        function tagTower(obj) {
+          if (!obj) return obj;
+          obj.traverse(function (o) {
+            if (o.isMesh) o.userData.isTowerMesh = true;
+          });
+          return obj;
+        }
+
         // Floor 0: storefronts on every exterior edge of the perimeter,
         // entrance group at the llu-exit cell, solid grey on inner cells.
-        state.threeOverlay.addMesh(
+        state.threeOverlay.addMesh(tagTower(
           buildDetailedTowerFloor0(tPolysM, tDims.cols, tDims.rows,
-            0, firstFloorH, tCells));
+            0, firstFloorH, tCells)));
         // Floor 1: detailed — apartment-colored boxes with facade windows + labels
-        state.threeOverlay.addMesh(
+        state.threeOverlay.addMesh(tagTower(
           buildDetailedTowerFloor1(ringResult.pairs, tPolysM, tDims.cols, tDims.rows,
-            firstFloorH, tFloor1Top, gridAptColor, gridAptLabel, tCells));
+            firstFloorH, tFloor1Top, gridAptColor, gridAptLabel, tCells)));
 
-        // Floors 2..N-1 — replicate floor 1 detailed geometry on every
-        // residential floor. Heavy meshes, gated by whiteModelExtra so
-        // they only appear when the user enters White-model mode.
-        // gridAptLabel is empty here so per-cell A1/A2 labels don't get
-        // stamped on every floor.
         for (var fl = 2; fl < thisTFloorCount; fl++) {
           var fBaseZ = firstFloorH + (fl - 1) * typicalFloorH;
           var fTopZ = fBaseZ + typicalFloorH;
           var floorMesh = buildDetailedTowerFloor1(ringResult.pairs, tPolysM,
             tDims.cols, tDims.rows, fBaseZ, fTopZ, gridAptColor, {}, tCells);
           floorMesh.userData.whiteModelExtra = true;
-          state.threeOverlay.addMesh(floorMesh);
+          state.threeOverlay.addMesh(tagTower(floorMesh));
         }
-        // Tower LLU roof extrusion — mirrors what sections get from
-        // buildLLURoof in Pass 2. Visible only in White-model mode.
-        // LLU stack starts at slab top (buildingH + 0.5) so the shaft
-        // doesn't z-fight with the slab body in the LLU footprint.
         var tLluRoof = buildTowerLLURoof(tCells, tPolysM, tDims.cols,
           thisTBuildingH + 0.5, 2.5);
         tLluRoof.userData.whiteModelExtra = true;
-        state.threeOverlay.addMesh(tLluRoof);
-        // Tower top slab (0.5 m).
+        state.threeOverlay.addMesh(tagTower(tLluRoof));
         var tSlab = buildTopSlab(tfpM, thisTBuildingH, 0.5);
         tSlab.userData.whiteModelExtra = true;
-        state.threeOverlay.addMesh(tSlab);
+        state.threeOverlay.addMesh(tagTower(tSlab));
 
-        state.threeOverlay.addMesh(buildSectionWireframe(tfpM, 0, thisTBuildingH));
+        state.threeOverlay.addMesh(tagTower(buildSectionWireframe(tfpM, 0, thisTBuildingH)));
         state.threeOverlay.addMesh(buildFloorLabel(thisTFloorCount + 'F', tfpM, thisTBuildingH));
       }
     }

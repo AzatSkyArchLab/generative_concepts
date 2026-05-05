@@ -751,7 +751,7 @@ function appendExtrusion(ring, heightM, posList, idxList) {
  *   null if no buildings produced any geometry (empty input, all
  *   zero-height, all degenerate rings).
  */
-export function buildContextMeshData(features, proj) {
+export function buildContextMeshData(features, proj, predicate) {
   if (!features || features.length === 0) return null;
   var pos = [];
   var idx = [];
@@ -759,6 +759,7 @@ export function buildContextMeshData(features, proj) {
   for (var i = 0; i < features.length; i++) {
     var f = features[i];
     if (!f || !f.geometry) continue;
+    if (predicate && !predicate(f)) continue;
     var h = f.properties && f.properties._height_m;
     if (!(h > 0)) continue;
     var g = f.geometry;

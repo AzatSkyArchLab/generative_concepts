@@ -26,7 +26,12 @@ export class MapManager {
           maxZoom: Config.map.maxZoom,
           pitch: Config.map.pitch,
           bearing: Config.map.bearing,
-          antialias: true
+          antialias: true,
+          // Required so toDataURL() returns the rendered pixels for AI
+          // render compositing. Small perf hit on continuous redraws,
+          // but we already paint Three.js on top each frame so the
+          // compositing flush happens regardless.
+          preserveDrawingBuffer: true
         });
 
         this._map.on('load', () => {
