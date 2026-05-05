@@ -56,6 +56,13 @@ function getProvider() {
 }
 
 function getApiKey(provider) {
+  // Resolution order:
+  //   1. window.__GEMINI_API_KEY__ / __OPENROUTER_API_KEY__ — runtime
+  //      override from DevTools or a settings panel.
+  //   2. import.meta.env.VITE_GEMINI_API_KEY / VITE_OPENROUTER_API_KEY —
+  //      Vite picks these up from .env.local (gitignored). Local-dev
+  //      friendly: drop your key in .env.local once and forget it.
+  //   3. Empty string — no key configured.
   try {
     if (typeof window !== 'undefined') {
       if (provider === 'openrouter' && window.__OPENROUTER_API_KEY__) {
@@ -66,6 +73,17 @@ function getApiKey(provider) {
       }
     }
   } catch (_e) { /* SSR-safe */ }
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta.env) {
+      var env = import.meta.env;
+      if (provider === 'openrouter' && env.VITE_OPENROUTER_API_KEY) {
+        return String(env.VITE_OPENROUTER_API_KEY);
+      }
+      if (provider === 'google' && env.VITE_GEMINI_API_KEY) {
+        return String(env.VITE_GEMINI_API_KEY);
+      }
+    }
+  } catch (_e) { /* non-Vite environment */ }
   return provider === 'openrouter' ? OPENROUTER_FALLBACK_KEY : GOOGLE_FALLBACK_KEY;
 }
 
