@@ -172,6 +172,40 @@ export function processAllSections() {
     var blockSects = sectsByBlock[blockIdKey];
     var sectionsForDist = [];
 
+    // Pull corner features for this block (corners-mode urban-block).
+    // Their floor count is locked at 9; we still feed them to the
+    // distributor so the locked SPP gets subtracted from the target
+    // before the regular sections distribute the remainder.
+    for (var ci0 = 0; ci0 < all.length; ci0++) {
+      var cf = all[ci0];
+      if (!cf.properties || cf.properties.type !== 'section-chain-corner') continue;
+      if (cf.properties.blockId !== blockIdKey) continue;
+      var cPoly = cf.properties.polygon;
+      if (!cPoly || cPoly.length < 3) continue;
+      var ccx = 0, ccy = 0;
+      var cM = [];
+      for (var pv0 = 0; pv0 < cPoly.length; pv0++) {
+        var pmC = globalProj.toMeters(cPoly[pv0][0], cPoly[pv0][1]);
+        cM.push(pmC);
+        ccx += pmC[0]; ccy += pmC[1];
+      }
+      ccx /= cM.length; ccy /= cM.length;
+      var cAcc = 0;
+      for (var pi0 = 0; pi0 < cM.length; pi0++) {
+        var jj0 = (pi0 + 1) % cM.length;
+        cAcc += cM[pi0][0] * cM[jj0][1] - cM[jj0][0] * cM[pi0][1];
+      }
+      sectionsForDist.push({
+        fpId: cf.properties.id + ':corner',
+        axisId: cf.properties.id,  // each corner is its own "axis"
+        fpIndex: 0,
+        orientation: 'lat',  // doesn't matter — locked at 9 floors
+        footprintArea: Math.abs(cAcc) / 2,
+        centroidY: ccy,
+        isCorner: true
+      });
+    }
+
     // Build distributor input — one entry per (axis, footprint).
     for (var bsi = 0; bsi < blockSects.length; bsi++) {
       var ax = blockSects[bsi];
@@ -212,15 +246,47 @@ export function processAllSections() {
       }
     }
 
+    // Towers in this block — locked at their `towerHeight`. Their SPP
+    // is subtracted from the target FIRST so the distributor only has
+    // to allocate the remainder to corners + regular sections (which
+    // have their own priority order: meridional > latitudinal, north
+    // first, applied inside distributeHeights).
+    var towerSPP = 0;
+    for (var ti0 = 0; ti0 < all.length; ti0++) {
+      var tf = all[ti0];
+      if (!tf.properties || tf.properties.type !== 'tower-axis') continue;
+      if (tf.properties.blockId !== blockIdKey) continue;
+      var tFP = tf.properties.footprints || [];
+      var tH = tf.properties.towerHeight || 112;
+      // Tower floor stack uses 4.5/3.0 like sections.
+      var tFloors = tH <= 4.5 ? 1 : 1 + Math.round((tH - 4.5) / 3.0);
+      for (var fi3 = 0; fi3 < tFP.length; fi3++) {
+        var pp3 = tFP[fi3].polygon || [];
+        if (pp3.length < 3) continue;
+        var ax2D = 0;
+        for (var v0 = 0; v0 < pp3.length; v0++) {
+          var v1 = (v0 + 1) % pp3.length;
+          var pm0 = globalProj.toMeters(pp3[v0][0], pp3[v0][1]);
+          var pm1 = globalProj.toMeters(pp3[v1][0], pp3[v1][1]);
+          ax2D += pm0[0] * pm1[1] - pm1[0] * pm0[1];
+        }
+        var area3 = Math.abs(ax2D) / 2;
+        towerSPP += area3 * tFloors;
+      }
+    }
+    var adjTarget = Math.max(0, targetSPP - towerSPP);
+
     if (sectionsForDist.length === 0) continue;
 
     // Use the first section's axis params for firstFloor/typical
     // heights — all sections in a block share these in practice.
     var sampleParams = getParams(blockSects[0].properties);
-    var distResult = distributeHeights(sectionsForDist, targetSPP, sampleParams);
+    var distResult = distributeHeights(sectionsForDist, adjTarget, sampleParams);
     distributionStats[blockIdKey] = {
       targetSPP: targetSPP,
-      achievedSPP: distResult.achievedSPP,
+      towerSPP: towerSPP,
+      adjTarget: adjTarget,
+      achievedSPP: distResult.achievedSPP + towerSPP,
       deltaSPP: distResult.deltaSPP,
       feasible: distResult.feasible,
       aboveMaxCount: distResult.aboveMaxCount,
@@ -233,7 +299,8 @@ export function processAllSections() {
     }
     console.log('[height-distributor] block ' + blockIdKey.slice(0, 6)
       + ': target=' + Math.round(targetSPP) + 'm²'
-      + ', achieved=' + Math.round(distResult.achievedSPP) + 'm²'
+      + ', tower=' + Math.round(towerSPP) + 'm²'
+      + ', achieved=' + Math.round(distResult.achievedSPP + towerSPP) + 'm²'
       + ', delta=' + Math.round(distResult.deltaSPP) + 'm²'
       + ', aboveMax=' + distResult.aboveMaxCount + '/' + sectionsForDist.length);
   }

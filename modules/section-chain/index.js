@@ -30,12 +30,20 @@ import { commandManager } from '../../core/commands/CommandManager.js';
 import { CompoundCommand } from '../../core/commands/CompoundCommand.js';
 import { RemoveFeatureCommand } from '../../core/commands/RemoveFeatureCommand.js';
 import { buildChainCommands } from '../../draw/tools/SectionChainTool.js';
-import { MATERIALS, EDGE_MATERIAL } from '../../core/three/materials.js';
+import { MATERIALS, EDGE_MATERIAL, GROUND_FLOOR_MAT } from '../../core/three/materials.js';
+import {
+  buildDetailedCornerFloor0,
+  buildDetailedCornerFloor1,
+  buildLLURoofFromCells,
+  buildCornerTopSlab,
+  buildHollowGroundFloor,
+  buildHollowResidentialFloor
+} from '../../core/three/MeshBuilder.js';
+import { computeFloorCount, computeBuildingHeight } from '../../core/SectionParams.js';
 
 var FIRST_FLOOR_H = 4.5;
 var TYPICAL_FLOOR_H = 3.0;
-var TOTAL_FLOORS = 9;
-var BUILDING_TOP = FIRST_FLOOR_H + (TOTAL_FLOORS - 1) * TYPICAL_FLOOR_H; // 28.5m
+var DEFAULT_SECTION_HEIGHT = 28;
 
 var module_ = {
   id: 'section-chain',
@@ -47,11 +55,24 @@ var module_ = {
     this._layer.init();
     this._meshGroup = null;
     this._origin = null;     // [lng, lat] cached from `section-gen:origin`
+    this._mapHandlers = [];
+    this._selectedCornerId = null;
 
     ctx.eventBus.on('section-gen:origin', function (origin) {
       if (origin && origin.length >= 2) self._origin = [origin[0], origin[1]];
     });
-    ctx.eventBus.on('features:changed', function () { self._refresh(); });
+    ctx.eventBus.on('features:changed', function () {
+      self._refresh();
+      // After data refresh, re-paint the selection highlight (the
+      // corner may have been re-emitted with fresh geometry).
+      if (self._selectedCornerId) self._paintSelected(self._selectedCornerId);
+    });
+    // section-gen's processAllSections wipes the entire Three scene
+    // before re-adding section meshes. We need to re-stamp the corner
+    // group on top once that finishes — otherwise editing a regular
+    // section's height (which calls processAllSections directly,
+    // outside the features:changed flow) leaves corners without 3D.
+    ctx.eventBus.on('section-gen:rebuilt', function () { self._refresh(); });
     ctx.eventBus.on('section-chain:width:set', function (d) {
       if (!d || !d.id || d.value == null) return;
       var v = parseFloat(d.value);
@@ -59,12 +80,132 @@ var module_ = {
       self._regenerateChain(d.id, v);
     });
 
+    // Selection bridge: drawManager.selectFeature(id) updates
+    // FeaturesLayer's _selectedIds and emits feature:selected. We
+    // own the corner highlight on the map (corners aren't in
+    // FeaturesLayer) so subscribe and paint our own outline.
+    ctx.eventBus.on('feature:selected', function (d) {
+      if (!d || !d.id) return;
+      var feat = ctx.featureStore.get(d.id);
+      if (feat && feat.properties && feat.properties.type === 'section-chain-corner') {
+        self._selectedCornerId = d.id;
+        self._paintSelected(d.id);
+      } else {
+        // Different feature type was selected — clear our highlight.
+        self._selectedCornerId = null;
+        self._layer.setSelectedCornerRing(null);
+      }
+    });
+    ctx.eventBus.on('feature:deselected', function () {
+      self._selectedCornerId = null;
+      self._layer.setSelectedCornerRing(null);
+      self._layer.setHoverCornerRing(null);
+    });
+
+    // Per-corner height edit — fires from FeaturePanel slider/input.
+    ctx.eventBus.on('corner:sectionHeight:set', function (d) {
+      if (!d || !d.id || !(d.value > 0)) return;
+      var feat = ctx.featureStore.get(d.id);
+      if (!feat || feat.properties.type !== 'section-chain-corner') return;
+      feat.properties.sectionHeight = d.value;
+      ctx.eventBus.emit('features:changed');
+    });
+
+    self._setupMapHandlers();
     self._refresh();
   },
 
   destroy: function () {
+    this._teardownMapHandlers();
     if (this._layer) { this._layer.destroy(); this._layer = null; }
     this._disposeMeshes();
+  },
+
+  _setupMapHandlers: function () {
+    var self = this;
+    var map = this._ctx.mapManager.getMap();
+    if (!map) return;
+    var layerId = this._layer.getCornerClickLayerId();
+
+    function on(event, fn) {
+      map.on(event, layerId, fn);
+      self._mapHandlers.push({ event: event, fn: fn });
+    }
+
+    on('click', function (e) {
+      if (!e.features || e.features.length === 0) return;
+      e.preventDefault && e.preventDefault();
+      var cornerId = e.features[0].properties.cornerId;
+      if (!cornerId) return;
+      // Toggle behavior matches sidebar:feature:click in app.js: if
+      // already selected, clear; otherwise select via drawManager.
+      self._ctx.eventBus.emit('sidebar:feature:click', { id: cornerId });
+    });
+
+    on('dblclick', function (e) {
+      if (!e.features || e.features.length === 0) return;
+      // Stop the map zoom on dblclick of a corner.
+      if (e.originalEvent && e.originalEvent.preventDefault) {
+        e.originalEvent.preventDefault();
+      }
+      e.preventDefault && e.preventDefault();
+      var cornerId = e.features[0].properties.cornerId;
+      if (!cornerId) return;
+      // Select the corner (so the panel renders) and ask the panel
+      // to focus the height input.
+      self._ctx.eventBus.emit('sidebar:feature:click', { id: cornerId });
+      self._ctx.eventBus.emit('corner:edit:focus', { id: cornerId });
+    });
+
+    on('mouseenter', function (e) {
+      self._ctx.mapManager.setCursor('pointer');
+      if (e.features && e.features[0]) {
+        var cornerId = e.features[0].properties.cornerId;
+        if (cornerId && cornerId !== self._selectedCornerId) {
+          var feat = self._ctx.featureStore.get(cornerId);
+          if (feat && feat.properties && feat.properties.polygon) {
+            self._layer.setHoverCornerRing(feat.properties.polygon);
+          }
+        }
+      }
+    });
+    on('mousemove', function (e) {
+      if (!e.features || !e.features[0]) return;
+      var cornerId = e.features[0].properties.cornerId;
+      if (!cornerId || cornerId === self._selectedCornerId) {
+        self._layer.setHoverCornerRing(null);
+        return;
+      }
+      var feat = self._ctx.featureStore.get(cornerId);
+      if (feat && feat.properties && feat.properties.polygon) {
+        self._layer.setHoverCornerRing(feat.properties.polygon);
+      }
+    });
+    on('mouseleave', function () {
+      self._ctx.mapManager.setCursor('grab');
+      self._layer.setHoverCornerRing(null);
+    });
+  },
+
+  _teardownMapHandlers: function () {
+    var map = this._ctx && this._ctx.mapManager && this._ctx.mapManager.getMap();
+    if (!map || !this._mapHandlers) { this._mapHandlers = []; return; }
+    var layerId = this._layer && this._layer.getCornerClickLayerId();
+    for (var i = 0; i < this._mapHandlers.length; i++) {
+      var h = this._mapHandlers[i];
+      if (layerId) map.off(h.event, layerId, h.fn);
+      else map.off(h.event, h.fn);
+    }
+    this._mapHandlers = [];
+  },
+
+  _paintSelected: function (cornerId) {
+    var feat = this._ctx.featureStore.get(cornerId);
+    if (feat && feat.properties && feat.properties.polygon) {
+      this._layer.setSelectedCornerRing(feat.properties.polygon);
+    } else {
+      this._layer.setSelectedCornerRing(null);
+    }
   },
 
   // ── Width regeneration: recreate children for a chain ──
@@ -146,6 +287,7 @@ var module_ = {
         properties: {
           id: c.properties.id,
           corners: [{
+            id: c.properties.id,
             polygon: c.properties.polygon,
             mode: c.properties.mode,
             armA: c.properties.armA,
@@ -228,10 +370,11 @@ var module_ = {
       }
     }
 
+    var secH = p.sectionHeight || (holder && holder.properties.sectionHeight) || DEFAULT_SECTION_HEIGHT;
     if (cellPlan && !cellPlan.fallback && cellPlan.cells) {
-      return buildCornerFromCells(cellPlan, polyM);
+      return buildCornerFromCells(cellPlan, polyM, secH);
     }
-    return buildCornerSolid(polyM);
+    return buildCornerSolid(polyM, secH);
   }
 };
 
@@ -269,37 +412,82 @@ function cellMaterialFor(type) {
 }
 
 /**
- * Cell-decomposed first floor + wireframe-only volume on top, mirroring
- * the regular section-axis behaviour: floors 2+ are an open frame so the
- * cell articulation at floor 0 is visible from any camera angle.
+ * Cell-decomposed corner. Floor 0 (cocoll) and floor 1 (first
+ * residential) are always visible — matches the section pipeline
+ * which also keeps floor 1 always lit. Floors 2..N-1 detailed,
+ * LLU stack and top slab live in a whiteModelExtra group so the
+ * heavy meshes only appear in White-model mode.
  */
-function buildCornerFromCells(plan, lOutlineM) {
+function buildCornerFromCells(plan, lOutlineM, sectionHeight) {
   var meshes = [];
-  for (var i = 0; i < plan.cells.length; i++) {
-    var c = plan.cells[i];
-    if (!c.poly || c.poly.length < 3) continue;
-    var prism = buildExtrudedPrism(c.poly, 0, FIRST_FLOOR_H, cellMaterialFor(c.type));
-    if (prism) { meshes.push(prism.mesh); meshes.push(prism.edges); }
+  var floorCount = computeFloorCount(sectionHeight, FIRST_FLOOR_H, TYPICAL_FLOOR_H);
+  var buildingH = computeBuildingHeight(sectionHeight, FIRST_FLOOR_H, TYPICAL_FLOOR_H);
+  var outline = plan.outline || lOutlineM;
+
+  // Floor 0 — concrete cocoll with storefronts on outline edges.
+  meshes.push(buildDetailedCornerFloor0(plan.cells, outline, 0, FIRST_FLOOR_H));
+
+  // Floor 1 — first residential, always visible.
+  meshes.push(buildDetailedCornerFloor1(
+    plan.cells, outline, FIRST_FLOOR_H, FIRST_FLOOR_H + TYPICAL_FLOOR_H));
+
+  // Wireframe outline for the rest of the volume — non-WM mode shows
+  // the full silhouette without the heavy mesh weight.
+  var wire = buildExtrudedPrism(
+    lOutlineM, FIRST_FLOOR_H + TYPICAL_FLOOR_H, buildingH, MATERIALS.apartment);
+  if (wire) meshes.push(wire.edges);
+
+  // White-model fills: floors 2..N-1 detailed + LLU stack + top slab.
+  var wm = new THREE.Group();
+  wm.userData.whiteModelExtra = true;
+  for (var fl = 2; fl < floorCount; fl++) {
+    var fBaseZ = FIRST_FLOOR_H + (fl - 1) * TYPICAL_FLOOR_H;
+    var fTopZ = fBaseZ + TYPICAL_FLOOR_H;
+    wm.add(buildDetailedCornerFloor1(plan.cells, outline, fBaseZ, fTopZ));
   }
-  // Top — wireframe only (no fill).
-  var top = buildExtrudedPrism(lOutlineM, FIRST_FLOOR_H, BUILDING_TOP, MATERIALS.apartment);
-  if (top) meshes.push(top.edges);
+  wm.add(buildLLURoofFromCells(plan.cells, buildingH + 0.5, 2.5));
+  wm.add(buildCornerTopSlab(outline, buildingH, 0.5));
+  meshes.push(wm);
+
   return meshes;
 }
 
 /**
- * Fallback for inner corners and other cases where cell distribution
- * can't run. Solid commercial volume 0..4.5m + wireframe-only top
- * 4.5..28.5m. Top stays open so the corner reads consistently with
- * the cell-based variant and with regular sections.
+ * Fallback for inner corners (reflex at V) and degenerate cases where
+ * buildCornerCells declines to decompose. Renders walls + slabs on the
+ * outline directly — no cell-box extrude — so concave L-shapes don't
+ * trip the per-edge inset path. Visual language matches the cell-based
+ * branch: cocoll storefronts on every outline edge, residential
+ * windows on the upper floors, top slab in WM mode.
  */
-function buildCornerSolid(polyM) {
+function buildCornerSolid(polyM, sectionHeight) {
   if (polyM.length < 3) return [];
   var meshes = [];
-  var bot = buildExtrudedPrism(polyM, 0, FIRST_FLOOR_H, MATERIALS.commercial);
-  if (bot) { meshes.push(bot.mesh); meshes.push(bot.edges); }
-  var top = buildExtrudedPrism(polyM, FIRST_FLOOR_H, BUILDING_TOP, MATERIALS.apartment);
-  if (top) meshes.push(top.edges);
+  var floorCount = computeFloorCount(sectionHeight, FIRST_FLOOR_H, TYPICAL_FLOOR_H);
+  var buildingH = computeBuildingHeight(sectionHeight, FIRST_FLOOR_H, TYPICAL_FLOOR_H);
+
+  // Floor 0 — concrete plinth + storefronts on every outline edge.
+  meshes.push(buildHollowGroundFloor(polyM, 0, FIRST_FLOOR_H));
+
+  // Floor 1 — residential floor slab + windows on every outline edge.
+  meshes.push(buildHollowResidentialFloor(
+    polyM, FIRST_FLOOR_H, FIRST_FLOOR_H + TYPICAL_FLOOR_H));
+
+  // Wireframe outline for the upper volume.
+  var wire = buildExtrudedPrism(
+    polyM, FIRST_FLOOR_H + TYPICAL_FLOOR_H, buildingH, MATERIALS.apartment);
+  if (wire) meshes.push(wire.edges);
+
+  // White-model fills: floors 2..N-1 hollow + top slab.
+  var wm = new THREE.Group();
+  wm.userData.whiteModelExtra = true;
+  for (var fl = 2; fl < floorCount; fl++) {
+    var fBaseZ = FIRST_FLOOR_H + (fl - 1) * TYPICAL_FLOOR_H;
+    var fTopZ = fBaseZ + TYPICAL_FLOOR_H;
+    wm.add(buildHollowResidentialFloor(polyM, fBaseZ, fTopZ));
+  }
+  wm.add(buildCornerTopSlab(polyM, buildingH, 0.5));
+  meshes.push(wm);
   return meshes;
 }
 

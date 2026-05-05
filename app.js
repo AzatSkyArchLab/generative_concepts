@@ -18,12 +18,12 @@ import { FeaturePanel } from './ui/FeaturePanel.js';
 import { CompassControl } from './ui/CompassControl.js';
 import { SunBar } from './ui/SunBar.js';
 import { ThreeOverlay } from './core/three/ThreeOverlay.js';
-import { UrbanBlockTool, rebuildAllBlocks, rebuildBlockAxes, collectBlockFeatureIds } from './draw/tools/UrbanBlockTool.js';
+import { UrbanBlockTool, rebuildAllBlocks, rebuildBlockAxes, collectBlockFeatureIds, computeBestCornerStartIdx } from './draw/tools/UrbanBlockTool.js';
 import { SectionTool } from './draw/tools/SectionTool.js';
 import { getBufferDefaults } from './ui/panels/BufferPanel.js';
 
 // ── Modules (plug/unplug here) ─────────────────────────
-// import urbanBlockModule from './modules/urban-block/index.js';
+import urbanBlock3DModule from './modules/urban-block/index.js';
 // section-distributor removed — code lives in urban-block
 import sectionGenModule from './modules/section-gen/index.js';
 import sectionChainModule from './modules/section-chain/index.js';
@@ -36,7 +36,7 @@ import aiRenderModule from './modules/ai-render/index.js';
 import { log } from './core/Logger.js';
 
 var MODULES = [
-  // urbanBlockModule,
+  urbanBlock3DModule,
   sectionGenModule,
   sectionChainModule,
   // greenzone is registered BEFORE buffers so its fill layer sits
@@ -165,9 +165,26 @@ async function bootstrap() {
       if (!d || !d.id) return;
       var f = featureStore.get(d.id);
       if (!f || !f.properties.urbanBlock) return;
-      var newRoll = 1 + Math.floor(Math.random() * 999999);
+      var override = {};
+      if (f.properties.useCorners || f.properties.useTowers) {
+        // Corners or Towers mode: shuffle advances cornersStartIdx by 1.
+        //   - In corners-only mode, this is the chain start vertex,
+        //     rotating which polygon vertex's corner is "killed" at
+        //     the polyline wrap-around.
+        //   - In towers (with or without corners) mode, the same index
+        //     drives _pickTowerEdge and selects the Nth-most-northern
+        //     eligible edge for the tower.
+        var coords = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
+        var N = coords ? Math.max(1, coords.length - 1) : 1;  // closed ring → N+1 coords
+        var prev = (f.properties.solverParams && f.properties.solverParams.cornersStartIdx) || 0;
+        override.cornersStartIdx = (prev + 1) % N;
+      } else {
+        // Sections-only mode: shuffle = re-roll edge context for the
+        // priority solver. Same behaviour as before.
+        override.ctxRoll = 1 + Math.floor(Math.random() * 999999);
+      }
       try {
-        rebuildBlockAxes(featureStore, f, { ctxRoll: newRoll });
+        rebuildBlockAxes(featureStore, f, override);
       } catch (err) {
         console.error('[UB] shuffle failed:', err);
       }
@@ -262,34 +279,105 @@ async function bootstrap() {
     eventBus.emit('app:ready');
     log.debug('U·B·SYSTEM started (' + MODULES.length + ' modules, Three.js enabled)');
 
-    // Global toggle — "Gap on axes > 150m". Applies to NEW blocks and
-    // sections. Kept as static fields on UrbanBlockTool / SectionTool
-    // so both tools read the same state without extra plumbing.
-    try { window.__UB_USE_GAP__ = false; } catch (_e) { /* SSR-safe */ }
-    eventBus.on('axis-options:gap:toggle', function () {
-      var next = !UrbanBlockTool.useGap;
-      UrbanBlockTool.useGap = next;
-      SectionTool.useGap = next;
-      try { window.__UB_USE_GAP__ = next; } catch (_e) { /* no-op */ }
-      eventBus.emit('axis-options:gap:changed', { useGap: next });
-      var ind = document.getElementById('ax-gap-indicator');
-      if (ind) {
-        ind.textContent = next ? 'ON' : 'OFF';
-        ind.style.color = next ? 'var(--primary)' : 'var(--text-muted)';
-        ind.style.fontWeight = next ? '700' : '400';
+    // Global toggles — "Gap on axes > 150m" and "Corners". Apply to
+    // NEW blocks (and sections, for the gap toggle). Stored as static
+    // fields on UrbanBlockTool / SectionTool so both tools read the
+    // same state without extra plumbing.
+    try {
+      window.__UB_USE_GAP__ = false;
+      window.__UB_USE_CORNERS__ = false;
+    } catch (_e) { /* SSR-safe */ }
+    // Toggle handlers — per-block when an urban-block is selected,
+    // otherwise mutate the global default for the NEXT block created.
+    // Each block stores its own useGap / useCorners / useTowers, so
+    // blocks evolve independently.
+    function getSelectedBlocks() {
+      var sel = drawManager.getSelectedIds();
+      var picks = [];
+      for (var i = 0; i < sel.length; i++) {
+        var f = featureStore.get(sel[i]);
+        if (f && f.properties && f.properties.urbanBlock) picks.push(f);
       }
-      // Apply new useGap to all existing blocks and rebuild them so
-      // what the user sees matches the global toggle (inline semantics).
-      var all = featureStore.toArray();
-      for (var i = 0; i < all.length; i++) {
-        var f = all[i];
-        if (f.properties && f.properties.urbanBlock) f.properties.useGap = next;
-      }
+      return picks;
+    }
+
+    function rebuildOneBlock(f) {
       try {
-        var n = rebuildAllBlocks(featureStore, {});
-        if (n > 0) log.debug('[UB] rebuilt ' + n + ' block(s) for useGap=' + next);
+        rebuildBlockAxes(featureStore, f, {});
       } catch (err) {
-        console.error('[UB] rebuild on gap toggle failed:', err);
+        console.error('[UB] rebuild failed for block ' + f.properties.id.slice(0, 6) + ':', err);
+      }
+    }
+
+    eventBus.on('axis-options:gap:toggle', function () {
+      var blocks = getSelectedBlocks();
+      if (blocks.length === 0) {
+        // No selection → flip the global default that drives the next
+        // block (and any tools that read from UrbanBlockTool/SectionTool).
+        var next = !UrbanBlockTool.useGap;
+        UrbanBlockTool.useGap = next;
+        SectionTool.useGap = next;
+        try { window.__UB_USE_GAP__ = next; } catch (_e) { /* no-op */ }
+        eventBus.emit('axis-options:gap:changed', { useGap: next });
+        return;
+      }
+      // Per-block: flip each selected block's flag and rebuild it.
+      for (var i = 0; i < blocks.length; i++) {
+        var f = blocks[i];
+        var nextV = !(f.properties.useGap === true);
+        f.properties.useGap = nextV;
+        if (f.properties.solverParams) f.properties.solverParams.useGap = nextV;
+        rebuildOneBlock(f);
+      }
+      eventBus.emit('axis-options:gap:changed', {});
+    });
+
+    eventBus.on('axis-options:corners:toggle', function () {
+      var blocks = getSelectedBlocks();
+      if (blocks.length === 0) {
+        // Global default — affects the next-created block only.
+        var next = !UrbanBlockTool.useCorners;
+        UrbanBlockTool.useCorners = next;
+        try { window.__UB_USE_CORNERS__ = next; } catch (_e) { /* no-op */ }
+        return;
+      }
+      for (var i = 0; i < blocks.length; i++) {
+        var f = blocks[i];
+        var nextV = !(f.properties.useCorners === true);
+        f.properties.useCorners = nextV;
+        // Auto-pick the start vertex when flipping ON for a block that
+        // doesn't yet have one stored.
+        if (nextV && f.properties.solverParams &&
+            (f.properties.solverParams.cornersStartIdx === undefined ||
+             f.properties.solverParams.cornersStartIdx === null)) {
+          var coordsRing = f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
+          if (coordsRing && coordsRing.length >= 4) {
+            var ringPolyLL = coordsRing.slice(0, coordsRing.length - 1);
+            try {
+              f.properties.solverParams.cornersStartIdx =
+                computeBestCornerStartIdx(ringPolyLL, f.properties.solverParams.sw);
+            } catch (err) {
+              console.warn('[UB] auto-pick on toggle failed:', err);
+            }
+          }
+        }
+        rebuildOneBlock(f);
+      }
+    });
+
+    eventBus.on('axis-options:towers:toggle', function () {
+      var blocks = getSelectedBlocks();
+      if (blocks.length === 0) {
+        var next = !UrbanBlockTool.useTowers;
+        UrbanBlockTool.useTowers = next;
+        try { window.__UB_USE_TOWERS__ = next; } catch (_e) { /* no-op */ }
+        return;
+      }
+      for (var i = 0; i < blocks.length; i++) {
+        var f = blocks[i];
+        var nextV = !(f.properties.useTowers === true);
+        f.properties.useTowers = nextV;
+        rebuildOneBlock(f);
       }
     });
 

@@ -160,10 +160,22 @@ function makeBufs(edge, oi, par) {
 
 function prioTrim(sorted, poly, par) {
   var res = [], allBufs = [];
+  // Pre-seed buffer set with externally provided obstacles (e.g. tower
+  // buffers). Every edge — including the highest-priority one — has
+  // to subtract the union of these before placing its sections, so an
+  // axis intersecting a tower's fire/end/insol envelope gets shortened
+  // just like one intersecting a higher-priority section's buffer.
+  if (par.extraBufs && par.extraBufs.length > 0) {
+    for (var eb = 0; eb < par.extraBufs.length; eb++) allBufs.push(par.extraBufs[eb]);
+  }
+  var hadSeed = allBufs.length > 0;
   for (var i = 0; i < sorted.length; i++) {
     var e = Object.assign({}, sorted[i]);
     var oi = calcOff(e, poly, par.sw);
-    if (i === 0) {
+    // First edge ONLY skips trimming when there are no pre-seeded
+    // obstacles — otherwise even the top-priority axis must clear the
+    // tower envelope before claiming its strip.
+    if (i === 0 && !hadSeed) {
       var b = makeBufs(e, oi, par);
       allBufs.push(b.fire, b.end, b.insol);
       res.push(Object.assign({}, e, { oi: oi, bufs: b, trimmed: false }));
@@ -330,7 +342,8 @@ export function solveUrbanBlock(polyM, params) {
     sw: params.sw || DEFAULT_PARAMS.sw,
     fire: params.fire || DEFAULT_PARAMS.fire,
     endB: params.endB || DEFAULT_PARAMS.endB,
-    insol: params.insol || DEFAULT_PARAMS.insol
+    insol: params.insol || DEFAULT_PARAMS.insol,
+    extraBufs: params.extraBufs || []
   };
   var gapTarget = params.gapTarget || DEFAULT_PARAMS.gapTarget;
   var useGap = params.useGap != null ? params.useGap : DEFAULT_PARAMS.useGap;

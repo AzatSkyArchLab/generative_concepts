@@ -49,15 +49,21 @@ export class SectionChainPreviewLayer {
     this.SEC_SOURCE = p + '-sections';
     this.COR_SOURCE = p + '-corners';
     this.GAP_SOURCE = p + '-gaps';
+    this.COR_SEL_SOURCE = p + '-cor-sel';
+    this.COR_HOV_SOURCE = p + '-cor-hov';
 
     this.AXIS_LAYER = p + '-axis-line';
     this.SEC_FILL = p + '-sec-fill';
     this.SEC_LINE = p + '-sec-line';
     this.COR_FILL = p + '-cor-fill';
     this.COR_LINE = p + '-cor-line';
+    this.COR_SEL_LINE = p + '-cor-sel-line';
+    this.COR_HOV_LINE = p + '-cor-hov-line';
     this.GAP_FILL = p + '-gap-fill';
     this.GAP_LINE = p + '-gap-line';
   }
+
+  getCornerClickLayerId() { return this.COR_FILL; }
 
   init() {
     if (this._initialized) return;
@@ -66,6 +72,8 @@ export class SectionChainPreviewLayer {
     this._map.addGeoJSONSource(this.SEC_SOURCE, empty);
     this._map.addGeoJSONSource(this.COR_SOURCE, empty);
     this._map.addGeoJSONSource(this.GAP_SOURCE, empty);
+    this._map.addGeoJSONSource(this.COR_SEL_SOURCE, empty);
+    this._map.addGeoJSONSource(this.COR_HOV_SOURCE, empty);
 
     var map = this._map.getMap();
     if (!map) return;
@@ -94,12 +102,48 @@ export class SectionChainPreviewLayer {
       id: this.COR_LINE, type: 'line', source: this.COR_SOURCE,
       paint: { 'line-color': ['get', 'stroke'], 'line-width': 1.8 }
     });
+    // Hover outline (above the base outline so it visually wins).
+    map.addLayer({
+      id: this.COR_HOV_LINE, type: 'line', source: this.COR_HOV_SOURCE,
+      paint: { 'line-color': '#f97316', 'line-width': 3, 'line-opacity': 0.8 }
+    });
+    // Selection outline — orange, thick, on top of hover.
+    map.addLayer({
+      id: this.COR_SEL_LINE, type: 'line', source: this.COR_SEL_SOURCE,
+      paint: { 'line-color': '#f97316', 'line-width': 4 }
+    });
     map.addLayer({
       id: this.AXIS_LAYER, type: 'line', source: this.AXIS_SOURCE,
       paint: { 'line-color': COLORS.axis, 'line-width': 2, 'line-dasharray': [4, 3], 'line-opacity': 0.7 }
     });
 
     this._initialized = true;
+  }
+
+  setSelectedCornerRing(ringLL) {
+    var fc = { type: 'FeatureCollection', features: [] };
+    if (ringLL && ringLL.length >= 3) {
+      var ring = ringLL.slice();
+      ring.push(ring[0]);
+      fc.features.push({
+        type: 'Feature', properties: {},
+        geometry: { type: 'Polygon', coordinates: [ring] }
+      });
+    }
+    this._map.updateGeoJSONSource(this.COR_SEL_SOURCE, fc);
+  }
+
+  setHoverCornerRing(ringLL) {
+    var fc = { type: 'FeatureCollection', features: [] };
+    if (ringLL && ringLL.length >= 3) {
+      var ring = ringLL.slice();
+      ring.push(ring[0]);
+      fc.features.push({
+        type: 'Feature', properties: {},
+        geometry: { type: 'Polygon', coordinates: [ring] }
+      });
+    }
+    this._map.updateGeoJSONSource(this.COR_HOV_SOURCE, fc);
   }
 
   /**
@@ -194,7 +238,9 @@ export class SectionChainPreviewLayer {
 
   _storedCornerFeature(c) {
     var col = this._cornerColor(c.mode);
-    return this._polyFeatureLL(c.polygon, { fill: col.fill, stroke: col.stroke, mode: c.mode || '' });
+    var props = { fill: col.fill, stroke: col.stroke, mode: c.mode || '' };
+    if (c.id) props.cornerId = c.id;
+    return this._polyFeatureLL(c.polygon, props);
   }
 
   _storedGapFeature(g) {
@@ -232,14 +278,16 @@ export class SectionChainPreviewLayer {
     this._map.updateGeoJSONSource(this.SEC_SOURCE, e);
     this._map.updateGeoJSONSource(this.COR_SOURCE, e);
     this._map.updateGeoJSONSource(this.GAP_SOURCE, e);
+    this._map.updateGeoJSONSource(this.COR_SEL_SOURCE, e);
+    this._map.updateGeoJSONSource(this.COR_HOV_SOURCE, e);
   }
 
   destroy() {
     var map = this._map.getMap();
     if (!map) return;
-    var layers = [this.AXIS_LAYER, this.COR_LINE, this.COR_FILL, this.SEC_LINE, this.SEC_FILL, this.GAP_LINE, this.GAP_FILL];
+    var layers = [this.AXIS_LAYER, this.COR_SEL_LINE, this.COR_HOV_LINE, this.COR_LINE, this.COR_FILL, this.SEC_LINE, this.SEC_FILL, this.GAP_LINE, this.GAP_FILL];
     for (var i = 0; i < layers.length; i++) if (map.getLayer(layers[i])) map.removeLayer(layers[i]);
-    var sources = [this.AXIS_SOURCE, this.SEC_SOURCE, this.COR_SOURCE, this.GAP_SOURCE];
+    var sources = [this.AXIS_SOURCE, this.SEC_SOURCE, this.COR_SOURCE, this.GAP_SOURCE, this.COR_SEL_SOURCE, this.COR_HOV_SOURCE];
     for (var j = 0; j < sources.length; j++) if (map.getSource(sources[j])) map.removeSource(sources[j]);
     this._initialized = false;
   }

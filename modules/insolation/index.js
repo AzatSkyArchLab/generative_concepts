@@ -479,6 +479,117 @@ function buildAllCollisionMeshes(sections, towers, proj) {
   return meshes;
 }
 
+// ── Corner (section-chain-corner) collision meshes ────
+//
+// Corners are L-shaped (concave) and decompose into the same
+// commercial floor 0 + residential 1..N-1 + roof + LLU stack as
+// regular sections, but the per-cell window pier modeling on a
+// concave perimeter is non-trivial. For ray collision we use a
+// simpler stripe approximation: solid extrusion of the L-polygon
+// for floor 0, then per-floor [solid below sill] + [solid above
+// window head], leaving the window-height band fully open. Result:
+// rays grazing the corner at floor-window heights pass through
+// (matches sections' window zones), but the rest of the corner
+// occludes correctly.
+
+var DEFAULT_CORNER_SECTION_HEIGHT = 28;
+
+function _polyToShape(polyM) {
+  var shape = new THREE.Shape();
+  shape.moveTo(polyM[0][0], polyM[0][1]);
+  for (var i = 1; i < polyM.length; i++) shape.lineTo(polyM[i][0], polyM[i][1]);
+  shape.closePath();
+  return shape;
+}
+
+function buildPolyCollisionRange(polyM, baseZ, topZ) {
+  if (!polyM || polyM.length < 3 || topZ <= baseZ) return null;
+  var shape = _polyToShape(polyM);
+  var geo = new THREE.ExtrudeGeometry(shape, { depth: topZ - baseZ, bevelEnabled: false });
+  geo.translate(0, 0, baseZ);
+  geo.computeBoundingSphere();
+  return new THREE.Mesh(geo, _collisionMat);
+}
+
+function collectChainCorners() {
+  var all = _featureStore.toArray();
+  var out = [];
+  for (var i = 0; i < all.length; i++) {
+    if (all[i].properties && all[i].properties.type === 'section-chain-corner') {
+      out.push(all[i]);
+    }
+  }
+  return out;
+}
+
+function buildCornerCollisionMeshes(corners, proj) {
+  var meshes = [];
+  if (!corners || corners.length === 0) return meshes;
+  for (var ci = 0; ci < corners.length; ci++) {
+    var corner = corners[ci];
+    var p = corner.properties || {};
+    var ringLL = p.polygon;
+    if (!ringLL || ringLL.length < 3) continue;
+    var polyM = [];
+    for (var k = 0; k < ringLL.length; k++) {
+      polyM.push(proj.toMeters(ringLL[k][0], ringLL[k][1]));
+    }
+    if (polyM.length < 3) continue;
+
+    // Resolve params (firstFloorHeight / typical / sectionWidth) from
+    // the chain holder if available — falls back to SectionParams
+    // defaults when not set.
+    var holder = _featureStore.get(p.chainId);
+    var hostProps = (holder && holder.properties) || {};
+    var params = getParams(hostProps);
+    var secH = p.sectionHeight || hostProps.sectionHeight || DEFAULT_CORNER_SECTION_HEIGHT;
+    var fc = computeFloorCount(secH, params.firstFloorHeight, params.typicalFloorHeight);
+    var buildingH = computeBuildingHeight(secH, params.firstFloorHeight, params.typicalFloorHeight);
+
+    // Floor 0 (commercial): solid full footprint
+    var f0 = buildPolyCollisionRange(polyM, 0, params.firstFloorHeight);
+    if (f0) meshes.push(f0);
+
+    // Residential floors: solid stripes outside window band
+    for (var fl = 1; fl < fc; fl++) {
+      var flBase = params.firstFloorHeight + (fl - 1) * params.typicalFloorHeight;
+      var flTop = flBase + params.typicalFloorHeight;
+      var sillZ = flBase + COL_SLAB + COL_WIN_SILL;
+      var winTopZ = sillZ + COL_WIN_H;
+
+      // Floor too short to fit a window → solid all the way
+      if (flTop <= sillZ) {
+        var fSolid = buildPolyCollisionRange(polyM, flBase, flTop);
+        if (fSolid) meshes.push(fSolid);
+        continue;
+      }
+      // Solid below sill
+      var fBelow = buildPolyCollisionRange(polyM, flBase, sillZ);
+      if (fBelow) meshes.push(fBelow);
+      // Solid above window head
+      if (winTopZ < flTop) {
+        var fAbove = buildPolyCollisionRange(polyM, winTopZ, flTop);
+        if (fAbove) meshes.push(fAbove);
+      }
+    }
+
+    // Roof cap (matches section behavior — prevents rays passing through top)
+    var fRoof = buildPolyCollisionRange(polyM, buildingH - 0.3, buildingH);
+    if (fRoof) meshes.push(fRoof);
+
+    // LLU stairwell extension above the roof. Corner LLU footprint is
+    // not reconstructed here — approximate with the full corner
+    // polygon. A stairwell occupies only a fraction of the corner
+    // footprint in reality, but for ray occlusion this is acceptable
+    // (the LLU is small and rays hitting it are mostly already low-
+    // angle late/early sun).
+    var LLU_ABOVE = INSOL_CONFIG.lluAboveRoof;
+    var fLLU = buildPolyCollisionRange(polyM, buildingH, buildingH + LLU_ABOVE);
+    if (fLLU) meshes.push(fLLU);
+  }
+  return meshes;
+}
+
 // ── Facade points (floor 1 only) ──────────────────────
 
 function getOutwardNormal(p1, p2, cx, cy) {
@@ -842,6 +953,17 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
   var rayMinutes = sunData.timeStep;
 
   _collisionMeshes = buildAllCollisionMeshes(sections, collectTowers(), proj);
+
+  // Append corner (section-chain-corner) collision meshes. Corners
+  // are L-shaped extruded volumes that mirror the per-floor solid
+  // stripe pattern of regular sections.
+  var cornerMeshes = buildCornerCollisionMeshes(collectChainCorners(), proj);
+  for (var cmi = 0; cmi < cornerMeshes.length; cmi++) {
+    _collisionMeshes.push(cornerMeshes[cmi]);
+  }
+  if (cornerMeshes.length > 0) {
+    log.debug('[insolation] added ' + cornerMeshes.length + ' corner collision meshes');
+  }
 
   // Append the surrounding-buildings context mesh. This is a single
   // merged geometry covering every building that the metatiler

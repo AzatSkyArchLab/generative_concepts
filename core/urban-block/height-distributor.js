@@ -78,8 +78,26 @@ export var DEFAULT_HEIGHT_RANGES = {
 export var HARD_MIN_FLOORS = 5;
 
 /**
+ * Corner sections (when present, marked `isCorner: true`) are locked
+ * at this floor count regardless of target SPP. Their contribution to
+ * the building stack is fixed: we subtract their SPP from the target
+ * before distributing the remainder among regular sections. 9 floors
+ * = 28.5 m at the standard 4.5/3.0 split.
+ */
+export var CORNER_LOCKED_FLOORS = 9;
+
+/**
+ * Latitudinal-axis pair rule — when a latitudinal axis splits its
+ * sections into two height groups, the difference must be at least
+ * this many floors so the variation reads architecturally.
+ */
+var LAT_PAIR_MIN_FLOOR_DIFF = 3;
+
+/**
  * @param {Array<Object>} sections — mutated in place with `assignedFloors`
- *   and `assignedHeight`.
+ *   and `assignedHeight`. Each entry: { fpId, axisId, orientation,
+ *   footprintArea, centroidY, isCorner? }. Corners are locked at
+ *   CORNER_LOCKED_FLOORS; regular sections distribute the remainder.
  * @param {number} targetSPP
  * @param {Object} params — { firstFloorHeight, typicalFloorHeight }
  * @param {Object} [options]
@@ -103,166 +121,225 @@ export function distributeHeights(sections, targetSPP, params, options) {
     };
   }
 
-  // Per-section bookkeeping
+  // ── Phase 1: lock corners at CORNER_LOCKED_FLOORS ─────────
+  //
+  // Corners (urban-block corners-mode) keep a fixed 9-floor stack so
+  // the L-shaped corner volumes read consistently. Their SPP is
+  // subtracted from the target; the remainder distributes to the
+  // regular sections.
+  var lockedSPP = 0;
+  var regulars = [];
   for (var i = 0; i < sections.length; i++) {
     var s = sections[i];
-    var hMin = s.orientation === 'lon' ? opts.hLonMin : opts.hLatMin;
-    var hMax = s.orientation === 'lon' ? opts.hLonMax : opts.hLatMax;
-    // Start from the orientation-based minimum, but never below the
-    // absolute hard floor (5 floors) — we cannot render residential
-    // sections below that without empty geometry.
-    s._minFloors = Math.max(HARD_MIN_FLOORS, floorsFor(hMin, firstH, typH));
-    s._maxFloors = Math.max(s._minFloors, floorsFor(hMax, firstH, typH));
-    s.assignedFloors = s._minFloors;
+    if (s.isCorner) {
+      s.assignedFloors = CORNER_LOCKED_FLOORS;
+      s.assignedHeight = heightFor(CORNER_LOCKED_FLOORS, firstH, typH);
+      lockedSPP += s.footprintArea * CORNER_LOCKED_FLOORS;
+    } else {
+      regulars.push(s);
+    }
+  }
+  var adjTarget = Math.max(0, targetSPP - lockedSPP);
+
+  // ── Phase 2: group regular sections by axisId ─────────────
+  //
+  // Same-axis sections share one floor count by default. Latitudinal
+  // axes can later split their sections into adjacent pairs with a
+  // height difference of at least LAT_PAIR_MIN_FLOOR_DIFF floors.
+  var axesMap = {};
+  for (var ri = 0; ri < regulars.length; ri++) {
+    var sr = regulars[ri];
+    var aid = sr.axisId;
+    if (!axesMap[aid]) {
+      axesMap[aid] = {
+        axisId: aid,
+        sections: [],
+        totalArea: 0,
+        sumCentroidY: 0,
+        orientation: sr.orientation
+      };
+    }
+    axesMap[aid].sections.push(sr);
+    axesMap[aid].totalArea += sr.footprintArea;
+    axesMap[aid].sumCentroidY += sr.centroidY;
+  }
+  var axes = [];
+  for (var aid2 in axesMap) {
+    if (!axesMap.hasOwnProperty(aid2)) continue;
+    var a0 = axesMap[aid2];
+    a0.avgCentroidY = a0.sumCentroidY / a0.sections.length;
+    var hMin = a0.orientation === 'lon' ? opts.hLonMin : opts.hLatMin;
+    var hMax = a0.orientation === 'lon' ? opts.hLonMax : opts.hLatMax;
+    a0.minFloors = Math.max(HARD_MIN_FLOORS, floorsFor(hMin, firstH, typH));
+    a0.maxFloors = Math.max(a0.minFloors, floorsFor(hMax, firstH, typH));
+    a0.assignedFloors = a0.minFloors;
+    axes.push(a0);
   }
 
-  function currentGBA() {
+  function axisGBA() {
     var sum = 0;
-    for (var j = 0; j < sections.length; j++) {
-      sum += sections[j].footprintArea * sections[j].assignedFloors;
+    for (var j = 0; j < axes.length; j++) {
+      sum += axes[j].totalArea * axes[j].assignedFloors;
     }
     return sum;
   }
 
-  // Sort helpers. Cloned arrays so we can re-sort without reordering
-  // the caller's reference.
-  function byNorthernThenArea(arr) {
-    // Primary: northernmost first. When two sections have the same
-    // centroid Y within a millimetre, prefer the larger footprint —
-    // one extra floor there moves us closer to target per step, so
-    // greedy converges slightly faster.
-    return arr.slice().sort(function (a, b) {
-      var dy = b.centroidY - a.centroidY;
+  // Growth order: meridional axes first (longer / more vertical-friendly),
+  // then latitudinal. Within each orientation group we prefer the
+  // northernmost first. This mirrors the user's priority rule:
+  //   tower > meridional > latitudinal, growth always toward north.
+  // Towers are subtracted from the target before this function is
+  // called, so within the regular pool we just enforce the mer>lat>
+  // by-north order here.
+  function axesByNorthern() {
+    return axes.slice().sort(function (a, b) {
+      var ra = a.orientation === 'lon' ? 0 : 1;
+      var rb = b.orientation === 'lon' ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+      var dy = b.avgCentroidY - a.avgCentroidY;
       if (Math.abs(dy) > 1e-3) return dy;
-      return b.footprintArea - a.footprintArea;
+      return b.totalArea - a.totalArea;
+    });
+  }
+  // Strip order: opposite — latitudinal axes first, then meridional;
+  // and within each, the southernmost first. This protects the
+  // "tall meridional north" silhouette when SPP is over target.
+  function axesBySouthern() {
+    return axes.slice().sort(function (a, b) {
+      var ra = a.orientation === 'lon' ? 1 : 0;
+      var rb = b.orientation === 'lon' ? 1 : 0;
+      if (ra !== rb) return ra - rb;
+      var dy = a.avgCentroidY - b.avgCentroidY;
+      if (Math.abs(dy) > 1e-3) return dy;
+      return b.totalArea - a.totalArea;
     });
   }
 
-  function bySouthernThenArea(arr) {
-    return arr.slice().sort(function (a, b) {
-      var dy = a.centroidY - b.centroidY;
-      if (Math.abs(dy) > 1e-3) return dy;
-      return b.footprintArea - a.footprintArea;
-    });
-  }
-
-  var gba = currentGBA();
-
-  // Case: minimums already overshoot — strip floors from southern
-  // sections until as close to target as possible.
-  if (gba > targetSPP) {
-    var southFirst = bySouthernThenArea(sections);
-    // Repeat until |delta| can't be reduced by -1 floor anywhere.
-    var guard = 0;
-    while (guard < 10000) {
-      guard++;
-      var bestS = null;
-      var bestErr = Math.abs(gba - targetSPP);
+  // ── Phase 3: greedy distribution at axis level ────────────
+  //
+  // Every axis carries one floor count; bumping the axis bumps every
+  // section in it. Northern axes go first when adding so the result
+  // also reads "north taller than south" without an explicit boost.
+  var gba = axisGBA();
+  if (gba > adjTarget && axes.length > 0) {
+    // Strip from southern axes.
+    var southFirst = axesBySouthern();
+    var guardS = 0;
+    while (guardS < 10000) {
+      guardS++;
+      var bestAxisS = null;
+      var bestErrS = Math.abs(gba - adjTarget);
       for (var k = 0; k < southFirst.length; k++) {
-        var s2 = southFirst[k];
-        // Never drop below the hard minimum (5 floors) — see
-        // HARD_MIN_FLOORS rationale.
-        if (s2.assignedFloors <= HARD_MIN_FLOORS) continue;
-        var candidateGba = gba - s2.footprintArea;
-        var err = Math.abs(candidateGba - targetSPP);
-        if (err < bestErr) { bestErr = err; bestS = s2; }
+        var ax = southFirst[k];
+        if (ax.assignedFloors <= HARD_MIN_FLOORS) continue;
+        var c = gba - ax.totalArea;
+        var e = Math.abs(c - adjTarget);
+        if (e < bestErrS) { bestErrS = e; bestAxisS = ax; }
       }
-      if (!bestS) break;
-      bestS.assignedFloors -= 1;
-      gba -= bestS.footprintArea;
+      if (!bestAxisS) break;
+      bestAxisS.assignedFloors -= 1;
+      gba -= bestAxisS.totalArea;
     }
-  } else if (gba < targetSPP) {
-    // Phase A: add +1 floor to the northernmost under-max section
-    // until either target reached or everyone maxed out.
-    var northFirst = byNorthernThenArea(sections);
+  } else if (gba < adjTarget && axes.length > 0) {
+    var northFirst = axesByNorthern();
     var guardA = 0;
-    while (gba < targetSPP && guardA < 10000) {
+    while (gba < adjTarget && guardA < 10000) {
       guardA++;
       var picked = null;
       for (var m = 0; m < northFirst.length; m++) {
-        var s3 = northFirst[m];
-        if (s3.assignedFloors < s3._maxFloors) { picked = s3; break; }
+        var axN = northFirst[m];
+        if (axN.assignedFloors < axN.maxFloors) { picked = axN; break; }
       }
-      if (!picked) break; // all maxed — phase A done
+      if (!picked) break;
       picked.assignedFloors += 1;
-      gba += picked.footprintArea;
+      gba += picked.totalArea;
     }
 
-    // Phase B: if we overshot target by adding a full floor at the
-    // last step, check whether stepping back gives less error. This
-    // is the "±1 floor" termination condition.
-    if (gba > targetSPP) {
-      // Try removing the last added floor from any northern section
-      // if it was in range. We iterate once — the 'overshoot' after
-      // a step is at most one section-worth.
-      var overErr = Math.abs(gba - targetSPP);
+    // Step-back if overshot by one full axis.
+    if (gba > adjTarget) {
+      var overE = Math.abs(gba - adjTarget);
       for (var p = 0; p < northFirst.length; p++) {
-        var s4 = northFirst[p];
-        if (s4.assignedFloors <= s4._minFloors) continue;
-        var candGba = gba - s4.footprintArea;
-        if (Math.abs(candGba - targetSPP) < overErr) {
-          s4.assignedFloors -= 1;
-          gba = candGba;
-          overErr = Math.abs(gba - targetSPP);
+        var axP = northFirst[p];
+        if (axP.assignedFloors <= axP.minFloors) continue;
+        var c2 = gba - axP.totalArea;
+        if (Math.abs(c2 - adjTarget) < overE) {
+          axP.assignedFloors -= 1;
+          gba = c2;
+          overE = Math.abs(gba - adjTarget);
         }
       }
     }
 
-    // Phase C (soft-max breach): target still not reached because
-    // every section already at its MAX. Keep adding floors above
-    // MAX, northern-preferred, until |delta| ≤ one-floor-step.
-    if (gba < targetSPP) {
-      var guardC = 0;
-      while (gba < targetSPP && guardC < 10000) {
-        guardC++;
-        // Among all sections find the one whose +1 floor produces
-        // the smallest |newGBA - target|. If adding anywhere
-        // overshoots and makes error worse, stop.
-        var best = null;
-        var bestErrC = Math.abs(gba - targetSPP);
-        // Iterate northern-first so ties favour northern sections.
-        for (var q = 0; q < northFirst.length; q++) {
-          var s5 = northFirst[q];
-          var newGba = gba + s5.footprintArea;
-          var e = Math.abs(newGba - targetSPP);
-          if (e < bestErrC - 1e-6) {
-            bestErrC = e;
-            best = s5;
-          }
-        }
-        if (!best) break;
-        best.assignedFloors += 1;
-        gba += best.footprintArea;
-      }
+    // Soft-max breach intentionally disabled: hard-cap at hLat/hLon
+    // max (55m / 75m). Sections must never exceed tower height (112m
+    // by default), so going over the orientation max is forbidden.
+    // If SPP target can't be met within max, accept the positive
+    // delta — the user explicitly tolerates that.
+  }
+
+  // ── Phase 4: optional latitudinal pair-split ──────────────
+  //
+  // For any latitudinal axis with an EVEN number of sections, allow
+  // the assigned floor count to split into two adjacent groups with
+  // a difference of at least LAT_PAIR_MIN_FLOOR_DIFF floors. The
+  // northern half (or southern half rotated to north preference) gets
+  // the higher count. Skipped here for simplicity — every section in
+  // an axis takes the axis-level count. Hook reserved for future
+  // refinement; baseline already satisfies "neighbour same height"
+  // because every section in an axis is neighbour-of-neighbour.
+  // (A pair-split implementation would re-distribute floors WITHIN an
+  // axis, keeping its sum-of-floors equal to N × axis.assignedFloors
+  // so the SPP target stays put.)
+
+  // ── Phase 5: write the per-axis floor count to every section ──
+  for (var ax2 = 0; ax2 < axes.length; ax2++) {
+    var aF = axes[ax2];
+    for (var sx = 0; sx < aF.sections.length; sx++) {
+      var sS = aF.sections[sx];
+      sS.assignedFloors = aF.assignedFloors;
+      sS.assignedHeight = heightFor(aF.assignedFloors, firstH, typH);
+      sS._minFloors = aF.minFloors;
+      sS._maxFloors = aF.maxFloors;
     }
   }
 
-  // Fill in final heights + count how many sections broke their
-  // orientation max (feasibility signal).
+  // ── Phase 6: final SPP + per-section dump ─────────────────
+  function totalGBA() {
+    var sum = 0;
+    for (var t = 0; t < sections.length; t++) {
+      sum += sections[t].footprintArea * (sections[t].assignedFloors || 0);
+    }
+    return sum;
+  }
+
   var aboveMaxCount = 0;
   var perSection = [];
   for (var r = 0; r < sections.length; r++) {
     var s6 = sections[r];
-    s6.assignedHeight = heightFor(s6.assignedFloors, firstH, typH);
-    if (s6.assignedFloors > s6._maxFloors) aboveMaxCount++;
+    if (!s6.assignedHeight && s6.assignedFloors) {
+      s6.assignedHeight = heightFor(s6.assignedFloors, firstH, typH);
+    }
+    var minF = s6._minFloors != null ? s6._minFloors : (s6.isCorner ? CORNER_LOCKED_FLOORS : HARD_MIN_FLOORS);
+    var maxF = s6._maxFloors != null ? s6._maxFloors : (s6.isCorner ? CORNER_LOCKED_FLOORS : minF);
+    if (!s6.isCorner && s6.assignedFloors > maxF) aboveMaxCount++;
     perSection.push({
       fpId: s6.fpId, axisId: s6.axisId, orientation: s6.orientation,
       footprintArea: s6.footprintArea, centroidY: s6.centroidY,
       assignedFloors: s6.assignedFloors, assignedHeight: s6.assignedHeight,
-      minFloors: s6._minFloors, maxFloors: s6._maxFloors,
-      aboveMax: s6.assignedFloors > s6._maxFloors
+      minFloors: minF, maxFloors: maxF,
+      isCorner: !!s6.isCorner,
+      aboveMax: !s6.isCorner && s6.assignedFloors > maxF
     });
-    // Remove scratch fields from the input objects.
     delete s6._minFloors;
     delete s6._maxFloors;
   }
 
-  var achieved = currentGBA();
+  var achieved = totalGBA();
   return {
     achievedSPP: achieved,
     deltaSPP: achieved - targetSPP,
     perSection: perSection,
-    feasible: Math.abs(achieved - targetSPP) < 0.05 * targetSPP,  // within 5%
+    feasible: Math.abs(achieved - targetSPP) < 0.05 * targetSPP,
     aboveMaxCount: aboveMaxCount
   };
 }

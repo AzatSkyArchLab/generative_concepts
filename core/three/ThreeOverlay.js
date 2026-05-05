@@ -344,6 +344,55 @@ export class ThreeOverlay {
     if (this._map) this._map.triggerRepaint();
   }
 
+  /**
+   * Set the surrounding-buildings shadow stand-in mesh. The actual
+   * building visuals are rendered by MapLibre's fill-extrusion layer
+   * (managed by modules/metatiler); this Three.js mesh exists purely
+   * to receive sun shadows on the side faces.
+   *
+   * Material is `THREE.ShadowMaterial`, which renders fully transparent
+   * EXCEPT where shadows fall — so the MapLibre buildings stay fully
+   * visible underneath, with shadow patches darkening their walls.
+   *
+   * Pass `null` (or empty positions) to remove the existing mesh.
+   *
+   * @param {Float32Array} positions - flat triangle vertices in meters
+   *   relative to overlay origin (matches buildContextMeshData output)
+   * @param {Uint16Array|Uint32Array} indices
+   */
+  setContextBuildingsShadow(positions, indices) {
+    if (this._contextShadowMesh) {
+      this._scene.remove(this._contextShadowMesh);
+      if (this._contextShadowMesh.geometry) this._contextShadowMesh.geometry.dispose();
+      this._contextShadowMesh = null;
+    }
+    if (!positions || positions.length === 0) {
+      if (this._map) this._map.triggerRepaint();
+      return;
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (indices) geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+
+    if (!this._contextShadowMat) {
+      this._contextShadowMat = new THREE.ShadowMaterial({
+        color: 0x000000, opacity: 0.45, depthWrite: false
+      });
+    }
+    var mesh = new THREE.Mesh(geo, this._contextShadowMat);
+    mesh.receiveShadow = true;
+    mesh.castShadow = true;  // also blocks rays so own/adjacent buildings shadow each other
+    mesh.userData.whiteModelExtra = true;
+    mesh.userData.skipWhitewash = true;
+    this._contextShadowMesh = mesh;
+    // Apply current whitewash state immediately (shows when WM is on).
+    this._whitewashSubtree(mesh, this._whitewashed);
+    this._scene.add(mesh);
+    if (this._map) this._map.triggerRepaint();
+  }
+
   clear() {
     var toRemove = [];
     for (var i = 0; i < this._scene.children.length; i++) {

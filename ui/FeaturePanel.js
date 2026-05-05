@@ -83,6 +83,21 @@ export class FeaturePanel {
     initLayersPanelEvents();
   }
 
+  /**
+   * Returns the urban-block features in the current selection. Empty
+   * array if no block is selected. The toggles below act on these
+   * blocks only — when none is selected, they act on the global
+   * default that drives the next-created block.
+   */
+  _selectedBlocks() {
+    var out = [];
+    for (var i = 0; i < this._selectedIds.length; i++) {
+      var f = this._featureStore.get(this._selectedIds[i]);
+      if (f && f.properties && f.properties.urbanBlock) out.push(f);
+    }
+    return out;
+  }
+
   _renderAxisOptions() {
     var el = document.getElementById('axis-options-section');
     if (!el) return;
@@ -90,28 +105,86 @@ export class FeaturePanel {
     var has = this._hasSectionOrBlock();
     var alreadyRendered = el.innerHTML.trim().length > 0;
 
-    // Short-circuit: no state transition, keep the DOM as-is. This
-    // preserves user interactions (focus, listeners, toggle state)
-    // when features:changed fires on buffer-slider rebuilds.
-    if (has && alreadyRendered) return;
+    // Short-circuit: structure unchanged. Indicators are refreshed
+    // separately via _syncAxisOptionsIndicators() so selection
+    // changes drive ON/OFF state without losing event listeners.
+    if (has && alreadyRendered) {
+      this._syncAxisOptionsIndicators();
+      return;
+    }
     if (!has && !alreadyRendered) return;
     if (!has) { el.innerHTML = ''; return; }
 
-    // Transition: nothing → rendered. Build the markup once.
-    var initialOn = false;
-    try {
-      if (typeof window !== 'undefined' && window.__UB_USE_GAP__ != null) initialOn = !!window.__UB_USE_GAP__;
-    } catch (_e) { /* SSR-safe */ }
     var h = '<div class="props-divider"></div>';
     h += '<div class="param-row" id="ax-gap-row" style="cursor:pointer">';
     h += '<label class="param-label" style="cursor:pointer">Gap on axes &gt; 150m</label>';
-    h += '<div class="param-input-wrap"><span id="ax-gap-indicator" style="font-size:11px;color:' + (initialOn ? 'var(--primary)' : 'var(--text-muted)') + ';font-weight:' + (initialOn ? '700' : '400') + '">' + (initialOn ? 'ON' : 'OFF') + '</span></div></div>';
+    h += '<div class="param-input-wrap"><span id="ax-gap-indicator" style="font-size:11px"></span></div></div>';
+    h += '<div class="param-row" id="ax-corners-row" style="cursor:pointer">';
+    h += '<label class="param-label" style="cursor:pointer">Corners (urban block)</label>';
+    h += '<div class="param-input-wrap"><span id="ax-corners-indicator" style="font-size:11px"></span></div></div>';
+    h += '<div class="param-row" id="ax-towers-row" style="cursor:pointer">';
+    h += '<label class="param-label" style="cursor:pointer">Towers (urban block)</label>';
+    h += '<div class="param-input-wrap"><span id="ax-towers-indicator" style="font-size:11px"></span></div></div>';
     el.innerHTML = h;
-    var row = document.getElementById('ax-gap-row');
-    if (!row) return;
-    row.addEventListener('click', function () {
+    var gapRow = document.getElementById('ax-gap-row');
+    if (gapRow) gapRow.addEventListener('click', function () {
       eventBus.emit('axis-options:gap:toggle');
     });
+    var cornersRow = document.getElementById('ax-corners-row');
+    if (cornersRow) cornersRow.addEventListener('click', function () {
+      eventBus.emit('axis-options:corners:toggle');
+    });
+    var towersRow = document.getElementById('ax-towers-row');
+    if (towersRow) towersRow.addEventListener('click', function () {
+      eventBus.emit('axis-options:towers:toggle');
+    });
+    this._syncAxisOptionsIndicators();
+  }
+
+  _syncAxisOptionsIndicators() {
+    var blocks = this._selectedBlocks();
+    var selected = blocks.length > 0;
+    function flagFor(blocksArr, key, globalKey) {
+      if (blocksArr.length > 0) return blocksArr[0].properties[key] === true;
+      try {
+        if (typeof window !== 'undefined' && window[globalKey] != null) return !!window[globalKey];
+      } catch (_e) { /* no-op */ }
+      return false;
+    }
+    var gap = flagFor(blocks, 'useGap', '__UB_USE_GAP__');
+    var corners = flagFor(blocks, 'useCorners', '__UB_USE_CORNERS__');
+    var towers = flagFor(blocks, 'useTowers', '__UB_USE_TOWERS__');
+
+    function paint(spanId, on) {
+      var sp = document.getElementById(spanId);
+      if (!sp) return;
+      sp.textContent = on ? 'ON' : 'OFF';
+      sp.style.color = on ? 'var(--primary)' : 'var(--text-muted)';
+      sp.style.fontWeight = on ? '700' : '400';
+    }
+    paint('ax-gap-indicator', gap);
+    paint('ax-corners-indicator', corners);
+    paint('ax-towers-indicator', towers);
+
+    // Subtitle hint: clarify whether toggles act on selected block or
+    // the next-created default. Replace existing hint to avoid stacking.
+    var el = document.getElementById('axis-options-section');
+    if (!el) return;
+    var hint = el.querySelector('.ax-opt-hint');
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.className = 'ax-opt-hint';
+      hint.style.cssText = 'padding:2px 12px 6px;font-size:10px;color:var(--text-muted)';
+      el.insertBefore(hint, el.firstChild ? el.firstChild.nextSibling : null);
+    }
+    if (selected) {
+      var label = blocks.length === 1
+        ? 'block ' + blocks[0].properties.id.slice(0, 6)
+        : blocks.length + ' blocks';
+      hint.textContent = 'Toggles affect: ' + label;
+    } else {
+      hint.textContent = 'Toggles affect: default for next block';
+    }
   }
 
   _renderBufferSectionConditional() {
@@ -218,6 +291,7 @@ export class FeaturePanel {
     eventBus.on('feature:selected', function (d) {
       self._selectedIds = [d.id]; self._editAxisId = null; self._editSelectedIndices = [];
       self._updateList(); self._updateProps(); self._refreshInsolButton();
+      self._syncAxisOptionsIndicators();
     });
     eventBus.on('feature:multiselect', function (d) {
       var idx = self._selectedIds.indexOf(d.id);
@@ -225,10 +299,26 @@ export class FeaturePanel {
       else self._selectedIds.push(d.id);
       self._editAxisId = null; self._editSelectedIndices = [];
       self._updateList(); self._updateProps(); self._refreshInsolButton();
+      self._syncAxisOptionsIndicators();
     });
     eventBus.on('feature:deselected', function () {
       self._selectedIds = []; self._editAxisId = null; self._editSelectedIndices = [];
       self._updateList(); self._updateProps(); self._refreshInsolButton();
+      self._syncAxisOptionsIndicators();
+    });
+    // Double-click on a corner — focus its sectionHeight input on the
+    // next render. Selection is handled separately by sidebar:feature:click.
+    eventBus.on('corner:edit:focus', function (d) {
+      if (!d || !d.id) return;
+      self._pendingCornerFocus = d.id;
+      // The selection event will trigger _updateProps which renders
+      // the input; if it's already in the DOM, focus immediately.
+      var existing = document.getElementById('corner-edit-height');
+      if (existing && existing.getAttribute('data-corner-id') === d.id) {
+        existing.focus();
+        existing.select();
+        self._pendingCornerFocus = null;
+      }
     });
     eventBus.on('section:edit-mode', function (d) {
       self._editAxisId = d.axisId; self._editSelectedIndices = [];
@@ -424,12 +514,14 @@ export class FeaturePanel {
     var sectionFeatures = []; var lineFeatures = []; var towerFeatures = [];
     var blockFeature = null; var roadFeatures = [];
     var chainFeatures = [];
+    var cornerFeatures = [];
     for (var i = 0; i < this._selectedIds.length; i++) {
       var f = this._featureStore.get(this._selectedIds[i]);
       if (!f) continue;
       if (f.properties.type === 'section-axis') sectionFeatures.push(f);
       else if (f.properties.type === 'tower-axis') towerFeatures.push(f);
       else if (f.properties.type === 'section-chain') chainFeatures.push(f);
+      else if (f.properties.type === 'section-chain-corner') cornerFeatures.push(f);
       else if (f.properties.urbanBlock) blockFeature = f;
       else if (f.properties.type === 'road') roadFeatures.push(f);
       else if (f.geometry.type === 'LineString') lineFeatures.push(f);
@@ -442,6 +534,7 @@ export class FeaturePanel {
     if (sectionFeatures.length > 0) html += this._renderSectionProps(sectionFeatures);
     if (towerFeatures.length > 0) html += this._renderTowerProps(towerFeatures);
     if (chainFeatures.length > 0) html += this._renderChainProps(chainFeatures);
+    if (cornerFeatures.length > 0) html += this._renderCornerProps(cornerFeatures);
     if (roadFeatures.length > 0) html += this._renderRoadProps(roadFeatures);
     if (lineFeatures.length > 0) html += this._renderLineProps(lineFeatures);
     propsEl.innerHTML = html;
@@ -449,6 +542,7 @@ export class FeaturePanel {
     this._bindBlockInputs(blockFeature);
     this._bindRoadInputs(roadFeatures);
     this._bindChainInputs(chainFeatures);
+    this._bindCornerInputs(cornerFeatures);
     // Show ghost contour if block has original (pre-simplification) polygon
     if (blockFeature) {
       this._updateGhostContour(blockFeature);
@@ -1029,6 +1123,59 @@ export class FeaturePanel {
         commit(id, v);
         // updated feature will trigger features:changed → updateProps re-renders
       });
+    }
+  }
+
+  _renderCornerProps(features) {
+    var f = features[0];
+    var p = f.properties;
+    var holder = this._featureStore.get(p.chainId);
+    var defaultH = 28;
+    var h = p.sectionHeight != null
+      ? p.sectionHeight
+      : (holder && holder.properties.sectionHeight != null ? holder.properties.sectionHeight : defaultH);
+    var floors = Math.max(1, 1 + Math.round((h - 4.5) / 3));
+    var label = features.length === 1
+      ? 'Corner ' + p.id.slice(0, 6)
+      : features.length + ' corners';
+    var modeLabel = p.mode || '—';
+    var armA = p.armA != null ? p.armA.toFixed(1) : '—';
+    var armB = p.armB != null ? p.armB.toFixed(1) : '—';
+
+    var html = '<div class="props-section"><div class="props-header">' + label + '</div>';
+    html += '<div class="props-computed">';
+    html += '<div class="props-row"><span class="props-label">Mode</span><span class="props-value">' + modeLabel + '</span></div>';
+    html += '<div class="props-row"><span class="props-label">Arm A</span><span class="props-value">' + armA + ' m</span></div>';
+    html += '<div class="props-row"><span class="props-label">Arm B</span><span class="props-value">' + armB + ' m</span></div>';
+    html += '<div class="props-row"><span class="props-label">Floors</span><span class="props-value">' + floors + '</span></div>';
+    html += '</div>';
+    html += '<div class="props-divider"></div>';
+    html += '<div class="param-row"><label class="param-label">Section height</label>';
+    html += '<div class="param-input-wrap">';
+    html += '<input type="number" class="param-input" id="corner-edit-height" data-corner-id="' + p.id + '"';
+    html += ' value="' + h + '" step="1" min="5" max="75">';
+    html += '<span class="param-unit">m</span></div></div>';
+    html += '</div>';
+    return html;
+  }
+
+  _bindCornerInputs(cornerFeatures) {
+    if (!cornerFeatures || cornerFeatures.length === 0) return;
+    var input = document.getElementById('corner-edit-height');
+    if (!input) return;
+    function commit() {
+      var id = input.getAttribute('data-corner-id');
+      var v = parseFloat(input.value);
+      if (isNaN(v) || v <= 0) return;
+      eventBus.emit('corner:sectionHeight:set', { id: id, value: v });
+    }
+    input.addEventListener('change', commit);
+    // Honor focus request from dblclick on the corner.
+    if (this._pendingCornerFocus &&
+        this._pendingCornerFocus === input.getAttribute('data-corner-id')) {
+      input.focus();
+      input.select();
+      this._pendingCornerFocus = null;
     }
   }
 

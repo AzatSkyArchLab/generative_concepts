@@ -874,6 +874,376 @@ export function buildTopSlab(footprintM, buildingH, slabT) {
   return new THREE.Mesh(geo, [ROOF_SLAB_BODY_MAT, ROOF_TOP_MAT]);
 }
 
+// ── Corner detailed floor (section-chain) ────────────
+
+// Outline-relative geometry helpers, shared by the corner floor 0
+// and the upcoming corner upper-floors / LLU-roof builders.
+
+function _outlineSegments(outline) {
+  if (!outline || outline.length < 2) return [];
+  // Drop trailing duplicate (closed-ring representation).
+  var pts = outline.slice();
+  var a = pts[0], z = pts[pts.length - 1];
+  if (Math.abs(a[0] - z[0]) < 1e-9 && Math.abs(a[1] - z[1]) < 1e-9) pts.pop();
+  var n = pts.length;
+  var out = [];
+  for (var i = 0; i < n; i++) {
+    var p = pts[i], q = pts[(i + 1) % n];
+    if (Math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-6) out.push([p, q]);
+  }
+  return out;
+}
+
+function _pointOnSegment(p, a, b, eps) {
+  var dx = b[0] - a[0], dy = b[1] - a[1];
+  var len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 1e-9) return Math.hypot(p[0] - a[0], p[1] - a[1]) <= eps;
+  var t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (len * len);
+  if (t < -1e-9 || t > 1 + 1e-9) return false;
+  t = Math.max(0, Math.min(1, t));
+  var px = a[0] + t * dx, py = a[1] + t * dy;
+  return Math.hypot(p[0] - px, p[1] - py) <= eps;
+}
+
+function _edgeOnOutline(p1, p2, segments) {
+  var EPS = 0.05;
+  for (var i = 0; i < segments.length; i++) {
+    var a = segments[i][0], b = segments[i][1];
+    if (_pointOnSegment(p1, a, b, EPS) && _pointOnSegment(p2, a, b, EPS)) return true;
+  }
+  return false;
+}
+
+// Signed area of a polygon → winding sign (CCW = +1, CW = -1).
+// Used to derive outward normals robustly for both convex and concave
+// polygons (centroid-based heuristics fail for concave shapes — e.g.
+// the L-outline of an inner corner).
+function _polyWinding(poly) {
+  var s = 0;
+  for (var i = 0; i < poly.length; i++) {
+    var a = poly[i], b = poly[(i + 1) % poly.length];
+    s += (a[0] * b[1] - b[0] * a[1]);
+  }
+  return s >= 0 ? 1 : -1;
+}
+
+function _outwardNormalByWinding(p1, p2, winding) {
+  var dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+  var len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 1e-9) return null;
+  // CCW: interior is on the LEFT of each edge → outward is on the RIGHT.
+  // CW: opposite. (dy, -dx) is right-of-edge direction.
+  if (winding === 1) return [dy / len, -dx / len];
+  return [-dy / len, dx / len];
+}
+
+function _extrudePolyMesh(poly, baseZ, topZ, mat) {
+  if (!poly || poly.length < 3 || topZ <= baseZ) return null;
+  var shape = new THREE.Shape();
+  shape.moveTo(poly[0][0], poly[0][1]);
+  for (var i = 1; i < poly.length; i++) shape.lineTo(poly[i][0], poly[i][1]);
+  shape.closePath();
+  var geo = new THREE.ExtrudeGeometry(shape, { depth: topZ - baseZ, bevelEnabled: false });
+  geo.translate(0, 0, baseZ);
+  geo.computeVertexNormals();
+  return new THREE.Mesh(geo, mat);
+}
+
+/**
+ * Detailed corner floor 0 — concrete-grey body with storefronts on
+ * exterior edges, mirroring buildDetailedFloor0 / buildDetailedTowerFloor0.
+ * Picks the centre LLU cell as the entrance host (longest exterior edge
+ * gets the door + canopy); other LLU cells get plain storefronts.
+ *
+ * @param {Array<{poly: Array<[number,number]>, type: string, meta?: string}>} cells
+ * @param {Array<[number,number]>} outline - L-shaped perimeter
+ * @param {number} baseZ
+ * @param {number} topZ
+ */
+export function buildDetailedCornerFloor0(cells, outline, baseZ, topZ) {
+  var group = new THREE.Group();
+  var GAP = 0.05;
+  var EXT_T = 0.6;
+
+  var oEdges = _outlineSegments(outline);
+
+  // Pick the entrance-hosting LLU cell: the centre of the LLU run.
+  var lluIdx = [];
+  for (var i = 0; i < cells.length; i++) {
+    if (cells[i] && cells[i].type === 'llu') lluIdx.push(i);
+  }
+  var entranceCellIdx = lluIdx.length > 0 ? lluIdx[Math.floor(lluIdx.length / 2)] : -1;
+
+  for (var ci = 0; ci < cells.length; ci++) {
+    var c = cells[ci];
+    if (!c || !c.poly || c.poly.length < 3) continue;
+    var poly = c.poly;
+    var n = poly.length;
+
+    // Per-edge inset: EXT_T on exterior, GAP on interior. The strip
+    // between the inset cell and the original outline gets filled by
+    // the storefront/entrance/solid wall meshes below — same idiom
+    // as buildDetailedFloor0 for sections.
+    var margins = [];
+    var exterior = [];
+    for (var ei = 0; ei < n; ei++) {
+      var p1 = poly[ei], p2 = poly[(ei + 1) % n];
+      var ext = _edgeOnOutline(p1, p2, oEdges);
+      exterior.push(ext);
+      margins.push(ext ? EXT_T : GAP);
+    }
+
+    var ip = insetPolyPerEdge(poly, margins);
+    var bodyMesh = _extrudePolyMesh(ip, baseZ, topZ, GROUND_FLOOR_MAT);
+    if (bodyMesh) group.add(bodyMesh);
+
+    // For the entrance cell, host the door on the longest exterior edge
+    // so it reads centred on the building front.
+    var entranceEdgeIdx = -1;
+    if (ci === entranceCellIdx) {
+      var bestLen = -1;
+      for (var ei2 = 0; ei2 < n; ei2++) {
+        if (!exterior[ei2]) continue;
+        var a = poly[ei2], b = poly[(ei2 + 1) % n];
+        var d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (d > bestLen) { bestLen = d; entranceEdgeIdx = ei2; }
+      }
+    }
+
+    var winding = _polyWinding(poly);
+    for (var ei = 0; ei < n; ei++) {
+      if (!exterior[ei]) continue;
+      var p1 = poly[ei], p2 = poly[(ei + 1) % n];
+      var nrm = _outwardNormalByWinding(p1, p2, winding);
+      if (!nrm) continue;
+      var nx = nrm[0], ny = nrm[1];
+
+      if (ci === entranceCellIdx && ei === entranceEdgeIdx) {
+        group.add(buildEntranceGroup(p1, p2, nx, ny, baseZ, topZ));
+      } else if (c.type === 'corridor') {
+        // Corridors only touch the outline at the polyline endpoints
+        // (rare); render as solid grey there to avoid an off glass strip.
+        group.add(buildSolidGroundWall(p1, p2, nx, ny, baseZ, topZ));
+      } else {
+        // apartment / non-standard / llu (non-entrance)
+        group.add(buildStorefrontFacade(p1, p2, nx, ny, baseZ, topZ));
+      }
+    }
+  }
+
+  // GROUND_FLOOR_MAT already carries skipWhitewash on the material, but
+  // the storefront / entrance helpers add line-segment edges and glass
+  // sub-meshes. Stamp the flag on every Mesh so the concrete portion
+  // stays grey; transparent glass is auto-skipped by ThreeOverlay.
+  tagSkipWhitewash(group);
+  return group;
+}
+
+/**
+ * Detailed corner residential floor — for floors 2..N-1 in white-model
+ * mode. Cell-aware variant of buildDetailedFloor1 that respects the
+ * L-shaped outline. apartment / non-standard cells get a residential
+ * facade window on each exterior edge; LLU cells get the grey LLU
+ * solid wall (MATERIALS.llu via the LLU_WALL_SENTINEL route).
+ *
+ * @param {Array<{poly, type, meta}>} cells
+ * @param {Array<[number,number]>} outline
+ * @param {number} baseZ
+ * @param {number} topZ
+ */
+export function buildDetailedCornerFloor1(cells, outline, baseZ, topZ) {
+  var group = new THREE.Group();
+  var GAP = 0.05;
+  var EXT_T = 0.6;
+  var SLAB = 0.3;
+  var floorZ = baseZ + SLAB;
+
+  var oEdges = _outlineSegments(outline);
+
+  for (var ci = 0; ci < cells.length; ci++) {
+    var c = cells[ci];
+    if (!c || !c.poly || c.poly.length < 3) continue;
+    var poly = c.poly;
+    var n = poly.length;
+
+    var margins = [];
+    var exterior = [];
+    for (var ei = 0; ei < n; ei++) {
+      var p1 = poly[ei], p2 = poly[(ei + 1) % n];
+      var ext = _edgeOnOutline(p1, p2, oEdges);
+      exterior.push(ext);
+      margins.push(ext ? EXT_T : GAP);
+    }
+    var ip = insetPolyPerEdge(poly, margins);
+
+    var mat;
+    if (c.type === 'llu') mat = MATERIALS.llu;
+    else if (c.type === 'corridor') mat = MATERIALS.corridor;
+    else mat = MATERIALS.apartment;
+
+    var cellMesh = _extrudePolyMesh(ip, baseZ, topZ, mat);
+    if (cellMesh) group.add(cellMesh);
+
+    // Top cap (subtle slab edge between floors). Skip for LLU so the
+    // stack reads as one continuous grey volume from base to roof.
+    if (c.type !== 'llu' && c.type !== 'corridor') {
+      var capMesh = _extrudePolyMesh(ip, topZ - 0.001, topZ, TOP_CAP_MAT);
+      if (capMesh) group.add(capMesh);
+    }
+
+    var winding = _polyWinding(poly);
+    for (var ei = 0; ei < n; ei++) {
+      if (!exterior[ei]) continue;
+      var p1 = poly[ei], p2 = poly[(ei + 1) % n];
+      var nrm = _outwardNormalByWinding(p1, p2, winding);
+      if (!nrm) continue;
+      var nx = nrm[0], ny = nrm[1];
+
+      if (c.type === 'apartment' || c.type === 'non-standard') {
+        group.add(buildFacadeWithWindow(p1, p2, nx, ny, floorZ, topZ, null));
+      } else if (c.type === 'llu') {
+        group.add(buildSolidExtWall(p1, p2, nx, ny, floorZ, topZ, LLU_WALL_SENTINEL));
+      } else {
+        // corridor on outline (rare) — solid grey
+        group.add(buildSolidExtWall(p1, p2, nx, ny, floorZ, topZ, null));
+      }
+    }
+  }
+
+  return group;
+}
+
+/**
+ * LLU roof extrusion built from a cells array. Same idea as
+ * buildLLURoof / buildTowerLLURoof but accepts the corner cells
+ * directly. Extrudes every LLU cell from baseZ to baseZ + lluHeight
+ * with MATERIALS.llu (skipWhitewash → stays grey in white-model).
+ */
+export function buildLLURoofFromCells(cells, baseZ, lluHeight) {
+  if (!lluHeight) lluHeight = 2.5;
+  var group = new THREE.Group();
+  var topZ = baseZ + lluHeight;
+  for (var i = 0; i < cells.length; i++) {
+    var c = cells[i];
+    if (!c || c.type !== 'llu' || !c.poly || c.poly.length < 3) continue;
+    var mesh = _extrudePolyMesh(c.poly, baseZ, topZ, MATERIALS.llu);
+    if (mesh) group.add(mesh);
+  }
+  return group;
+}
+
+// ── Outline-only "hollow" floors ─────────────────────
+// For shapes where cell-level inset is fragile (concave outlines like
+// inner-corner L-shapes), render walls + a floor slab directly on the
+// outline. No cell-box extrude → no concave-inset bugs. Looks correct
+// from outside; the interior is hollow but capped by the next floor's
+// slab from above.
+
+function _shapeFromPoly(poly) {
+  var shape = new THREE.Shape();
+  shape.moveTo(poly[0][0], poly[0][1]);
+  for (var i = 1; i < poly.length; i++) shape.lineTo(poly[i][0], poly[i][1]);
+  shape.closePath();
+  return shape;
+}
+
+/**
+ * Hollow ground floor (cocoll) for an arbitrary outline. Concrete
+ * plinth slab + storefronts on every edge. Used as the corner-solid
+ * fallback so inner corners read with the same retail-glass language
+ * as outer corners and regular sections.
+ */
+export function buildHollowGroundFloor(polyM, baseZ, topZ) {
+  var group = new THREE.Group();
+
+  // Plinth slab at the bottom (floor of the cocoll). 0.2 m thick — just
+  // enough to read as a foundation when the camera looks underneath.
+  var slabGeo = new THREE.ExtrudeGeometry(_shapeFromPoly(polyM), {
+    depth: 0.2, bevelEnabled: false
+  });
+  slabGeo.translate(0, 0, baseZ);
+  slabGeo.computeVertexNormals();
+  group.add(new THREE.Mesh(slabGeo, GROUND_FLOOR_MAT));
+
+  // Storefronts on every outline edge.
+  var winding = _polyWinding(polyM);
+  for (var i = 0; i < polyM.length; i++) {
+    var p1 = polyM[i], p2 = polyM[(i + 1) % polyM.length];
+    var nrm = _outwardNormalByWinding(p1, p2, winding);
+    if (!nrm) continue;
+    group.add(buildStorefrontFacade(p1, p2, nrm[0], nrm[1], baseZ, topZ));
+  }
+
+  tagSkipWhitewash(group);
+  return group;
+}
+
+/**
+ * Hollow residential floor for an arbitrary outline. Floor slab +
+ * walls with residential windows on every edge. No cell box → safe
+ * for concave outlines.
+ */
+export function buildHollowResidentialFloor(polyM, baseZ, topZ) {
+  var SLAB = 0.3;
+  var floorZ = baseZ + SLAB;
+  var group = new THREE.Group();
+
+  // Floor slab — top of the slab is at floorZ. Visible from below
+  // through the floor 0 storefronts; from above it's hidden under
+  // the next floor's residential cells / slab.
+  var slabGeo = new THREE.ExtrudeGeometry(_shapeFromPoly(polyM), {
+    depth: SLAB, bevelEnabled: false
+  });
+  slabGeo.translate(0, 0, baseZ);
+  slabGeo.computeVertexNormals();
+  group.add(new THREE.Mesh(slabGeo, MATERIALS.corridor));
+
+  // Residential window on every outline edge.
+  var winding = _polyWinding(polyM);
+  for (var i = 0; i < polyM.length; i++) {
+    var p1 = polyM[i], p2 = polyM[(i + 1) % polyM.length];
+    var nrm = _outwardNormalByWinding(p1, p2, winding);
+    if (!nrm) continue;
+    group.add(buildFacadeWithWindow(p1, p2, nrm[0], nrm[1], floorZ, topZ, null));
+  }
+  return group;
+}
+
+/**
+ * Top roof slab for an arbitrary outline (L-shape, polygon, …). Uses
+ * THREE.Shape + ExtrudeGeometry for the body, then a flat ShapeGeometry
+ * cap nudged 5 mm above the body's top face for the lighter "membrane"
+ * colour. The cap ALWAYS wins z-test from above (camera looking down
+ * at the roof), and the 5 mm gap is invisible from any practical angle.
+ */
+export function buildCornerTopSlab(outline, buildingH, slabT) {
+  if (!slabT) slabT = 0.5;
+  var topZ = buildingH + slabT;
+  var pts = outline.slice();
+  if (pts.length >= 2) {
+    var a = pts[0], z = pts[pts.length - 1];
+    if (Math.abs(a[0] - z[0]) < 1e-9 && Math.abs(a[1] - z[1]) < 1e-9) pts.pop();
+  }
+  if (pts.length < 3) return new THREE.Group();
+
+  var group = new THREE.Group();
+  var shape = new THREE.Shape();
+  shape.moveTo(pts[0][0], pts[0][1]);
+  for (var i = 1; i < pts.length; i++) shape.lineTo(pts[i][0], pts[i][1]);
+  shape.closePath();
+
+  var bodyGeo = new THREE.ExtrudeGeometry(shape, { depth: slabT, bevelEnabled: false });
+  bodyGeo.translate(0, 0, buildingH);
+  bodyGeo.computeVertexNormals();
+  group.add(new THREE.Mesh(bodyGeo, ROOF_SLAB_BODY_MAT));
+
+  var capGeo = new THREE.ShapeGeometry(shape);
+  capGeo.translate(0, 0, topZ + 0.005);
+  capGeo.computeVertexNormals();
+  group.add(new THREE.Mesh(capGeo, ROOF_TOP_MAT));
+  return group;
+}
+
 // ── Tower detailed floor ─────────────────────────────
 
 /**

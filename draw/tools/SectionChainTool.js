@@ -223,23 +223,25 @@ export class SectionChainTool extends BaseTool {
  * Returns an array of AddFeatureCommand instances. Caller wraps in
  * CompoundCommand if it wants atomic undo.
  */
-export function buildChainCommands(featureStore, proj, ptsLL, ptsM, layout, width, side, chainId) {
+export function buildChainCommands(featureStore, proj, ptsLL, ptsM, layout, width, side, chainId, blockId) {
   var commands = [];
   if (!chainId) chainId = crypto.randomUUID();
 
   // 1) Chain holder
+  var holderProps = {
+    id: chainId,
+    type: 'section-chain',
+    createdAt: new Date().toISOString(),
+    secWidth: width,
+    secSide: side,
+    cornersOn: true,
+    footprint: 0,
+    totalGap: layout.totalGap || 0
+  };
+  if (blockId) holderProps.blockId = blockId;
   var holder = {
     type: 'Feature',
-    properties: {
-      id: chainId,
-      type: 'section-chain',
-      createdAt: new Date().toISOString(),
-      secWidth: width,
-      secSide: side,
-      cornersOn: true,
-      footprint: 0,
-      totalGap: layout.totalGap || 0
-    },
+    properties: holderProps,
     geometry: {
       type: 'LineString',
       coordinates: ptsLL.slice()
@@ -281,20 +283,22 @@ export function buildChainCommands(featureStore, proj, ptsLL, ptsM, layout, widt
     }
 
     var axisId = crypto.randomUUID();
+    var axisProps = {
+      id: axisId,
+      type: 'section-axis',
+      createdAt: new Date().toISOString(),
+      chainId: chainId,
+      chainSegIdx: segIdx,
+      flipped: side !== 1,
+      orientation: oriResult.orientationName,
+      axisLength: axisLen,
+      sectionWidth: width,
+      footprints: footprintsLL
+    };
+    if (blockId) axisProps.blockId = blockId;
     var axisFeature = {
       type: 'Feature',
-      properties: {
-        id: axisId,
-        type: 'section-axis',
-        createdAt: new Date().toISOString(),
-        chainId: chainId,
-        chainSegIdx: segIdx,
-        flipped: side !== 1,
-        orientation: oriResult.orientationName,
-        axisLength: axisLen,
-        sectionWidth: width,
-        footprints: footprintsLL
-      },
+      properties: axisProps,
       geometry: {
         type: 'LineString',
         coordinates: [startLL, endLL]
@@ -316,20 +320,22 @@ export function buildChainCommands(featureStore, proj, ptsLL, ptsM, layout, widt
     var vIdx = c.vertexIdx != null ? c.vertexIdx : 0;
     var vertexLL = ptsLL[Math.max(0, Math.min(ptsLL.length - 1, vIdx))];
 
+    var cornerProps = {
+      id: crypto.randomUUID(),
+      type: 'section-chain-corner',
+      createdAt: new Date().toISOString(),
+      chainId: chainId,
+      chainVertexIdx: vIdx,
+      mode: c.mode || '',
+      armA: c.armA_actual != null ? c.armA_actual : c.armA_std,
+      armB: c.armB,
+      totalLen: c.totalLen,
+      polygon: ringLL
+    };
+    if (blockId) cornerProps.blockId = blockId;
     var cornerFeature = {
       type: 'Feature',
-      properties: {
-        id: crypto.randomUUID(),
-        type: 'section-chain-corner',
-        createdAt: new Date().toISOString(),
-        chainId: chainId,
-        chainVertexIdx: vIdx,
-        mode: c.mode || '',
-        armA: c.armA_actual != null ? c.armA_actual : c.armA_std,
-        armB: c.armB,
-        totalLen: c.totalLen,
-        polygon: ringLL
-      },
+      properties: cornerProps,
       geometry: {
         type: 'Point',
         coordinates: vertexLL

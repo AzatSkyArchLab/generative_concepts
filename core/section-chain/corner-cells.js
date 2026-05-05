@@ -106,49 +106,36 @@ export function buildCornerCells(opts) {
   var nCells2 = Math.floor((armB + 1e-3) / CELL_MODULE);
   if (nCells1 <= 0 || nCells2 <= 0) return { fallback: true };
 
-  var arm1IsShort, arm2IsShort;
-  if (mode === 'WM')      { arm1IsShort = true;  arm2IsShort = false; }
-  else if (mode === 'MW') { arm1IsShort = false; arm2IsShort = true;  }
-  else {
-    var s1 = nCells1 <= SECONDARY_MAX_CELLS && nCells1 < nCells2;
-    var s2 = nCells2 <= SECONDARY_MAX_CELLS && nCells2 < nCells1;
-    arm1IsShort = s1;  arm2IsShort = s2;
-  }
-
-  // Primary arm = the longer one (or M side in mixed corners). LLU
-  // sits on this arm, on the cells nearest V.
-  var primaryIsArm2;
-  if (arm1IsShort) primaryIsArm2 = true;
-  else if (arm2IsShort) primaryIsArm2 = false;
-  else primaryIsArm2 = (nCells2 >= nCells1);
+  // Both arms always get the regular cell layout — short arms used to
+  // collapse into a single non-standard apartment, but the spec is to
+  // pack 3.3 m apt cells along every straight stretch on both sides of
+  // the corridor, leaving only the unaligned residual at the corner.
+  // Primary arm (LLU host) is simply the longer one; ties go to arm 2.
+  var primaryIsArm2 = (nCells2 >= nCells1);
 
   var lluCount = sectionHeight > TALL_BUILDING_THRESHOLD ? 3 : 2;
 
   var cells = [];
 
-  // Arm 1
-  if (arm1IsShort) {
-    cells.push({ poly: [P1, V, vO1, P1ext], type: 'non-standard', meta: 'arm1-short' });
-  } else {
-    appendArmCells(cells, {
-      origin: P1, axis: d1, normal: n1, len: armA, nCells: nCells1, W: W,
-      apartmentDepth: apartmentDepth,
-      pivotAtStart: false,
-      placeLLU: !primaryIsArm2, lluCount: lluCount
-    });
-  }
+  // Arm 1 — origin at P1, axis runs P1 → V. End cell (corridor trim)
+  // sits at P1; LLU and residual gather at the V (corner) end.
+  appendArmCells(cells, {
+    origin: P1, axis: d1, normal: n1, len: armA, nCells: nCells1, W: W,
+    apartmentDepth: apartmentDepth,
+    pivotAtStart: false,
+    placeLLU: !primaryIsArm2, lluCount: lluCount
+  });
 
-  // Arm 2
-  if (arm2IsShort) {
-    cells.push({ poly: [V, P2, P2ext, vO2], type: 'non-standard', meta: 'arm2-short' });
-  } else {
-    appendArmCells(cells, {
-      origin: V, axis: d2, normal: n2, len: armB, nCells: nCells2, W: W,
-      apartmentDepth: apartmentDepth,
-      pivotAtStart: true,
-      placeLLU: primaryIsArm2, lluCount: lluCount
-    });
-  }
+  // Arm 2 — flipped: origin at P2, axis runs P2 → V. End cell at P2,
+  // LLU and residual at V. Same "lay from end inward to corner" idiom
+  // as arm 1 so brown residuals merge with the pivot blocks instead
+  // of leaking out to the polyline endpoint.
+  appendArmCells(cells, {
+    origin: P2, axis: [-d2[0], -d2[1]], normal: n2, len: armB, nCells: nCells2, W: W,
+    apartmentDepth: apartmentDepth,
+    pivotAtStart: false,
+    placeLLU: primaryIsArm2, lluCount: lluCount
+  });
 
   // Pivot — corridor L-strip in the middle, both corner blocks are
   // non-standard. The corridor in the pivot connects to the long-arm
