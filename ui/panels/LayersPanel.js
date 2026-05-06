@@ -184,6 +184,17 @@ function renderBody() {
     h += '<div style="padding:8px;color:#ef4444;font-size:12px;background:rgba(239,68,68,0.08);border-radius:4px;margin-bottom:6px">';
     h += 'Failed to load: ' + escapeHTML(_catalogError.message || 'unknown error');
     if (_catalogError.status) h += ' <span style="color:var(--text-muted)">(HTTP ' + _catalogError.status + ')</span>';
+    // 5xx → server side, retried already 3× with backoff before showing
+    // this error. 0 → network/CORS. Both mean "not your fault, try Refresh
+    // in a minute or contact whoever runs the tile server".
+    var st = _catalogError.status || 0;
+    if (st === 0 || (st >= 500 && st < 600)) {
+      h += '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">';
+      h += st === 0
+        ? 'Network/CORS issue or server unreachable. Already retried 3×.'
+        : 'Server error (' + st + '). Already retried 3× with backoff. Try Refresh later.';
+      h += '</div>';
+    }
     h += '</div>';
     return h;
   }

@@ -71,27 +71,50 @@ function request(path, options) {
     }
   }
 
-  return fetch(url, init).then(function (resp) {
-    var ct = resp.headers.get('content-type') || '';
-    var isJSON = ct.indexOf('application/json') >= 0;
-    if (!resp.ok) {
-      if (isJSON) {
-        return resp.json().then(function (body) {
-          var msg = (body && (body.error || body.message)) || ('HTTP ' + resp.status);
-          throw makeError(msg, resp.status, body);
-        }, function () {
-          throw makeError('HTTP ' + resp.status, resp.status, null);
+  // Auto-retry for transient errors. The metatiler stage server hits
+  // 5xx during deploys / overload; instead of bubbling up immediately
+  // we wait and retry up to 3 times with 500ms / 1s / 2s backoff.
+  // Final failure still throws — UI shows the error then.
+  var maxAttempts = 4;
+  function attempt(n) {
+    return fetch(url, init).then(function (resp) {
+      var ct = resp.headers.get('content-type') || '';
+      var isJSON = ct.indexOf('application/json') >= 0;
+      if (!resp.ok) {
+        // 5xx → transient → retry. 4xx (client error) → no retry.
+        var transient = resp.status >= 500 && resp.status < 600;
+        if (transient && n < maxAttempts) {
+          var delay = 500 * Math.pow(2, n - 1); // 500, 1000, 2000
+          return new Promise(function (r) { setTimeout(r, delay); }).then(function () {
+            return attempt(n + 1);
+          });
+        }
+        if (isJSON) {
+          return resp.json().then(function (body) {
+            var msg = (body && (body.error || body.message)) || ('HTTP ' + resp.status);
+            throw makeError(msg, resp.status, body);
+          }, function () {
+            throw makeError('HTTP ' + resp.status, resp.status, null);
+          });
+        }
+        return resp.text().then(function (txt) {
+          throw makeError('HTTP ' + resp.status + (txt ? ': ' + txt.slice(0, 200) : ''), resp.status, txt);
         });
       }
-      return resp.text().then(function (txt) {
-        throw makeError('HTTP ' + resp.status + (txt ? ': ' + txt.slice(0, 200) : ''), resp.status, txt);
-      });
-    }
-    if (isJSON) return resp.json();
-    return resp.text();
-  }, function (netErr) {
-    throw makeError('Network error: ' + (netErr && netErr.message ? netErr.message : 'fetch failed'), 0, null);
-  });
+      if (isJSON) return resp.json();
+      return resp.text();
+    }, function (netErr) {
+      // Network error (CORS, offline, DNS) — also transient sometimes.
+      if (n < maxAttempts) {
+        var delay = 500 * Math.pow(2, n - 1);
+        return new Promise(function (r) { setTimeout(r, delay); }).then(function () {
+          return attempt(n + 1);
+        });
+      }
+      throw makeError('Network error: ' + (netErr && netErr.message ? netErr.message : 'fetch failed'), 0, null);
+    });
+  }
+  return attempt(1);
 }
 
 // ── Catalog ─────────────────────────────────────────────
