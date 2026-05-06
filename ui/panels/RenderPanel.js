@@ -12,7 +12,7 @@
  */
 
 import { eventBus } from '../../core/EventBus.js';
-import { readUserKey, writeUserKey } from '../../modules/ai-render/index.js';
+import { readUserKey, writeUserKey, composeMoodboard } from '../../modules/ai-render/index.js';
 
 var _whitewashOn = false;
 var _busy = false;
@@ -203,6 +203,22 @@ export function renderRenderSection() {
   h += '</div>';
   h += '<datalist id="ai-render-model-list">' + buildModelOptions(curProvider) + '</datalist>';
   h += '<div id="ai-render-model-hint" style="font-size:9px;color:var(--text-muted);margin-top:4px"></div>';
+
+  // Moodboard — drop/pick N reference images. They're composited into
+  // a single grid PNG at Generate-time (one reference goes to the
+  // model, no matter how many you upload).
+  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-top:8px;margin-bottom:3px">'
+       + 'Moodboard <span id="ai-ref-count" style="opacity:0.7">'
+       + (_refs.length ? '(' + _refs.length + ')' : '') + '</span></label>';
+  h += '<div id="ai-ref-strip" style="display:flex;gap:3px;flex-wrap:wrap;min-height:36px;'
+       + 'padding:4px;border:1px dashed var(--border);border-radius:3px;'
+       + 'align-items:center;justify-content:center"></div>';
+  h += '<div style="display:flex;gap:4px;margin-top:4px">';
+  h += '<button class="render-btn render-btn--secondary" id="ai-ref-add" style="flex:1;padding:3px 6px;font-size:11px">+ Add references</button>';
+  h += '<button class="render-btn render-btn--secondary" id="ai-ref-clear" style="flex:0 0 auto;padding:3px 6px;font-size:11px">Clear</button>';
+  h += '</div>';
+  h += '<input type="file" id="ai-ref-input" accept="image/*" multiple style="display:none">';
+
   h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-top:8px;margin-bottom:3px">'
        + 'API key <span style="opacity:0.7">(saved in this browser)</span></label>';
   h += '<input type="password" id="ai-render-key" autocomplete="off" placeholder="paste your key here…" '
@@ -225,6 +241,7 @@ export function renderRenderSection() {
 
   bindEvents();
   applyState(_whitewashOn);
+  renderRefStrip();
   if (_lastResult) renderResult(_lastResult);
 }
 
@@ -346,16 +363,33 @@ function bindEvents() {
 
   var goBtn = document.getElementById('ai-render-go');
   if (goBtn) {
-    goBtn.addEventListener('click', function () {
+    goBtn.addEventListener('click', async function () {
       if (_busy) return;
       var promptEl = document.getElementById('ai-render-prompt');
       var prompt = (promptEl && promptEl.value) ? promptEl.value : DEFAULT_PROMPT;
-      // Persist edited prompt for the current session so a panel
-      // re-render (e.g. on features:changed) doesn't reset it.
       try { window.__AI_PROMPT__ = prompt; } catch (_e) { /* SSR-safe */ }
+
+      // Compose the moodboard if we have refs — N images become ONE
+      // grid PNG so the model gets a single stylesheet rather than
+      // a flood of separate inputs. Skip if there's only one ref
+      // (passing it directly is cleaner).
+      var refsToSend = [];
+      if (_refs.length === 1) {
+        refsToSend = _refs.slice();
+      } else if (_refs.length >= 2) {
+        setStatus('Composing moodboard (' + _refs.length + ' refs)…');
+        try {
+          var mood = await composeMoodboard(_refs);
+          if (mood) refsToSend = [mood];
+        } catch (err) {
+          setStatus('Moodboard failed: ' + (err.message || err));
+          return;
+        }
+      }
+
       eventBus.emit('ai-render:generate', {
         prompt: prompt,
-        referenceDataUrls: _refs.slice()
+        referenceDataUrls: refsToSend
       });
     });
   }
@@ -399,6 +433,39 @@ function bindEvents() {
       syncKeyField();
     });
   }
+  // Reference images: + Add, file picker, drag-drop, Clear.
+  var refAdd = document.getElementById('ai-ref-add');
+  var refInput = document.getElementById('ai-ref-input');
+  if (refAdd && refInput) {
+    refAdd.addEventListener('click', function () { refInput.click(); });
+    refInput.addEventListener('change', function (e) {
+      var files = e.target.files || [];
+      for (var i = 0; i < files.length; i++) addReferenceFromFile(files[i]);
+      e.target.value = '';
+    });
+  }
+  var refClear = document.getElementById('ai-ref-clear');
+  if (refClear) {
+    refClear.addEventListener('click', function () {
+      _refs = [];
+      renderRefStrip();
+    });
+  }
+  var strip = document.getElementById('ai-ref-strip');
+  if (strip) {
+    strip.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      strip.style.background = 'rgba(99,102,241,0.08)';
+    });
+    strip.addEventListener('dragleave', function () { strip.style.background = ''; });
+    strip.addEventListener('drop', function (e) {
+      e.preventDefault();
+      strip.style.background = '';
+      var files = (e.dataTransfer && e.dataTransfer.files) || [];
+      for (var i = 0; i < files.length; i++) addReferenceFromFile(files[i]);
+    });
+  }
+
   // API-key input: load existing, save on every keystroke (cheap;
   // localStorage handles dedup). On change, hint updates.
   var keyEl = document.getElementById('ai-render-key');

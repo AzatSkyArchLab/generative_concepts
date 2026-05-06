@@ -239,6 +239,80 @@ function dataUrlToBase64(dataUrl) {
 }
 
 /**
+ * Compose N reference images into one moodboard grid PNG/JPEG.
+ *
+ * Why: image-output models work best with 1–3 references. Sending
+ * 10–40 separately bloats the request, blows the token budget, and
+ * the model "averages" them into mush. A single grid composite acts
+ * as a stylesheet — the model picks materials, proportions and
+ * atmosphere from across the grid without trying to imitate each
+ * cell verbatim.
+ *
+ * Output: JPEG at ~0.85 quality, scaled so each tile is `tileSize`
+ * (384px default). cover-fit per tile (no letterboxing). Black
+ * background between tiles.
+ *
+ * @returns Promise<string|null>  data URL, or null if no inputs.
+ */
+export function composeMoodboard(dataUrls, opts) {
+  return new Promise(function (resolve, reject) {
+    if (!dataUrls || dataUrls.length === 0) { resolve(null); return; }
+    opts = opts || {};
+    var tileSize = opts.tileSize || 384;
+    var maxCols = opts.maxCols || 8;
+    var n = dataUrls.length;
+    // Aim for an aspect ratio close to 16:10 — wide enough for
+    // landscape arch references but not pancake.
+    var cols = Math.min(maxCols, Math.max(1, Math.ceil(Math.sqrt(n * 1.6))));
+    var rows = Math.ceil(n / cols);
+    var canvas = document.createElement('canvas');
+    canvas.width = cols * tileSize;
+    canvas.height = rows * tileSize;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    var loaded = 0;
+    var errored = null;
+    function maybeFinish() {
+      if (errored) return;
+      if (loaded === n) resolve(canvas.toDataURL('image/jpeg', 0.85));
+    }
+    for (var i = 0; i < n; i++) {
+      (function (idx) {
+        var img = new Image();
+        // Local data URLs don't need CORS, but be safe for any URLs.
+        img.crossOrigin = 'anonymous';
+        img.onload = function () {
+          if (errored) return;
+          var col = idx % cols;
+          var row = Math.floor(idx / cols);
+          // cover-fit: scale to fill tile, crop excess.
+          var s = Math.max(tileSize / img.width, tileSize / img.height);
+          var w = img.width * s, h = img.height * s;
+          var x = col * tileSize - (w - tileSize) / 2;
+          var y = row * tileSize - (h - tileSize) / 2;
+          try {
+            ctx.drawImage(img, x, y, w, h);
+          } catch (err) {
+            errored = err;
+            reject(err);
+            return;
+          }
+          loaded++;
+          maybeFinish();
+        };
+        img.onerror = function () {
+          errored = new Error('reference image #' + idx + ' failed to load');
+          reject(errored);
+        };
+        img.src = dataUrls[idx];
+      })(i);
+    }
+  });
+}
+
+/**
  * Walk an OpenRouter-style chat-completion response for an image
  * data URL. Image-output models on OpenRouter return images via
  * several different shapes:
