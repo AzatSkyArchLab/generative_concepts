@@ -258,7 +258,7 @@ export function composeMoodboard(dataUrls, opts) {
   return new Promise(function (resolve, reject) {
     if (!dataUrls || dataUrls.length === 0) { resolve(null); return; }
     opts = opts || {};
-    var tileSize = opts.tileSize || 384;
+    var tileSize = opts.tileSize || 512;
     var maxCols = opts.maxCols || 8;
     var n = dataUrls.length;
     // Aim for an aspect ratio close to 16:10 — wide enough for
@@ -361,13 +361,17 @@ async function generateViaOpenRouter(opts) {
 
   var content = [];
   content.push({ type: 'text', text: String(opts.prompt) });
-  content.push({ type: 'image_url', image_url: { url: opts.imageDataUrl } });
+  // Refs FIRST when present, subject SECOND. Image-output models tend
+  // to anchor on the first image they see; placing the moodboard
+  // first lets it act as the dominant style cue, with the subject
+  // becoming the geometric constraint.
   if (Array.isArray(opts.referenceDataUrls)) {
     for (var ri = 0; ri < opts.referenceDataUrls.length; ri++) {
       var ref = opts.referenceDataUrls[ri];
       if (ref) content.push({ type: 'image_url', image_url: { url: ref } });
     }
   }
+  content.push({ type: 'image_url', image_url: { url: opts.imageDataUrl } });
 
   var body = {
     model: model,
@@ -440,13 +444,8 @@ async function generateViaGoogle(opts) {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/'
     + model + ':generateContent?key=' + encodeURIComponent(key);
 
+  // Refs FIRST, subject SECOND — see generateViaOpenRouter for why.
   var parts = [{ text: String(opts.prompt) }];
-  parts.push({
-    inline_data: {
-      mime_type: 'image/png',
-      data: dataUrlToBase64(opts.imageDataUrl)
-    }
-  });
   if (Array.isArray(opts.referenceDataUrls)) {
     for (var i = 0; i < opts.referenceDataUrls.length; i++) {
       var ref = opts.referenceDataUrls[i];
@@ -456,6 +455,12 @@ async function generateViaGoogle(opts) {
       parts.push({ inline_data: { mime_type: mime, data: dataUrlToBase64(ref) } });
     }
   }
+  parts.push({
+    inline_data: {
+      mime_type: 'image/png',
+      data: dataUrlToBase64(opts.imageDataUrl)
+    }
+  });
   var body = {
     contents: [{ role: 'user', parts: parts }],
     generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }

@@ -217,6 +217,9 @@ export function renderRenderSection() {
   h += '<button class="render-btn render-btn--secondary" id="ai-ref-add" style="flex:1;padding:3px 6px;font-size:11px">+ Add references</button>';
   h += '<button class="render-btn render-btn--secondary" id="ai-ref-clear" style="flex:0 0 auto;padding:3px 6px;font-size:11px">Clear</button>';
   h += '</div>';
+  h += '<div style="font-size:9px;color:var(--text-muted);margin-top:3px;line-height:1.3">'
+       + '6–12 strong, consistent refs work better than 40 mixed ones. '
+       + 'Pick photos sharing one architectural language.</div>';
   h += '<input type="file" id="ai-ref-input" accept="image/*" multiple style="display:none">';
 
   h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-top:8px;margin-bottom:3px">'
@@ -400,27 +403,33 @@ function bindEvents() {
       var finalPrompt = promptBase;
       if (refMode === 'single') {
         finalPrompt =
-          'IMAGE 1 (massing study) — the urban-block geometry to render. '
-          + 'Preserve it strictly per the rules below.\n'
-          + 'IMAGE 2 (style reference) — a photo whose architectural '
-          + 'language (materials, facade rhythm, window patterns, '
-          + 'balcony design, color tonality, atmosphere) you must '
-          + 'apply to the volumes in IMAGE 1. Do NOT copy the '
-          + 'building shape from IMAGE 2 — only its style.\n\n'
+          'IMAGE 1 (STYLE REFERENCE) — your DOMINANT VISUAL DRIVER. '
+          + 'ADOPT every facade material, window/balcony rhythm, color '
+          + 'tonality, and atmospheric quality from this image. The '
+          + 'final render MUST visibly inherit IMAGE 1\'s materiality. '
+          + 'Do NOT copy its building shape — only its style.\n'
+          + 'IMAGE 2 (massing study) — the GEOMETRIC CONSTRAINT. '
+          + 'Preserve every volume\'s footprint, position, height and '
+          + 'proportion exactly per the rules below. Apply IMAGE 1\'s '
+          + 'STYLE to IMAGE 2\'s GEOMETRY.\n\n'
           + promptBase;
       } else if (refMode === 'moodboard') {
         finalPrompt =
-          'IMAGE 1 (massing study) — the urban-block geometry to render. '
-          + 'Preserve it strictly per the rules below.\n'
-          + 'IMAGE 2 (MOODBOARD GRID, ' + _refs.length + ' tiles) — a stylistic '
-          + 'palette. Treat the grid as a unified stylesheet: extract '
-          + 'recurring materials (limestone, brick, glass, metal panels), '
-          + 'facade rhythms, balcony designs, window proportions, color '
-          + 'tones, and overall atmosphere from across the grid and '
-          + 'apply them coherently to the volumes in IMAGE 1. Do NOT '
-          + 'copy any building outline from the moodboard — only its '
-          + 'visual language. Aim for a single consistent style derived '
-          + 'from the grid, not a collage.\n\n'
+          'IMAGE 1 (MOODBOARD GRID, ' + _refs.length + ' tiles) — your '
+          + 'DOMINANT VISUAL DRIVER. The grid is a unified stylesheet — '
+          + 'ADOPT its recurring materials (limestone, brick, glass, '
+          + 'metal panels), facade rhythms, balcony designs, window '
+          + 'proportions, color tones and atmosphere as the primary '
+          + 'visual language of the final render. The result MUST '
+          + 'clearly read as "buildings in the moodboard\'s style". '
+          + 'Do NOT copy any building outline from the grid — extract '
+          + 'STYLE only, never shape. Aim for ONE coherent style '
+          + 'synthesised from the grid, not a collage of different '
+          + 'looks.\n'
+          + 'IMAGE 2 (massing study) — the GEOMETRIC CONSTRAINT. '
+          + 'Preserve every volume\'s footprint, position, height and '
+          + 'proportion exactly per the rules below. Apply IMAGE 1\'s '
+          + 'STYLE to IMAGE 2\'s GEOMETRY.\n\n'
           + promptBase;
       }
 
