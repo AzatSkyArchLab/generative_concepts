@@ -366,29 +366,66 @@ function bindEvents() {
     goBtn.addEventListener('click', async function () {
       if (_busy) return;
       var promptEl = document.getElementById('ai-render-prompt');
-      var prompt = (promptEl && promptEl.value) ? promptEl.value : DEFAULT_PROMPT;
-      try { window.__AI_PROMPT__ = prompt; } catch (_e) { /* SSR-safe */ }
+      var promptBase = (promptEl && promptEl.value) ? promptEl.value : DEFAULT_PROMPT;
+      try { window.__AI_PROMPT__ = promptBase; } catch (_e) { /* SSR-safe */ }
 
       // Compose the moodboard if we have refs — N images become ONE
       // grid PNG so the model gets a single stylesheet rather than
       // a flood of separate inputs. Skip if there's only one ref
       // (passing it directly is cleaner).
       var refsToSend = [];
+      var refMode = 'none'; // 'none' | 'single' | 'moodboard'
       if (_refs.length === 1) {
         refsToSend = _refs.slice();
+        refMode = 'single';
       } else if (_refs.length >= 2) {
         setStatus('Composing moodboard (' + _refs.length + ' refs)…');
         try {
           var mood = await composeMoodboard(_refs);
-          if (mood) refsToSend = [mood];
+          if (mood) {
+            refsToSend = [mood];
+            refMode = 'moodboard';
+          }
         } catch (err) {
           setStatus('Moodboard failed: ' + (err.message || err));
           return;
         }
       }
 
+      // Build the final prompt. The model gets multiple images and
+      // doesn't natively know what each one is for — without an
+      // explicit "Image N = ..." block it tends to ignore refs or
+      // average them with the subject. We prepend a tiny header that
+      // names each image's role.
+      var finalPrompt = promptBase;
+      if (refMode === 'single') {
+        finalPrompt =
+          'IMAGE 1 (massing study) — the urban-block geometry to render. '
+          + 'Preserve it strictly per the rules below.\n'
+          + 'IMAGE 2 (style reference) — a photo whose architectural '
+          + 'language (materials, facade rhythm, window patterns, '
+          + 'balcony design, color tonality, atmosphere) you must '
+          + 'apply to the volumes in IMAGE 1. Do NOT copy the '
+          + 'building shape from IMAGE 2 — only its style.\n\n'
+          + promptBase;
+      } else if (refMode === 'moodboard') {
+        finalPrompt =
+          'IMAGE 1 (massing study) — the urban-block geometry to render. '
+          + 'Preserve it strictly per the rules below.\n'
+          + 'IMAGE 2 (MOODBOARD GRID, ' + _refs.length + ' tiles) — a stylistic '
+          + 'palette. Treat the grid as a unified stylesheet: extract '
+          + 'recurring materials (limestone, brick, glass, metal panels), '
+          + 'facade rhythms, balcony designs, window proportions, color '
+          + 'tones, and overall atmosphere from across the grid and '
+          + 'apply them coherently to the volumes in IMAGE 1. Do NOT '
+          + 'copy any building outline from the moodboard — only its '
+          + 'visual language. Aim for a single consistent style derived '
+          + 'from the grid, not a collage.\n\n'
+          + promptBase;
+      }
+
       eventBus.emit('ai-render:generate', {
-        prompt: prompt,
+        prompt: finalPrompt,
         referenceDataUrls: refsToSend
       });
     });
