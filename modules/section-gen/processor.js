@@ -13,6 +13,7 @@ import {
 } from './cells.js';
 import { buildSectionGraph } from './graph.js';
 import { buildSectionMeshes, buildDividerWall, buildSectionWireframe, buildFloorLabel, buildDetailedFloor1, buildDetailedFloor0, buildLLURoof, buildCellMeshColored, buildDetailedTowerFloor1, buildDetailedTowerFloor0, buildTowerLLURoof, buildTopSlab } from '../../core/three/MeshBuilder.js';
+import { buildBalconiesForSection } from '../../core/three/Balconies.js';
 import { solveFloor, validateApartment, getFlag } from '../../core/apartments/ApartmentSolver.js';
 import { planWZStacks } from '../../core/apartments/WZPlanner.js';
 import { planBuilding } from '../../core/apartments/BuildingPlanner.js';
@@ -118,6 +119,7 @@ export function processAllSections() {
   var allFootLL = [];
   var ugSectionGraphs = [];  // [{nodes}] for underground rendering
   state.lineFootprints = {};
+  state._balconySlabBoxes = []; // reset balcony collision data per pass
 
   var AREA_COEFF = 0.65;
   var M2_PER_PERSON = 50;
@@ -142,11 +144,48 @@ export function processAllSections() {
 
   // Build blockId → block feature lookup for solverParams.targetSPP.
   var blockById = {};
+  // Build chainId → chain holder lookup for shared options (balconies,
+  // future per-chain settings).
+  var chainById = {};
   for (var bi0 = 0; bi0 < all.length; bi0++) {
     var f0 = all[bi0];
-    if (f0.properties && f0.properties.urbanBlock) {
+    if (!f0.properties) continue;
+    if (f0.properties.urbanBlock) {
       blockById[f0.properties.id] = f0;
+    } else if (f0.properties.type === 'section-chain') {
+      chainById[f0.properties.id] = f0;
     }
+  }
+
+  // Resolve balcony state for a section feature. Order: section's
+  // own flag → chain holder flag → urban-block flag → global. The
+  // first explicit `true` or `false` wins; `undefined` falls through.
+  function resolveBalcony(secProps) {
+    function fromProps(p) {
+      if (!p) return null;
+      if (p.useBalconies === true) return { use: true, pattern: p.balconyPattern || 'staggered' };
+      if (p.useBalconies === false) return { use: false };
+      return null;
+    }
+    var r = fromProps(secProps);
+    if (r) return r;
+    if (secProps.chainId && chainById[secProps.chainId]) {
+      r = fromProps(chainById[secProps.chainId].properties);
+      if (r) return r;
+    }
+    if (secProps.blockId && blockById[secProps.blockId]) {
+      r = fromProps(blockById[secProps.blockId].properties);
+      if (r) return r;
+    }
+    try {
+      if (typeof window !== 'undefined' && window.__UB_USE_BALCONIES__) {
+        return {
+          use: true,
+          pattern: (window.__UB_BALCONY_PATTERN__) || 'staggered'
+        };
+      }
+    } catch (_e) { /* no-op */ }
+    return { use: false };
   }
 
   // Group section-axis features by their blockId.
@@ -583,6 +622,35 @@ export function processAllSections() {
 
         state.threeOverlay.addMesh(buildSectionWireframe(fpM, 0, buildingH));
         state.threeOverlay.addMesh(buildFloorLabel(floorCount + 'F', fpM, buildingH));
+
+        // Balconies — works for sections inside an urban-block, in a
+        // section-chain, or stand-alone. resolveBalcony walks
+        // section → chain → block → global flag and returns the
+        // first explicit setting it finds.
+        var bcnState = resolveBalcony(feature.properties);
+        if (bcnState.use === true) {
+          var bcnPack = buildBalconiesForSection({
+            graphNodes: graph.nodes,
+            N: N,
+            floorCount: floorCount,
+            firstFloorHeight: params.firstFloorHeight,
+            typicalFloorHeight: params.typicalFloorHeight,
+            pattern: bcnState.pattern || 'staggered'
+          });
+          var bcnCount = (bcnPack && bcnPack.slabBoxes) ? bcnPack.slabBoxes.length : 0;
+          console.log('[balconies] section ' + lineId.slice(0, 6) + ' fp ' + fi
+            + ': ' + bcnCount + ' balcon(ies), pattern=' + (bcnState.pattern || 'staggered'));
+          if (bcnPack && bcnPack.group && bcnPack.group.children.length > 0) {
+            bcnPack.group.userData.whiteModelExtra = true;
+            state.threeOverlay.addMesh(bcnPack.group);
+          }
+          if (bcnPack && bcnPack.slabBoxes && bcnPack.slabBoxes.length > 0) {
+            if (!state._balconySlabBoxes) state._balconySlabBoxes = [];
+            for (var bbi = 0; bbi < bcnPack.slabBoxes.length; bbi++) {
+              state._balconySlabBoxes.push(bcnPack.slabBoxes[bbi]);
+            }
+          }
+        }
 
         // White-model fill for sections that haven't been distributed
         // yet. After distribute, Pass 2 builds the same floors with

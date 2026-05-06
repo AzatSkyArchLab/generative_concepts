@@ -110,7 +110,8 @@ export class FeaturePanel {
     var hasStructure = !!(
       document.getElementById('ax-gap-row') &&
       document.getElementById('ax-corners-row') &&
-      document.getElementById('ax-towers-row')
+      document.getElementById('ax-towers-row') &&
+      document.getElementById('ax-balconies-row')
     );
 
     if (has && hasStructure) {
@@ -130,6 +131,21 @@ export class FeaturePanel {
     h += '<div class="param-row" id="ax-towers-row" style="cursor:pointer">';
     h += '<label class="param-label" style="cursor:pointer">Towers (urban block)</label>';
     h += '<div class="param-input-wrap"><span id="ax-towers-indicator" style="font-size:11px"></span></div></div>';
+    h += '<div class="param-row" id="ax-balconies-row" style="cursor:pointer">';
+    h += '<label class="param-label" style="cursor:pointer">Balconies</label>';
+    h += '<div class="param-input-wrap"><span id="ax-balconies-indicator" style="font-size:11px"></span></div></div>';
+    h += '<div class="param-row" id="ax-balcony-pattern-row" style="display:none">';
+    h += '<label class="param-label">Balcony pattern</label>';
+    h += '<div class="param-input-wrap">';
+    h += '<select id="ax-balcony-pattern" style="font-size:11px;padding:2px 4px;'
+       + 'border:1px solid var(--border);border-radius:3px;background:var(--bg-elev);'
+       + 'color:var(--text);font-family:inherit">';
+    h += '<option value="staggered">Staggered</option>';
+    h += '<option value="every">Every apartment</option>';
+    h += '<option value="columns">Columns</option>';
+    h += '<option value="bands">Bands</option>';
+    h += '</select>';
+    h += '</div></div>';
     el.innerHTML = h;
     var gapRow = document.getElementById('ax-gap-row');
     if (gapRow) gapRow.addEventListener('click', function () {
@@ -142,6 +158,17 @@ export class FeaturePanel {
     var towersRow = document.getElementById('ax-towers-row');
     if (towersRow) towersRow.addEventListener('click', function () {
       eventBus.emit('axis-options:towers:toggle');
+    });
+    var balconiesRow = document.getElementById('ax-balconies-row');
+    if (balconiesRow) balconiesRow.addEventListener('click', function (e) {
+      // Don't trigger toggle when the click was on the inline pattern
+      // selector (which lives in the same row container).
+      if (e.target.tagName === 'SELECT' || e.target.tagName === 'OPTION') return;
+      eventBus.emit('axis-options:balconies:toggle');
+    });
+    var balconySel = document.getElementById('ax-balcony-pattern');
+    if (balconySel) balconySel.addEventListener('change', function () {
+      eventBus.emit('axis-options:balcony-pattern:set', { pattern: balconySel.value });
     });
     this._syncAxisOptionsIndicators();
   }
@@ -181,6 +208,7 @@ export class FeaturePanel {
     var gap = flagFor(blocks, 'useGap', '__UB_USE_GAP__');
     var corners = flagFor(blocks, 'useCorners', '__UB_USE_CORNERS__');
     var towers = flagFor(blocks, 'useTowers', '__UB_USE_TOWERS__');
+    var balconies = flagFor(blocks, 'useBalconies', '__UB_USE_BALCONIES__');
 
     function paint(spanId, on, ambig) {
       var sp = document.getElementById(spanId);
@@ -198,6 +226,26 @@ export class FeaturePanel {
     paint('ax-gap-indicator', gap, ambiguous);
     paint('ax-corners-indicator', corners, ambiguous);
     paint('ax-towers-indicator', towers, ambiguous);
+    paint('ax-balconies-indicator', balconies, ambiguous);
+
+    // Pattern dropdown is visible only when balconies are ON for the
+    // currently scoped block(s) — shows the active pattern.
+    var patternRow = document.getElementById('ax-balcony-pattern-row');
+    var patternSel = document.getElementById('ax-balcony-pattern');
+    if (patternRow) patternRow.style.display = (balconies && !ambiguous) ? '' : 'none';
+    if (patternSel) {
+      var pat = 'staggered';
+      if (selected && blocks[0].properties.balconyPattern) {
+        pat = String(blocks[0].properties.balconyPattern);
+      } else {
+        try {
+          if (typeof window !== 'undefined' && window.__UB_BALCONY_PATTERN__) {
+            pat = String(window.__UB_BALCONY_PATTERN__);
+          }
+        } catch (_e) { /* no-op */ }
+      }
+      if (patternSel.value !== pat) patternSel.value = pat;
+    }
 
     // Subtitle hint: clarify whether toggles act on selected block,
     // each existing block's own flag, or the next-created default.

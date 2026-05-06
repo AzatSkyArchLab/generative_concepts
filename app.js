@@ -399,6 +399,90 @@ async function bootstrap() {
       }
     });
 
+    // Balconies — per-block toggle. The mesh builder runs in the
+    // section-gen pass, so flipping the flag triggers a rebuild that
+    // rebuilds 3D + ray collision data for the block.
+    eventBus.on('axis-options:balconies:toggle', function () {
+      // Pick targets: explicitly selected balcony-eligible features,
+      // or — if nothing's selected — every relevant feature on the
+      // map (urban-blocks, section chains, and stand-alone sections).
+      // Balconies are a visual decoration, so a single click should
+      // affect the entire scene unless the user has narrowed scope
+      // by selecting something specific.
+      function eligible(f) {
+        if (!f || !f.properties) return false;
+        if (f.properties.urbanBlock) return true;
+        if (f.properties.type === 'section-chain') return true;
+        if (f.properties.type === 'section-axis') {
+          // Skip sections that already inherit from a parent (block
+          // or chain) — toggling their parent below covers them.
+          if (f.properties.blockId || f.properties.chainId) return false;
+          return true;
+        }
+        return false;
+      }
+      var sel = drawManager.getSelectedIds();
+      var picks = [];
+      for (var s = 0; s < sel.length; s++) {
+        var f = featureStore.get(sel[s]);
+        if (eligible(f)) picks.push(f);
+      }
+      var targets;
+      if (picks.length > 0) {
+        targets = picks;
+      } else {
+        targets = featureStore.toArray().filter(eligible);
+      }
+      if (targets.length === 0) {
+        var next = !UrbanBlockTool.useBalconies;
+        UrbanBlockTool.useBalconies = next;
+        try { window.__UB_USE_BALCONIES__ = next; } catch (_e) { /* no-op */ }
+        eventBus.emit('features:changed');
+        return;
+      }
+      var nextV = !(targets[0].properties.useBalconies === true);
+      for (var i = 0; i < targets.length; i++) {
+        var t = targets[i];
+        t.properties.useBalconies = nextV;
+        if (nextV && !t.properties.balconyPattern) {
+          t.properties.balconyPattern = 'staggered';
+        }
+      }
+      UrbanBlockTool.useBalconies = nextV;
+      try { window.__UB_USE_BALCONIES__ = nextV; } catch (_e) { /* no-op */ }
+      log.debug('[balconies] toggled ' + (nextV ? 'ON' : 'OFF') + ' for '
+        + targets.length + ' feature(s)' + (picks.length === 0 ? ' (no selection → all)' : ''));
+      eventBus.emit('features:changed');
+    });
+
+    eventBus.on('axis-options:balcony-pattern:set', function (d) {
+      var pattern = d && d.pattern;
+      if (!pattern) return;
+      function eligible(f) {
+        if (!f || !f.properties) return false;
+        if (f.properties.urbanBlock) return true;
+        if (f.properties.type === 'section-chain') return true;
+        if (f.properties.type === 'section-axis') {
+          if (f.properties.blockId || f.properties.chainId) return false;
+          return true;
+        }
+        return false;
+      }
+      var sel = drawManager.getSelectedIds();
+      var picks = [];
+      for (var s = 0; s < sel.length; s++) {
+        var f = featureStore.get(sel[s]);
+        if (eligible(f)) picks.push(f);
+      }
+      var targets = picks.length > 0 ? picks : featureStore.toArray().filter(eligible);
+      try { window.__UB_BALCONY_PATTERN__ = pattern; } catch (_e) { /* no-op */ }
+      if (targets.length === 0) return;
+      for (var i = 0; i < targets.length; i++) {
+        targets[i].properties.balconyPattern = pattern;
+      }
+      eventBus.emit('features:changed');
+    });
+
     // Solver-affecting buffer params (fire, endB, insol) are fed from
     // the BufferPanel via window.__UB_BUFFER_DISTS__ (seeded at the top
     // of bootstrap, kept in sync by the listener below). BufferPanel

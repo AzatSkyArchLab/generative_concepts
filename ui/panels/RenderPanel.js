@@ -1,5 +1,5 @@
 /**
- * RenderPanel — AI render mode (white model + Nano Banana Pro).
+ * RenderPanel — render mode (white model + AI-rendered view).
  *
  * Flow:
  *   1. Toggle "White model" — flips materials, hides analysis overlays.
@@ -12,6 +12,7 @@
  */
 
 import { eventBus } from '../../core/EventBus.js';
+import { readUserKey, writeUserKey } from '../../modules/ai-render/index.js';
 
 var _whitewashOn = false;
 var _busy = false;
@@ -158,15 +159,33 @@ export function renderRenderSection() {
 
   var h = '<div class="props-divider"></div>';
   h += '<div class="render-panel" id="render-panel">';
-  h += '<div class="render-panel-title">AI Render</div>';
+  h += '<div class="render-panel-title">Render</div>';
   h += '<button class="render-btn" id="render-whitewash-btn">White model</button>';
   h += '<button class="render-btn render-btn--secondary" id="render-basemap-btn">Basemap: ' + (_basemap === 'satellite' ? 'Satellite' : 'Vector') + '</button>';
   h += '<button class="render-btn render-btn--secondary" id="render-screenshot-btn" disabled>Save composite PNG</button>';
+  h += '<div class="render-hint" id="render-hint" style="margin-top:6px">Toggle white model first.</div>';
 
-  // Provider + Model
-  h += '<div style="margin-top:10px;display:flex;gap:6px">';
-  h += '<select id="ai-render-provider" style="flex:1;padding:4px 6px;font-size:11px;'
-       + 'border:1px solid var(--border);border-radius:4px;background:var(--bg-elev);color:var(--text);'
+  // Prompt textarea — Unicode/Russian-ready by default. Editable so
+  // you can tweak per shot; persisted to window.__AI_PROMPT__ so it
+  // survives panel re-renders inside this session.
+  h += '<div style="margin-top:10px">';
+  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-bottom:4px">Prompt</label>';
+  h += '<textarea id="ai-render-prompt" rows="6" lang="ru" spellcheck="false" '
+       + 'style="width:100%;font-size:11px;font-family:inherit;'
+       + 'padding:6px 8px;border:1px solid var(--border);border-radius:4px;'
+       + 'background:var(--bg-elev);color:var(--text);resize:vertical;'
+       + 'box-sizing:border-box;line-height:1.4">'
+       + escapeHtml(promptVal) + '</textarea>';
+  h += '</div>';
+
+  // Advanced block — collapsed by default. Holds provider + model
+  // overrides for when the default slug doesn't work in this account.
+  h += '<details style="margin-top:8px;font-size:11px">';
+  h += '<summary style="cursor:pointer;color:var(--text-muted);font-size:10px;user-select:none">Advanced</summary>';
+  h += '<div style="margin-top:6px;padding:6px;border:1px solid var(--border);border-radius:4px">';
+  h += '<div style="display:flex;gap:6px;margin-bottom:6px">';
+  h += '<select id="ai-render-provider" style="flex:1;padding:3px 5px;font-size:11px;'
+       + 'border:1px solid var(--border);border-radius:3px;background:var(--bg-elev);color:var(--text);'
        + 'font-family:inherit">';
   for (var pi = 0; pi < PROVIDER_PRESETS.length; pi++) {
     var pp = PROVIDER_PRESETS[pi];
@@ -175,46 +194,28 @@ export function renderRenderSection() {
   }
   h += '</select>';
   h += '</div>';
-  h += '<div style="margin-top:6px">';
-  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-bottom:4px">Model</label>';
+  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-bottom:3px">Model</label>';
   h += '<div style="display:flex;gap:4px">';
   h += '<input type="text" id="ai-render-model" list="ai-render-model-list" value="' + escapeHtml(curModel)
-       + '" style="flex:1;padding:4px 6px;font-size:11px;border:1px solid var(--border);'
-       + 'border-radius:4px;background:var(--bg-elev);color:var(--text);font-family:inherit;box-sizing:border-box">';
-  h += '<button class="render-btn render-btn--secondary" id="ai-render-fetch-models" title="Fetch image-output models from OpenRouter" style="flex:0 0 auto;padding:4px 8px;font-size:11px">↻</button>';
+       + '" style="flex:1;padding:3px 5px;font-size:11px;border:1px solid var(--border);'
+       + 'border-radius:3px;background:var(--bg-elev);color:var(--text);font-family:inherit;box-sizing:border-box">';
+  h += '<button class="render-btn render-btn--secondary" id="ai-render-fetch-models" title="Fetch available models from OpenRouter" style="flex:0 0 auto;padding:3px 8px;font-size:11px">↻</button>';
   h += '</div>';
   h += '<datalist id="ai-render-model-list">' + buildModelOptions(curProvider) + '</datalist>';
-  h += '<div id="ai-render-model-hint" style="font-size:9px;color:var(--text-muted);margin-top:3px"></div>';
+  h += '<div id="ai-render-model-hint" style="font-size:9px;color:var(--text-muted);margin-top:4px"></div>';
+  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-top:8px;margin-bottom:3px">'
+       + 'API key <span style="opacity:0.7">(saved in this browser)</span></label>';
+  h += '<input type="password" id="ai-render-key" autocomplete="off" placeholder="paste your key here…" '
+       + 'style="width:100%;padding:3px 5px;font-size:11px;border:1px solid var(--border);'
+       + 'border-radius:3px;background:var(--bg-elev);color:var(--text);font-family:inherit;'
+       + 'box-sizing:border-box">';
+  h += '<div id="ai-render-key-hint" style="font-size:9px;color:var(--text-muted);margin-top:3px"></div>';
   h += '</div>';
+  h += '</details>';
 
-  // Prompt
-  h += '<div class="render-hint" id="render-hint" style="margin-top:8px">Toggle white model first.</div>';
-  h += '<div style="margin-top:8px">';
-  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-bottom:4px">Prompt</label>';
-  h += '<textarea id="ai-render-prompt" rows="5" style="width:100%;font-size:11px;font-family:inherit;'
-       + 'padding:6px 8px;border:1px solid var(--border);border-radius:4px;'
-       + 'background:var(--bg-elev);color:var(--text);resize:vertical;box-sizing:border-box">'
-       + escapeHtml(promptVal) + '</textarea>';
-  h += '</div>';
-
-  // References
-  h += '<div style="margin-top:8px">';
-  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-bottom:4px">'
-       + 'Reference images <span id="ai-ref-count" style="color:var(--text-muted)">'
-       + (_refs.length ? '(' + _refs.length + ')' : '') + '</span></label>';
-  h += '<div id="ai-ref-strip" style="display:flex;gap:4px;flex-wrap:wrap;min-height:38px;'
-       + 'padding:4px;border:1px dashed var(--border);border-radius:4px;'
-       + 'align-items:center;justify-content:center"></div>';
-  h += '<div style="display:flex;gap:4px;margin-top:4px">';
-  h += '<button class="render-btn render-btn--secondary" id="ai-ref-add" style="flex:1">+ Add reference</button>';
-  h += '<button class="render-btn render-btn--secondary" id="ai-ref-clear" style="flex:0 0 auto">Clear</button>';
-  h += '</div>';
-  h += '<input type="file" id="ai-ref-input" accept="image/*" multiple style="display:none">';
-  h += '</div>';
-
-  // Generate button + status + side-by-side input/result preview.
+  // Render-view button + status + preview/result.
   h += '<button class="render-btn" id="ai-render-go" disabled style="margin-top:10px;background:var(--primary);color:#fff;font-weight:700">'
-       + 'Generate (Nano Banana Pro)</button>';
+       + 'Render view</button>';
   h += '<div id="ai-render-status" class="render-hint" style="margin-top:6px"></div>';
   h += '<div id="ai-render-source" style="margin-top:8px"></div>';
   h += '<div id="ai-render-result" style="margin-top:8px"></div>';
@@ -224,7 +225,6 @@ export function renderRenderSection() {
 
   bindEvents();
   applyState(_whitewashOn);
-  renderRefStrip();
   if (_lastResult) renderResult(_lastResult);
 }
 
@@ -344,53 +344,45 @@ function bindEvents() {
     });
   }
 
-  var refAdd = document.getElementById('ai-ref-add');
-  var refInput = document.getElementById('ai-ref-input');
-  if (refAdd && refInput) {
-    refAdd.addEventListener('click', function () { refInput.click(); });
-    refInput.addEventListener('change', function (e) {
-      var files = e.target.files || [];
-      for (var i = 0; i < files.length; i++) addReferenceFromFile(files[i]);
-      e.target.value = '';
-    });
-  }
-
-  var refClear = document.getElementById('ai-ref-clear');
-  if (refClear) {
-    refClear.addEventListener('click', function () {
-      _refs = [];
-      renderRefStrip();
-    });
-  }
-
-  // Drag-and-drop onto the strip.
-  var strip = document.getElementById('ai-ref-strip');
-  if (strip) {
-    strip.addEventListener('dragover', function (e) {
-      e.preventDefault();
-      strip.style.background = 'rgba(99,102,241,0.08)';
-    });
-    strip.addEventListener('dragleave', function () { strip.style.background = ''; });
-    strip.addEventListener('drop', function (e) {
-      e.preventDefault();
-      strip.style.background = '';
-      var files = (e.dataTransfer && e.dataTransfer.files) || [];
-      for (var i = 0; i < files.length; i++) addReferenceFromFile(files[i]);
-    });
-  }
-
   var goBtn = document.getElementById('ai-render-go');
   if (goBtn) {
     goBtn.addEventListener('click', function () {
       if (_busy) return;
       var promptEl = document.getElementById('ai-render-prompt');
-      var prompt = promptEl ? promptEl.value : DEFAULT_PROMPT;
+      var prompt = (promptEl && promptEl.value) ? promptEl.value : DEFAULT_PROMPT;
+      // Persist edited prompt for the current session so a panel
+      // re-render (e.g. on features:changed) doesn't reset it.
       try { window.__AI_PROMPT__ = prompt; } catch (_e) { /* SSR-safe */ }
       eventBus.emit('ai-render:generate', {
         prompt: prompt,
         referenceDataUrls: _refs.slice()
       });
     });
+  }
+  // Also persist on every keystroke so navigation away/back keeps
+  // the user's edits without needing a Generate click first.
+  var promptElLive = document.getElementById('ai-render-prompt');
+  if (promptElLive) {
+    promptElLive.addEventListener('input', function () {
+      try { window.__AI_PROMPT__ = promptElLive.value; } catch (_e) { /* no-op */ }
+    });
+  }
+
+  // ── Advanced block: provider / model / fetch / API key ───
+  function syncKeyField() {
+    var keyEl = document.getElementById('ai-render-key');
+    if (!keyEl) return;
+    var p = readProvider();
+    var existing = readUserKey(p);
+    keyEl.value = existing || '';
+    var hint = document.getElementById('ai-render-key-hint');
+    if (hint) {
+      if (existing) {
+        hint.textContent = 'Saved for ' + p + ' — pasted key is used for all renders.';
+      } else {
+        hint.textContent = 'Paste a ' + p + ' API key. It stays on this browser only.';
+      }
+    }
   }
 
   var provSel = document.getElementById('ai-render-provider');
@@ -403,21 +395,32 @@ function bindEvents() {
       if (modelEl) modelEl.value = readModel(p);
       if (dl) dl.innerHTML = buildModelOptions(p);
       writeModel(p, modelEl ? modelEl.value : '');
-      // Auto-fetch the live catalog when switching to OpenRouter so
-      // the user gets actual current slugs without an extra click.
       if (p === 'openrouter') maybeAutoFetchOpenRouterModels();
+      syncKeyField();
     });
   }
-  // Trigger initial auto-fetch if the panel opened already on OpenRouter.
-  if (readProvider() === 'openrouter') maybeAutoFetchOpenRouterModels();
-  var modelEl = document.getElementById('ai-render-model');
-  if (modelEl) {
-    modelEl.addEventListener('change', function () {
+  // API-key input: load existing, save on every keystroke (cheap;
+  // localStorage handles dedup). On change, hint updates.
+  var keyEl = document.getElementById('ai-render-key');
+  if (keyEl) {
+    syncKeyField();
+    keyEl.addEventListener('input', function () {
       var p = (provSel && provSel.value) || readProvider();
-      writeModel(p, modelEl.value);
+      writeUserKey(p, keyEl.value);
+      var hint = document.getElementById('ai-render-key-hint');
+      if (hint) {
+        hint.textContent = keyEl.value
+          ? 'Saved.' : 'Cleared — will fall back to .env.local or DevTools override.';
+      }
     });
   }
-
+  var modelElA = document.getElementById('ai-render-model');
+  if (modelElA) {
+    modelElA.addEventListener('change', function () {
+      var p = (provSel && provSel.value) || readProvider();
+      writeModel(p, modelElA.value);
+    });
+  }
   var fetchBtn = document.getElementById('ai-render-fetch-models');
   if (fetchBtn) {
     fetchBtn.addEventListener('click', async function () {
@@ -429,7 +432,7 @@ function bindEvents() {
       }
       fetchBtn.disabled = true;
       fetchBtn.textContent = '…';
-      if (hint) hint.textContent = 'Fetching from OpenRouter…';
+      if (hint) hint.textContent = 'Fetching catalog…';
       var res = await fetchOpenRouterModels();
       fetchBtn.disabled = false;
       fetchBtn.textContent = '↻';
@@ -437,12 +440,13 @@ function bindEvents() {
         if (hint) hint.textContent = 'Fetch failed: ' + res.error;
         return;
       }
-      // Refresh datalist with the fetched list.
       var dl = document.getElementById('ai-render-model-list');
       if (dl) dl.innerHTML = buildModelOptions('openrouter');
-      if (hint) hint.textContent = 'Loaded ' + res.count + ' image-output models. Pick one from the suggestions.';
+      if (hint) hint.textContent = 'Loaded ' + res.count + ' image-output models.';
     });
   }
+  // Auto-fetch catalog on first reveal so the datalist is ready.
+  if (readProvider() === 'openrouter') maybeAutoFetchOpenRouterModels();
 
   // Listen for module events.
   eventBus.on('whitewash:changed', function (d) {
@@ -459,7 +463,7 @@ function bindEvents() {
   });
   eventBus.on('ai-render:generating', function (d) {
     _busy = true;
-    setStatus('Generating · sent ' + (d && d.sourceDataUrl ? Math.round(d.sourceDataUrl.length / 1024) + ' KB' : '') + ' · Nano Banana Pro');
+    setStatus('Rendering · sent ' + (d && d.sourceDataUrl ? Math.round(d.sourceDataUrl.length / 1024) + ' KB' : ''));
     if (d && d.sourceDataUrl) renderSource(d.sourceDataUrl);
     refreshGoBtn();
   });
@@ -483,6 +487,12 @@ function bindEvents() {
       combined = 'OpenRouter privacy settings are blocking this model. '
         + 'Open https://openrouter.ai/settings/privacy and allow at least '
         + 'one provider, then retry. (' + msg + ')';
+    }
+    // Quota / rate-limit 429 — usually means Google direct on the free
+    // tier ran out, or OpenRouter credits are exhausted.
+    if (/429/.test(combined) || /quota/i.test(combined) || /rate limit/i.test(combined)) {
+      combined = 'Quota / rate limit hit. Either enable billing on the '
+        + 'provider you\'re using, or switch to a different one. (' + msg + ')';
     }
     setStatus('Error: ' + combined);
     refreshGoBtn();
@@ -569,7 +579,7 @@ function refreshGoBtn() {
   var goBtn = document.getElementById('ai-render-go');
   if (!goBtn) return;
   goBtn.disabled = _busy || !_whitewashOn;
-  goBtn.textContent = _busy ? 'Generating…' : 'Generate (Nano Banana Pro)';
+  goBtn.textContent = _busy ? 'Rendering…' : 'Render view';
 }
 
 function applyState(on) {

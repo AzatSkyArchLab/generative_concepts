@@ -38,6 +38,10 @@ export class UrbanBlockTool extends BaseDrawTool {
   // remaining edges form an open polyline that runs through the
   // section-chain (corners) pipeline.
   static useTowers = false;
+  // Per-block opt-in: render apartment balconies on residential
+  // floors (slab + glass parapets, staggered pattern by default).
+  // Heavy on FPS, off by default; toggle in AxisOptions panel.
+  static useBalconies = false;
 
   constructor(manager, featureStore, mapManager) {
     super(manager);
@@ -104,6 +108,8 @@ export class UrbanBlockTool extends BaseDrawTool {
         useGap: UrbanBlockTool.useGap,
         useCorners: UrbanBlockTool.useCorners,
         useTowers: UrbanBlockTool.useTowers,
+        useBalconies: UrbanBlockTool.useBalconies,
+        balconyPattern: 'staggered',
         solverParams: Object.assign({}, solveParams),
         createdAt: new Date().toISOString()
       },

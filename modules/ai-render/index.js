@@ -29,7 +29,7 @@ var _unsubs = [];
 
 // ── Provider config ──────────────────────────────────────
 
-var DEFAULT_PROVIDER = 'google';
+var DEFAULT_PROVIDER = 'openrouter';
 
 // Keys are NOT hard-coded — supply them at runtime via:
 //   window.__GEMINI_API_KEY__       (Google direct)
@@ -42,7 +42,10 @@ var GOOGLE_ENDPOINT_TMPL =
   GOOGLE_MODEL + ':generateContent';
 
 var OPENROUTER_FALLBACK_KEY = '';
-var OPENROUTER_MODEL = 'google/gemini-3-pro-image-preview';
+// Default OpenRouter slug — adjust if your account has a different
+// model whitelisted. The Advanced block in the panel lets you
+// change/fetch without code.
+var OPENROUTER_MODEL = 'google/gemini-3.1-flash-image-preview';
 var OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
 function getProvider() {
@@ -55,14 +58,46 @@ function getProvider() {
   return DEFAULT_PROVIDER;
 }
 
+// localStorage key names — keys persisted by RenderPanel's input field
+// so each colleague can paste their own key once and forget it.
+var LS_OPENROUTER_KEY = 'ai_render_openrouter_key';
+var LS_GEMINI_KEY = 'ai_render_gemini_key';
+
+/**
+ * Read the user's saved key from localStorage. Returns '' if missing
+ * or unavailable. Used by the panel to pre-populate the input field.
+ */
+export function readUserKey(provider) {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      var k = provider === 'openrouter' ? LS_OPENROUTER_KEY : LS_GEMINI_KEY;
+      return window.localStorage.getItem(k) || '';
+    }
+  } catch (_e) { /* SSR-safe */ }
+  return '';
+}
+
+/**
+ * Persist the user's key. Empty string clears it.
+ */
+export function writeUserKey(provider, value) {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      var k = provider === 'openrouter' ? LS_OPENROUTER_KEY : LS_GEMINI_KEY;
+      if (value) window.localStorage.setItem(k, String(value));
+      else window.localStorage.removeItem(k);
+    }
+  } catch (_e) { /* SSR-safe */ }
+}
+
 function getApiKey(provider) {
   // Resolution order:
-  //   1. window.__GEMINI_API_KEY__ / __OPENROUTER_API_KEY__ — runtime
-  //      override from DevTools or a settings panel.
-  //   2. import.meta.env.VITE_GEMINI_API_KEY / VITE_OPENROUTER_API_KEY —
-  //      Vite picks these up from .env.local (gitignored). Local-dev
-  //      friendly: drop your key in .env.local once and forget it.
-  //   3. Empty string — no key configured.
+  //   1. window.__GEMINI_API_KEY__ / __OPENROUTER_API_KEY__ — DevTools
+  //      override (highest priority).
+  //   2. localStorage — pasted via the panel UI. Per-browser, per-user.
+  //   3. import.meta.env.VITE_*_API_KEY — Vite picks up from .env.local
+  //      (gitignored). Convenient for the project owner.
+  //   4. Empty string — no key.
   try {
     if (typeof window !== 'undefined') {
       if (provider === 'openrouter' && window.__OPENROUTER_API_KEY__) {
@@ -73,6 +108,8 @@ function getApiKey(provider) {
       }
     }
   } catch (_e) { /* SSR-safe */ }
+  var ls = readUserKey(provider);
+  if (ls) return ls;
   try {
     if (typeof import.meta !== 'undefined' && import.meta.env) {
       var env = import.meta.env;
@@ -379,9 +416,9 @@ async function generateViaGoogle(opts) {
     return null;
   }
   if (json && json.error) {
-    log.error('[ai-render] google error:', json.error);
+    log.error('[ai-render] backend error:', json.error);
     if (_eventBus) _eventBus.emit('ai-render:error', {
-      message: json.error.message || 'Google API error'
+      message: json.error.message || 'API error'
     });
     return null;
   }
@@ -482,7 +519,8 @@ var aiRenderModule = {
       captureAndGenerate(d || {});
     }));
 
-    log.debug('[ai-render] initialized · model=' + GEMINI_MODEL);
+    log.debug('[ai-render] initialized · provider=' + DEFAULT_PROVIDER
+      + ' · model=' + getModel(DEFAULT_PROVIDER));
   },
 
   destroy: function () {

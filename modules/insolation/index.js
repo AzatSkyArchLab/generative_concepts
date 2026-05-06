@@ -29,6 +29,7 @@ import { log } from '../../core/Logger.js';
 // not just with user-built geometry.
 import { getExtractedBuildings } from '../metatiler/index.js';
 import { buildContextMeshData } from '../../core/metatiler/buildings-local.js';
+import { state as sectionGenState } from '../section-gen/state.js';
 
 // ── Config (from InsolationConfig, aliased for local brevity) ────
 
@@ -963,6 +964,21 @@ function runAnalysis(level, axisId, sectionIdx, maxFloor) {
   }
   if (cornerMeshes.length > 0) {
     log.debug('[insolation] added ' + cornerMeshes.length + ' corner collision meshes');
+  }
+
+  // Balcony slabs — section-gen accumulates these into
+  // `state._balconySlabBoxes` during the build pass. Each entry has
+  // {poly, baseZ, topZ}. The slab is the only opaque element of a
+  // balcony (parapets are glass and don't block sun rays in real
+  // analysis), so we add slab boxes only.
+  var bcnBoxes = sectionGenState && sectionGenState._balconySlabBoxes;
+  if (bcnBoxes && bcnBoxes.length > 0) {
+    for (var bbi = 0; bbi < bcnBoxes.length; bbi++) {
+      var box = bcnBoxes[bbi];
+      if (!box || !box.poly || box.poly.length < 4) continue;
+      _collisionMeshes.push(buildCollisionBoxRange(box.poly, box.baseZ, box.topZ));
+    }
+    log.debug('[insolation] added ' + bcnBoxes.length + ' balcony slab collision boxes');
   }
 
   // Append the surrounding-buildings context mesh. This is a single
