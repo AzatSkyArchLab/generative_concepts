@@ -258,13 +258,26 @@ export function composeMoodboard(dataUrls, opts) {
   return new Promise(function (resolve, reject) {
     if (!dataUrls || dataUrls.length === 0) { resolve(null); return; }
     opts = opts || {};
-    var tileSize = opts.tileSize || 512;
     var maxCols = opts.maxCols || 8;
     var n = dataUrls.length;
-    // Aim for an aspect ratio close to 16:10 — wide enough for
-    // landscape arch references but not pancake.
+    // Aim for ~16:10 aspect ratio.
     var cols = Math.min(maxCols, Math.max(1, Math.ceil(Math.sqrt(n * 1.6))));
     var rows = Math.ceil(n / cols);
+
+    // Adaptive tile size: clamp the FINAL canvas to MAX_W × MAX_H to
+    // keep the JSON body under OpenRouter's request limit. With many
+    // refs (e.g. 40) this drops the tile size so the moodboard
+    // doesn't balloon to 25+ MB and trip "Failed to fetch".
+    var MAX_W = opts.maxWidth || 2048;
+    var MAX_H = opts.maxHeight || 1536;
+    var preferred = opts.tileSize || 512;
+    var tileSize = Math.min(
+      preferred,
+      Math.floor(MAX_W / cols),
+      Math.floor(MAX_H / rows)
+    );
+    if (tileSize < 96) tileSize = 96; // floor — readability
+
     var canvas = document.createElement('canvas');
     canvas.width = cols * tileSize;
     canvas.height = rows * tileSize;
@@ -276,7 +289,18 @@ export function composeMoodboard(dataUrls, opts) {
     var errored = null;
     function maybeFinish() {
       if (errored) return;
-      if (loaded === n) resolve(canvas.toDataURL('image/jpeg', 0.85));
+      if (loaded === n) {
+        // Slightly lower JPEG quality keeps the body well under
+        // request limits without visibly hurting style transfer.
+        var url = canvas.toDataURL('image/jpeg', 0.78);
+        try {
+          var sizeKB = Math.round((url.length * 0.75) / 1024);
+          // eslint-disable-next-line no-console
+          console.log('[ai-render] moodboard ' + cols + '×' + rows
+            + ', tile=' + tileSize + 'px, ~' + sizeKB + ' KB');
+        } catch (_e) { /* no-op */ }
+        resolve(url);
+      }
     }
     for (var i = 0; i < n; i++) {
       (function (idx) {
@@ -390,15 +414,38 @@ async function generateViaOpenRouter(opts) {
   } catch (_e) { /* SSR-safe */ }
   headers['X-Title'] = 'U·B·SYSTEM AI Render';
 
-  log.debug('[ai-render] POST → openrouter/' + model + ' · prompt=' + opts.prompt.slice(0, 60));
+  // Pre-check body size — some browsers / CDNs reject payloads
+  // > ~25 MB before the request even hits the network, surfacing as
+  // "Failed to fetch" with no HTTP code. Logging the size up front
+  // lets us see what we're sending and tells the user clearly when
+  // a fat moodboard is the cause.
+  var bodyJson = JSON.stringify(body);
+  var bodyMB = (bodyJson.length / (1024 * 1024)).toFixed(2);
+  log.debug('[ai-render] POST → openrouter/' + model
+    + ' · body=' + bodyMB + ' MB · prompt=' + opts.prompt.slice(0, 60));
+  if (bodyJson.length > 24 * 1024 * 1024) {
+    var hint = 'Request body is ' + bodyMB
+      + ' MB (likely too large for the API). Reduce moodboard refs '
+      + 'or wait — the moodboard composer adapts tile size, so '
+      + 'fewer refs = sharper tiles.';
+    log.error('[ai-render] body too large: ' + bodyMB + ' MB');
+    if (_eventBus) _eventBus.emit('ai-render:error', { message: hint });
+    return null;
+  }
+
   var resp;
   try {
     resp = await fetch(OPENROUTER_ENDPOINT, {
-      method: 'POST', headers: headers, body: JSON.stringify(body)
+      method: 'POST', headers: headers, body: bodyJson
     });
   } catch (err) {
     log.error('[ai-render] openrouter network:', err);
-    if (_eventBus) _eventBus.emit('ai-render:error', { message: err.message || 'Network error' });
+    if (_eventBus) {
+      _eventBus.emit('ai-render:error', {
+        message: (err.message || 'Network error')
+          + ' — request was ' + bodyMB + ' MB; if too large try fewer references'
+      });
+    }
     return null;
   }
   if (!resp.ok) {
