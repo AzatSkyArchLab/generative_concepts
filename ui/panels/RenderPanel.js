@@ -12,13 +12,15 @@
  */
 
 import { eventBus } from '../../core/EventBus.js';
-import { readUserKey, writeUserKey, composeMoodboard } from '../../modules/ai-render/index.js';
+import { readUserKey, writeUserKey, composeMoodboard, generateRender, captureComposite } from '../../modules/ai-render/index.js';
+import { openModal as openRefModal, getSelected as getSelectedRef, onChange as onCatalogChange } from './ReferenceCatalog.js';
 
 var _whitewashOn = false;
 var _busy = false;
-var _refs = [];          // array of dataURLs from drag-drop / file picker
+var _refs = [];          // legacy moodboard array (kept for back-compat)
 var _lastResult = null;  // { sourceDataUrl, dataUrl, prompt }
 var _basemap = 'osm';    // 'osm' | 'satellite'
+var _catalogUnsub = null;
 
 // Provider + model presets the user can pick. Slugs synced with the
 // ai-render module's defaults; pick whatever your account allows.
@@ -163,6 +165,12 @@ export function renderRenderSection() {
   h += '<button class="render-btn" id="render-whitewash-btn">White model</button>';
   h += '<button class="render-btn render-btn--secondary" id="render-basemap-btn">Basemap: ' + (_basemap === 'satellite' ? 'Satellite' : 'Vector') + '</button>';
   h += '<button class="render-btn render-btn--secondary" id="render-screenshot-btn" disabled>Save composite PNG</button>';
+  // References catalog — opens a modal where the user picks ONE
+  // reference photo. Render-from-modal uses that ref + current
+  // composite. Result also lives in the modal so the user can
+  // scroll/compare with the source.
+  h += '<button class="render-btn render-btn--secondary" id="render-refs-btn" style="margin-top:6px">'
+       + 'References<span id="render-refs-count" style="opacity:0.7;margin-left:6px"></span></button>';
   h += '<div class="render-hint" id="render-hint" style="margin-top:6px">Toggle white model first.</div>';
 
   // Prompt textarea — Unicode/Russian-ready by default. Editable so
@@ -204,23 +212,8 @@ export function renderRenderSection() {
   h += '<datalist id="ai-render-model-list">' + buildModelOptions(curProvider) + '</datalist>';
   h += '<div id="ai-render-model-hint" style="font-size:9px;color:var(--text-muted);margin-top:4px"></div>';
 
-  // Moodboard — drop/pick N reference images. They're composited into
-  // a single grid PNG at Generate-time (one reference goes to the
-  // model, no matter how many you upload).
-  h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-top:8px;margin-bottom:3px">'
-       + 'Moodboard <span id="ai-ref-count" style="opacity:0.7">'
-       + (_refs.length ? '(' + _refs.length + ')' : '') + '</span></label>';
-  h += '<div id="ai-ref-strip" style="display:flex;gap:3px;flex-wrap:wrap;min-height:36px;'
-       + 'padding:4px;border:1px dashed var(--border);border-radius:3px;'
-       + 'align-items:center;justify-content:center"></div>';
-  h += '<div style="display:flex;gap:4px;margin-top:4px">';
-  h += '<button class="render-btn render-btn--secondary" id="ai-ref-add" style="flex:1;padding:3px 6px;font-size:11px">+ Add references</button>';
-  h += '<button class="render-btn render-btn--secondary" id="ai-ref-clear" style="flex:0 0 auto;padding:3px 6px;font-size:11px">Clear</button>';
-  h += '</div>';
-  h += '<div style="font-size:9px;color:var(--text-muted);margin-top:3px;line-height:1.3">'
-       + '6–12 strong, consistent refs work better than 40 mixed ones. '
-       + 'Pick photos sharing one architectural language.</div>';
-  h += '<input type="file" id="ai-ref-input" accept="image/*" multiple style="display:none">';
+  // Moodboard inline UI was here; references now live in the
+  // ReferenceCatalog modal (opened from the main panel).
 
   h += '<label style="display:block;font-size:10px;color:var(--text-muted);margin-top:8px;margin-bottom:3px">'
        + 'API key <span style="opacity:0.7">(saved in this browser)</span></label>';
@@ -333,6 +326,52 @@ async function fetchOpenRouterModels() {
   return { count: imageModels.length, error: null };
 }
 
+/**
+ * Render-from-modal handler. The catalog modal calls this when the
+ * user clicks "Render view" inside it. Captures the current composite
+ * (so satellite basemap + WM volumes are preserved), builds the
+ * prompt with a strict single-ref preamble, hits the API, and
+ * returns { sourceDataUrl, renderDataUrl } for the modal to display.
+ *
+ * The user explicitly works with satellite basemap and WITHOUT 3D
+ * context-buildings stand-ins (cleaner ground-truth for the model).
+ * This is honoured implicitly because we just capture whatever is
+ * currently on screen — no extra config needed.
+ */
+async function handleRenderFromModal(ref) {
+  if (!ref || !ref.dataUrl) throw new Error('no reference selected');
+
+  // Capture current composite (WM + map + 3D Three.js).
+  var sourceDataUrl = captureComposite();
+  if (!sourceDataUrl) throw new Error('capture failed — toggle White model first');
+
+  // Read user prompt (or default) from the textarea.
+  var promptEl = document.getElementById('ai-render-prompt');
+  var promptBase = (promptEl && promptEl.value) ? promptEl.value : DEFAULT_PROMPT;
+  try { window.__AI_PROMPT__ = promptBase; } catch (_e) { /* SSR-safe */ }
+
+  // Single-ref preamble — refs come BEFORE subject in the API call,
+  // so IMAGE 1 is the style ref, IMAGE 2 is the geometry constraint.
+  var finalPrompt =
+    'IMAGE 1 (STYLE REFERENCE) — your DOMINANT VISUAL DRIVER. '
+    + 'ADOPT every facade material, window/balcony rhythm, color tonality '
+    + 'and atmospheric quality from this image. The final render MUST '
+    + 'visibly inherit IMAGE 1\'s materiality. Do NOT copy its building '
+    + 'shape — only its style.\n'
+    + 'IMAGE 2 (massing study) — the GEOMETRIC CONSTRAINT. '
+    + 'Preserve every volume\'s footprint, position, height and proportion '
+    + 'EXACTLY per the rules below. Apply IMAGE 1\'s STYLE to IMAGE 2\'s '
+    + 'GEOMETRY.\n\n' + promptBase;
+
+  var result = await generateRender({
+    prompt: finalPrompt,
+    imageDataUrl: sourceDataUrl,
+    referenceDataUrls: [ref.dataUrl]
+  });
+  if (!result || !result.dataUrl) throw new Error('model returned no image');
+  return { sourceDataUrl: sourceDataUrl, renderDataUrl: result.dataUrl };
+}
+
 function bindEvents() {
   var wwBtn = document.getElementById('render-whitewash-btn');
   if (wwBtn) {
@@ -348,6 +387,28 @@ function bindEvents() {
       eventBus.emit('map:basemap:set', { type: next });
     });
   }
+
+  // References — open the catalog modal. The modal calls back into
+  // a render function we provide; result is rendered inside the
+  // modal alongside the source composite for comparison.
+  var refsBtn = document.getElementById('render-refs-btn');
+  if (refsBtn) {
+    refsBtn.addEventListener('click', function () {
+      openRefModal({ onRender: handleRenderFromModal });
+    });
+  }
+  // Keep a small "(N)" / "selected" indicator on the button.
+  function refreshRefsCount() {
+    var el = document.getElementById('render-refs-count');
+    if (!el) return;
+    var sel = getSelectedRef();
+    el.textContent = sel ? '· ' + (sel.name.length > 16 ? sel.name.slice(0, 16) + '…' : sel.name) : '';
+    el.style.color = sel ? 'var(--primary)' : 'var(--text-muted)';
+  }
+  refreshRefsCount();
+  // Catalog changes (add/remove/select) → refresh indicator.
+  if (_catalogUnsub) _catalogUnsub();
+  _catalogUnsub = onCatalogChange(refreshRefsCount);
 
   var shotBtn = document.getElementById('render-screenshot-btn');
   if (shotBtn) {
