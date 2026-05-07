@@ -26,6 +26,7 @@
 
 // (No imports from ai-render — the modal accepts a render callback
 // from the caller and returns control to it for the actual API call.)
+import { buildZip, dataUrlToBytes, downloadBytes } from '../../core/io/zip.js';
 
 var LS_CATALOG_OLD = 'ai_render_catalog_v1'; // legacy — migrated on load
 var LS_SELECTED = 'ai_render_selected_ref_v1';
@@ -517,11 +518,19 @@ function bindModalEvents(card, opts) {
  *   { sourceDataUrl, renderDataUrl, label? }
  * The viewer is append-only within a session — successive renders
  * appear stacked so the user can scroll and compare.
+ *
+ * Download produces a ZIP archive `render_TIMESTAMP.zip` containing:
+ *   render_TIMESTAMP/
+ *     render.png         — model output
+ *     source.png         — current view captured before the render
+ *     reference.<ext>    — the reference image used (orig mime kept)
+ *     metadata.txt       — ref name + timestamp + provider notes
  */
 function showResult(card, result, ref) {
   var area = card.querySelector('#ai-cat-result');
   if (!area) return;
-  var stamp = new Date().toLocaleTimeString();
+  var now = new Date();
+  var stamp = now.toLocaleTimeString();
   var block = document.createElement('div');
   block.style.cssText = 'margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)';
   var label = result.label || stamp;
@@ -535,9 +544,55 @@ function showResult(card, result, ref) {
     +   '<img src="' + result.renderDataUrl + '" style="width:100%;border:1px solid var(--border);border-radius:4px;display:block"></div>'
     + '</div>'
     + '<div style="margin-top:4px;text-align:right">'
-    +   '<a href="' + result.renderDataUrl + '" download="ai-render-' + Date.now()
-    +   '.png" style="font-size:11px;color:var(--primary);text-decoration:none">Download PNG</a>'
+    +   '<button class="render-btn render-btn--secondary ai-cat-dl"'
+    +   ' style="font-size:11px;padding:3px 10px">Download (zip)</button>'
     + '</div>';
   // Newest first.
   area.insertBefore(block, area.firstChild);
+
+  var dlBtn = block.querySelector('.ai-cat-dl');
+  if (dlBtn) {
+    dlBtn.addEventListener('click', function () {
+      try {
+        // Folder name + timestamp tag — sortable, filename-safe.
+        var ts = formatStamp(now);
+        var folder = 'render_' + ts;
+        var refExt = guessExt(ref.dataUrl);
+        var meta =
+          'AI render bundle\n'
+          + 'Timestamp: ' + now.toISOString() + '\n'
+          + 'Reference name: ' + ref.name + '\n'
+          + 'Reference id: ' + ref.id + '\n';
+        var encoder = new TextEncoder();
+        var files = [
+          { name: folder + '/render.png',           data: dataUrlToBytes(result.renderDataUrl) },
+          { name: folder + '/source.png',           data: dataUrlToBytes(result.sourceDataUrl) },
+          { name: folder + '/reference.' + refExt,  data: dataUrlToBytes(ref.dataUrl) },
+          { name: folder + '/metadata.txt',         data: encoder.encode(meta) }
+        ];
+        var zip = buildZip(files);
+        downloadBytes(zip, folder + '.zip', 'application/zip');
+      } catch (err) {
+        console.error('[ai-render-catalog] download bundle failed:', err);
+        if (typeof window !== 'undefined' && window.alert) {
+          window.alert('Download failed: ' + (err.message || err));
+        }
+      }
+    });
+  }
+}
+
+function formatStamp(d) {
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+    + '_' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds());
+}
+
+function guessExt(dataUrl) {
+  var m = /^data:image\/([a-zA-Z0-9+.-]+);/.exec(dataUrl || '');
+  if (!m) return 'png';
+  var sub = m[1].toLowerCase();
+  if (sub === 'jpeg') return 'jpg';
+  if (sub === 'svg+xml') return 'svg';
+  return sub;
 }
