@@ -397,8 +397,8 @@ async function handleRender3FromModal(ctx) {
   if (!sourceDataUrl) throw new Error('capture failed — toggle White model first');
   var promptBase = readPromptBase();
 
-  // ANGLE-specific instruction. Goes ABOVE the constraint preamble
-  // so the model picks the camera up-front before reading the rest.
+  // ANGLE-specific instruction. Goes ABOVE everything so the model
+  // picks the camera up-front before reading the rest.
   var angleInstr;
   if (idx === 0) {
     angleInstr =
@@ -421,34 +421,59 @@ async function handleRender3FromModal(ctx) {
       + 'looking. SAME building/materials as the previous renders.';
   }
 
-  // Build the IMAGE legend dynamically. Refs go FIRST, then prior
-  // renders, then the subject. Indices are computed so the prompt
-  // text matches the order the API will receive.
+  // CASCADE STRATEGY: massing study FIRST, prior renders SECOND,
+  // style ref LAST. This is opposite of single-render mode (where
+  // refs go first) — without this, the model in cascade mode locks
+  // onto the style image and renders an alternate-shape building
+  // that vaguely fits the prompt. Putting massing first anchors the
+  // geometry; style ref shifted to the end makes it clearly a
+  // material palette, not a subject substitute.
   var legend = [];
-  legend.push('IMAGE 1 (STYLE REFERENCE) — your DOMINANT VISUAL DRIVER. '
-    + 'ADOPT facade materials, window/balcony rhythms, color and '
-    + 'atmosphere from this image. Do NOT copy its building shape.');
+  legend.push('IMAGE 1 (MASSING STUDY) — THIS IS THE BUILDING TO '
+    + 'RENDER. The scene shown here — every volume\'s footprint, '
+    + 'position, height, count, and proportion — IS the geometric '
+    + 'truth. The output must depict THESE volumes (color-coded by '
+    + 'role) and NOTHING ELSE. Do not invent extra buildings, do not '
+    + 'omit any volume, do not change shapes.');
   for (var i = 0; i < prior.length; i++) {
     var n = i + 2;
     legend.push('IMAGE ' + n + ' (PRIOR RENDER, view '
-      + (i + 1) + ') — same building from a different angle. MATCH its '
-      + 'materials, colors, lighting, time of day and atmosphere '
-      + 'EXACTLY. The trio must look like ONE consistent building.');
+      + (i + 1) + ') — the SAME building (from IMAGE 1) rendered at a '
+      + 'different angle. Match its materials, colors, lighting and '
+      + 'time of day EXACTLY. Use it for visual consistency only — '
+      + 'geometry still comes from IMAGE 1, not from this prior render.');
   }
-  var subjectIdx = 1 + prior.length + 1;
-  legend.push('IMAGE ' + subjectIdx + ' (massing study) — the GEOMETRIC '
-    + 'CONSTRAINT. Preserve every volume\'s footprint, position, height '
-    + 'and proportion EXACTLY per the rules below.');
+  var refIdx = 1 + prior.length + 1;
+  legend.push('IMAGE ' + refIdx + ' (STYLE PALETTE) — a real-world '
+    + 'photo whose materials, facade rhythm, window patterns, balcony '
+    + 'designs, and atmosphere you SAMPLE for the surfaces of IMAGE 1. '
+    + 'IGNORE the building shapes in this image entirely — copy only '
+    + 'materials and atmosphere, never silhouettes or footprints.');
 
-  var finalPrompt = angleInstr + '\n\n' + legend.join('\n') + '\n\n' + promptBase;
+  var finalPrompt = angleInstr
+    + '\n\nCRITICAL: the buildings shown in the OUTPUT must match the '
+    + 'volumes in IMAGE 1 (massing study) EXACTLY. Apply IMAGE '
+    + refIdx + '\'s materials and palette to IMAGE 1\'s geometry. '
+    + 'NEVER substitute IMAGE 1\'s shapes with anything from another '
+    + 'image. If a volume is in the massing, render it; if it isn\'t, '
+    + 'don\'t add it.\n\n'
+    + legend.join('\n') + '\n\n' + promptBase;
 
-  // refs to send: style ref + prior renders, in that order.
-  var refs = [ref.dataUrl].concat(prior);
+  // Order in the API: massing first, prior renders, style ref last.
+  // imageDataUrl is the subject (already at position #1 in the
+  // generated parts array — see ai-render module). references go
+  // AFTER subject. So ordering becomes:
+  //   subject (massing) → prior renders → style ref
+  // — matches the legend numbering.
+  var refs = prior.concat([ref.dataUrl]);
 
   var result = await generateRender({
     prompt: finalPrompt,
     imageDataUrl: sourceDataUrl,
-    referenceDataUrls: refs
+    referenceDataUrls: refs,
+    // Override the default refs-first ordering used for single
+    // render — for cascade we need subject FIRST.
+    subjectFirst: true
   });
   if (!result || !result.dataUrl) throw new Error('model returned no image');
   return { sourceDataUrl: sourceDataUrl, renderDataUrl: result.dataUrl };

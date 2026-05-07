@@ -517,7 +517,9 @@ function bindModalEvents(card, opts) {
 
   // Render 3 views cascade — emits 3 calls in sequence, each later
   // call carries the previous renders as anchors so the trio reads
-  // as the SAME building from different angles.
+  // as the SAME building from different angles. After all 3 are
+  // ready, a single bundle header with a Download-all-zip button
+  // appears at the top of the result viewer.
   var render3Btn = card.querySelector('#ai-cat-render3');
   if (render3Btn && opts.onRender3) {
     render3Btn.addEventListener('click', async function () {
@@ -527,8 +529,8 @@ function bindModalEvents(card, opts) {
       setBusy(card, true);
       var statusEl = card.querySelector('#ai-cat-status');
       try {
-        var prior = []; // accumulated outputs to feed forward
-        var sourceDataUrl = null;
+        var prior = [];
+        var allResults = [];
         var angles = [
           { id: 'ground-a', label: 'Ground A — pedestrian eye-level' },
           { id: 'ground-b', label: 'Ground B — alternate vantage' },
@@ -543,15 +545,20 @@ function bindModalEvents(card, opts) {
             priorRenders: prior.slice()
           });
           if (!step || !step.renderDataUrl) throw new Error('view ' + (i + 1) + ' failed');
-          if (!sourceDataUrl) sourceDataUrl = step.sourceDataUrl;
           showResult(card, {
             sourceDataUrl: step.sourceDataUrl,
             renderDataUrl: step.renderDataUrl,
             label: angles[i].label
           }, ref);
           prior.push(step.renderDataUrl);
+          allResults.push({
+            angle: angles[i],
+            sourceDataUrl: step.sourceDataUrl,
+            renderDataUrl: step.renderDataUrl
+          });
         }
         if (statusEl) statusEl.textContent = 'All 3 views done.';
+        showBundleHeader(card, allResults, ref);
       } catch (err) {
         if (statusEl) statusEl.textContent = 'Error: ' + (err && err.message || err);
       } finally {
@@ -640,6 +647,71 @@ function formatStamp(d) {
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
     + '_' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds());
+}
+
+/**
+ * After a 3-view cascade completes, drop a colored header at the top
+ * of the result viewer with a single "Download all (zip)" button.
+ * The bundle contains all renders, the source, the reference, and a
+ * metadata file in one folder.
+ */
+function showBundleHeader(card, results, ref) {
+  var area = card.querySelector('#ai-cat-result');
+  if (!area || !results || results.length === 0) return;
+  var hdr = document.createElement('div');
+  hdr.style.cssText = 'margin-bottom:14px;padding:10px 12px;border:1px solid var(--primary, #6366f1);'
+    + 'border-radius:6px;background:rgba(99,102,241,0.08);display:flex;align-items:center;gap:10px';
+  hdr.innerHTML =
+    '<div style="font-weight:600;font-size:12px;flex:1">'
+    + '✓ All ' + results.length + ' views ready · ref: ' + escapeHtml(ref.name)
+    + '</div>'
+    + '<button class="ai-cat-bundle" style="padding:5px 14px;font-size:11px;'
+    + 'background:var(--primary, #6366f1);color:#fff;font-weight:700;border:none;'
+    + 'border-radius:4px;cursor:pointer">Download all (zip)</button>';
+  var btn = hdr.querySelector('.ai-cat-bundle');
+  if (btn) {
+    btn.addEventListener('click', function () {
+      try { bundleDownloadAll(results, ref); }
+      catch (err) {
+        console.error('[ai-render-catalog] bundle download failed:', err);
+        if (typeof window !== 'undefined' && window.alert) {
+          window.alert('Bundle download failed: ' + (err.message || err));
+        }
+      }
+    });
+  }
+  area.insertBefore(hdr, area.firstChild);
+}
+
+function bundleDownloadAll(results, ref) {
+  var now = new Date();
+  var ts = formatStamp(now);
+  var folder = 'render_3views_' + ts;
+  var refExt = guessExt(ref.dataUrl);
+  var encoder = new TextEncoder();
+  var meta = 'AI render bundle (3 views)\n'
+    + 'Timestamp: ' + now.toISOString() + '\n'
+    + 'Reference name: ' + ref.name + '\n'
+    + 'Reference id: ' + ref.id + '\n\n'
+    + 'Views:\n';
+  var files = [];
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var slug = (r.angle && r.angle.id) || ('view-' + (i + 1));
+    var label = (r.angle && r.angle.label) || ('view-' + (i + 1));
+    files.push({
+      name: folder + '/render-' + (i + 1) + '-' + slug + '.png',
+      data: dataUrlToBytes(r.renderDataUrl)
+    });
+    meta += '  ' + (i + 1) + '. ' + label + ' → render-' + (i + 1) + '-' + slug + '.png\n';
+  }
+  // Source is the same composite for all 3 (camera doesn't move
+  // between calls in the cascade).
+  files.push({ name: folder + '/source.png', data: dataUrlToBytes(results[0].sourceDataUrl) });
+  files.push({ name: folder + '/reference.' + refExt, data: dataUrlToBytes(ref.dataUrl) });
+  files.push({ name: folder + '/metadata.txt', data: encoder.encode(meta) });
+  var zip = buildZip(files);
+  downloadBytes(zip, folder + '.zip', 'application/zip');
 }
 
 function guessExt(dataUrl) {

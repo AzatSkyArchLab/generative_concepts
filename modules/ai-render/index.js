@@ -385,17 +385,18 @@ async function generateViaOpenRouter(opts) {
 
   var content = [];
   content.push({ type: 'text', text: String(opts.prompt) });
-  // Refs FIRST when present, subject SECOND. Image-output models tend
-  // to anchor on the first image they see; placing the moodboard
-  // first lets it act as the dominant style cue, with the subject
-  // becoming the geometric constraint.
+  // Default: refs FIRST, subject SECOND (style ref dominates). Pass
+  // `subjectFirst: true` to flip — used by the 3-view cascade where
+  // geometry must dominate or the model copies the reference shape.
+  var subjectFirst = opts.subjectFirst === true;
+  if (subjectFirst) content.push({ type: 'image_url', image_url: { url: opts.imageDataUrl } });
   if (Array.isArray(opts.referenceDataUrls)) {
     for (var ri = 0; ri < opts.referenceDataUrls.length; ri++) {
       var ref = opts.referenceDataUrls[ri];
       if (ref) content.push({ type: 'image_url', image_url: { url: ref } });
     }
   }
-  content.push({ type: 'image_url', image_url: { url: opts.imageDataUrl } });
+  if (!subjectFirst) content.push({ type: 'image_url', image_url: { url: opts.imageDataUrl } });
 
   var body = {
     model: model,
@@ -491,8 +492,19 @@ async function generateViaGoogle(opts) {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/'
     + model + ':generateContent?key=' + encodeURIComponent(key);
 
-  // Refs FIRST, subject SECOND — see generateViaOpenRouter for why.
+  // Default: refs FIRST, subject SECOND. `subjectFirst: true` flips
+  // the order — used by the cascade so geometry dominates.
   var parts = [{ text: String(opts.prompt) }];
+  var subjectFirstG = opts.subjectFirst === true;
+  function pushSubject() {
+    parts.push({
+      inline_data: {
+        mime_type: 'image/png',
+        data: dataUrlToBase64(opts.imageDataUrl)
+      }
+    });
+  }
+  if (subjectFirstG) pushSubject();
   if (Array.isArray(opts.referenceDataUrls)) {
     for (var i = 0; i < opts.referenceDataUrls.length; i++) {
       var ref = opts.referenceDataUrls[i];
@@ -502,12 +514,7 @@ async function generateViaGoogle(opts) {
       parts.push({ inline_data: { mime_type: mime, data: dataUrlToBase64(ref) } });
     }
   }
-  parts.push({
-    inline_data: {
-      mime_type: 'image/png',
-      data: dataUrlToBase64(opts.imageDataUrl)
-    }
-  });
+  if (!subjectFirstG) pushSubject();
   var body = {
     contents: [{ role: 'user', parts: parts }],
     generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
