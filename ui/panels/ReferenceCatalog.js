@@ -1,68 +1,160 @@
 /**
  * ReferenceCatalog — persistent catalog of architectural references
- * for AI render. localStorage-backed, single-selection.
+ * for AI render. IndexedDB-backed (was localStorage; that capped at
+ * ~5-10 MB / origin and broke at ~30 refs).
  *
- * Public API:
+ * Public API (sync getters use an in-memory cache; mutations are
+ * async but the cache updates immediately so the UI reads fine):
  *   getCatalog()      → Array<{id, name, dataUrl, addedAt}>
  *   getSelectedId()   → string | null
  *   getSelected()     → reference object | null
  *   addReference(file) → Promise<reference>
- *   removeReference(id)
+ *   removeReference(id) → Promise
+ *   clearAll() → Promise
  *   selectReference(id | null)
  *   openModal(opts)   — opens the catalog modal as an overlay
  *   onChange(fn)      → unsubscribe fn (notified on add/remove/select)
  *
  * Storage:
- *   localStorage `ai_render_catalog_v1`  — JSON array of refs
- *   localStorage `ai_render_selected_ref_v1` — selected ref id
+ *   IndexedDB  `ai-render` / store `references`  — full ref records
+ *   localStorage `ai_render_selected_ref_v1` — selected ref id (tiny)
  *
  * Images on import are downscaled to ≤ 1024×1024 and re-encoded as
- * JPEG q=0.85 so the catalog fits comfortably in localStorage even
- * with 30+ refs (~5 MB total).
+ * JPEG q=0.85. Catalog can hold hundreds of refs in IDB without hitting
+ * a quota — IDB origin storage is typically 10 % of free disk.
  */
 
 // (No imports from ai-render — the modal accepts a render callback
 // from the caller and returns control to it for the actual API call.)
 
-var LS_CATALOG = 'ai_render_catalog_v1';
+var LS_CATALOG_OLD = 'ai_render_catalog_v1'; // legacy — migrated on load
 var LS_SELECTED = 'ai_render_selected_ref_v1';
 
-var _catalog = null;     // lazy-loaded
+var DB_NAME = 'ai-render';
+var DB_VERSION = 1;
+var STORE = 'references';
+
+var _catalog = [];       // in-memory cache
 var _selectedId = null;
 var _listeners = [];
 var _modalEl = null;     // current open modal, if any
 var _busy = false;       // render in progress
+var _loading = null;     // pending Promise while IDB hydrates
 
-// ── Storage ──────────────────────────────────────────
+// ── IndexedDB helpers ────────────────────────────────
 
-function load() {
-  if (_catalog) return;
-  try {
-    var raw = localStorage.getItem(LS_CATALOG);
-    _catalog = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(_catalog)) _catalog = [];
-    _selectedId = localStorage.getItem(LS_SELECTED) || null;
-    // Drop selection if the ref no longer exists.
-    if (_selectedId && !_catalog.some(function (r) { return r.id === _selectedId; })) {
-      _selectedId = null;
+function openDB() {
+  return new Promise(function (resolve, reject) {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB unavailable'));
+      return;
     }
-  } catch (_e) {
-    _catalog = []; _selectedId = null;
-  }
+    var req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = function () {
+      var db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = function () { resolve(req.result); };
+    req.onerror = function () { reject(req.error); };
+  });
 }
 
-function save() {
+function idbGetAll() {
+  return openDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE, 'readonly');
+      var st = tx.objectStore(STORE);
+      var req = st.getAll();
+      req.onsuccess = function () {
+        var arr = req.result || [];
+        arr.sort(function (a, b) { return (a.addedAt || 0) - (b.addedAt || 0); });
+        resolve(arr);
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+function idbPut(ref) {
+  return openDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE, 'readwrite');
+      var st = tx.objectStore(STORE);
+      var req = st.put(ref);
+      req.onsuccess = function () { resolve(); };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+function idbDelete(id) {
+  return openDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE, 'readwrite');
+      var st = tx.objectStore(STORE);
+      var req = st.delete(id);
+      req.onsuccess = function () { resolve(); };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+function idbClear() {
+  return openDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE, 'readwrite');
+      var st = tx.objectStore(STORE);
+      var req = st.clear();
+      req.onsuccess = function () { resolve(); };
+      req.onerror = function () { reject(req.error); };
+    });
+  });
+}
+
+// ── Hydration + legacy migration ─────────────────────
+
+function ensureLoaded() {
+  if (_loading) return _loading;
+  _loading = idbGetAll().then(function (arr) {
+    _catalog = arr;
+    _selectedId = localStorage.getItem(LS_SELECTED) || null;
+    if (_selectedId && !_catalog.some(function (r) { return r.id === _selectedId; })) {
+      _selectedId = null;
+      try { localStorage.removeItem(LS_SELECTED); } catch (_e) { /* no-op */ }
+    }
+    // One-time migration from the old localStorage catalog.
+    try {
+      var oldRaw = localStorage.getItem(LS_CATALOG_OLD);
+      if (oldRaw) {
+        var oldArr = JSON.parse(oldRaw) || [];
+        var migrations = [];
+        for (var i = 0; i < oldArr.length; i++) {
+          var r = oldArr[i];
+          if (!r || !r.id) continue;
+          if (!_catalog.some(function (x) { return x.id === r.id; })) {
+            migrations.push(idbPut(r).then(function () { _catalog.push(r); }));
+          }
+        }
+        return Promise.all(migrations).then(function () {
+          try { localStorage.removeItem(LS_CATALOG_OLD); } catch (_e) { /* no-op */ }
+          _catalog.sort(function (a, b) { return (a.addedAt || 0) - (b.addedAt || 0); });
+        });
+      }
+    } catch (_e) { /* no-op */ }
+  }, function (err) {
+    console.warn('[ai-render-catalog] IDB load failed:', err);
+    _catalog = [];
+  }).then(function () { notify(); });
+  return _loading;
+}
+
+function saveSelected() {
   try {
-    localStorage.setItem(LS_CATALOG, JSON.stringify(_catalog));
     if (_selectedId) localStorage.setItem(LS_SELECTED, _selectedId);
     else localStorage.removeItem(LS_SELECTED);
-  } catch (e) {
-    // localStorage might be full — surface it so the user can clear.
-    console.warn('[ai-render-catalog] save failed (localStorage full?):', e);
-    if (typeof window !== 'undefined' && window.alert) {
-      window.alert('Reference catalog full. Remove some refs and try again.');
-    }
-  }
+  } catch (_e) { /* no-op */ }
 }
 
 function notify() {
@@ -73,12 +165,14 @@ function notify() {
 
 // ── Public API ───────────────────────────────────────
 
-export function getCatalog() { load(); return _catalog.slice(); }
+// Sync getters return whatever's cached. Caller can subscribe via
+// onChange() to be notified once IDB hydration completes.
+export function getCatalog() { ensureLoaded(); return _catalog.slice(); }
 
-export function getSelectedId() { load(); return _selectedId; }
+export function getSelectedId() { ensureLoaded(); return _selectedId; }
 
 export function getSelected() {
-  load();
+  ensureLoaded();
   if (!_selectedId) return null;
   for (var i = 0; i < _catalog.length; i++) {
     if (_catalog[i].id === _selectedId) return _catalog[i];
@@ -87,28 +181,33 @@ export function getSelected() {
 }
 
 export function selectReference(id) {
-  load();
+  ensureLoaded();
   _selectedId = id || null;
-  save();
+  saveSelected();
   notify();
 }
 
 export function removeReference(id) {
-  load();
+  ensureLoaded();
   for (var i = 0; i < _catalog.length; i++) {
     if (_catalog[i].id === id) { _catalog.splice(i, 1); break; }
   }
-  if (_selectedId === id) _selectedId = null;
-  save();
+  if (_selectedId === id) { _selectedId = null; saveSelected(); }
   notify();
+  return idbDelete(id).catch(function (err) {
+    console.warn('[ai-render-catalog] delete failed:', err);
+  });
 }
 
 export function clearAll() {
-  load();
+  ensureLoaded();
   _catalog = [];
   _selectedId = null;
-  save();
+  saveSelected();
   notify();
+  return idbClear().catch(function (err) {
+    console.warn('[ai-render-catalog] clear failed:', err);
+  });
 }
 
 export function onChange(fn) {
@@ -121,22 +220,23 @@ export function onChange(fn) {
 
 /**
  * Add a reference from a File / Blob. Image is downscaled and
- * re-encoded as JPEG before persisting so localStorage usage stays
- * bounded.
+ * re-encoded as JPEG before persisting in IndexedDB.
  */
 export function addReference(file) {
-  load();
-  return compressImage(file, 1024, 0.85).then(function (dataUrl) {
+  return ensureLoaded().then(function () {
+    return compressImage(file, 1024, 0.85);
+  }).then(function (dataUrl) {
     var ref = {
       id: 'ref_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
       name: (file && file.name) || 'untitled',
       dataUrl: dataUrl,
       addedAt: Date.now()
     };
-    _catalog.push(ref);
-    save();
-    notify();
-    return ref;
+    return idbPut(ref).then(function () {
+      _catalog.push(ref);
+      notify();
+      return ref;
+    });
   });
 }
 
@@ -188,7 +288,6 @@ function escapeHtml(s) {
  *   rejects with an Error.
  */
 export function openModal(opts) {
-  load();
   if (_modalEl) return; // already open
   opts = opts || {};
 
@@ -220,6 +319,14 @@ export function openModal(opts) {
     if (e.target === overlay) closeModal();
   });
   document.addEventListener('keydown', escClose, true);
+
+  // First open: hydrate from IDB. While loading, the modal shows the
+  // empty-state hint; when the cache is populated we re-render.
+  ensureLoaded().then(function () {
+    if (!_modalEl) return; // user closed during load
+    card.innerHTML = renderModalContent();
+    bindModalEvents(card, opts);
+  });
 }
 
 function escClose(e) { if (e.key === 'Escape') closeModal(); }
@@ -232,7 +339,6 @@ function closeModal() {
 }
 
 function renderModalContent() {
-  load();
   var sel = getSelected();
   var h = '';
   // Header.
