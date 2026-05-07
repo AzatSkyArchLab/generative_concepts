@@ -338,20 +338,18 @@ async function fetchOpenRouterModels() {
  * This is honoured implicitly because we just capture whatever is
  * currently on screen — no extra config needed.
  */
+function readPromptBase() {
+  var promptEl = document.getElementById('ai-render-prompt');
+  var p = (promptEl && promptEl.value) ? promptEl.value : DEFAULT_PROMPT;
+  try { window.__AI_PROMPT__ = p; } catch (_e) { /* SSR-safe */ }
+  return p;
+}
+
 async function handleRenderFromModal(ref) {
   if (!ref || !ref.dataUrl) throw new Error('no reference selected');
-
-  // Capture current composite (WM + map + 3D Three.js).
   var sourceDataUrl = captureComposite();
   if (!sourceDataUrl) throw new Error('capture failed — toggle White model first');
-
-  // Read user prompt (or default) from the textarea.
-  var promptEl = document.getElementById('ai-render-prompt');
-  var promptBase = (promptEl && promptEl.value) ? promptEl.value : DEFAULT_PROMPT;
-  try { window.__AI_PROMPT__ = promptBase; } catch (_e) { /* SSR-safe */ }
-
-  // Single-ref preamble — refs come BEFORE subject in the API call,
-  // so IMAGE 1 is the style ref, IMAGE 2 is the geometry constraint.
+  var promptBase = readPromptBase();
   var finalPrompt =
     'IMAGE 1 (STYLE REFERENCE) — your DOMINANT VISUAL DRIVER. '
     + 'ADOPT every facade material, window/balcony rhythm, color tonality '
@@ -362,11 +360,95 @@ async function handleRenderFromModal(ref) {
     + 'Preserve every volume\'s footprint, position, height and proportion '
     + 'EXACTLY per the rules below. Apply IMAGE 1\'s STYLE to IMAGE 2\'s '
     + 'GEOMETRY.\n\n' + promptBase;
-
   var result = await generateRender({
     prompt: finalPrompt,
     imageDataUrl: sourceDataUrl,
     referenceDataUrls: [ref.dataUrl]
+  });
+  if (!result || !result.dataUrl) throw new Error('model returned no image');
+  return { sourceDataUrl: sourceDataUrl, renderDataUrl: result.dataUrl };
+}
+
+/**
+ * Per-step callback for the 3-view cascade. Same WM source for all
+ * three calls (camera doesn't move between calls), but the prompt
+ * shifts and previous renders are appended as additional refs so
+ * the trio reads as the SAME building, just different angles.
+ *
+ * Angles:
+ *   0 — Ground A: pedestrian eye-level, frontal view of the most
+ *       prominent volume.
+ *   1 — Ground B: pedestrian eye-level from a different street
+ *       corner, ~90° around. Must match angle 0's materials/
+ *       colors/atmosphere exactly.
+ *   2 — Match current camera: as close as possible to the input
+ *       view's framing — same camera height, tilt, distance.
+ *
+ * Each later call lists prior renders as IMAGE 2..N+1 with the
+ * style ref shifted to IMAGE 1, so the model anchors on previous
+ * outputs for consistency.
+ */
+async function handleRender3FromModal(ctx) {
+  var ref = ctx.ref;
+  var idx = ctx.angleIndex;
+  var prior = ctx.priorRenders || [];
+  if (!ref || !ref.dataUrl) throw new Error('no reference selected');
+  var sourceDataUrl = captureComposite();
+  if (!sourceDataUrl) throw new Error('capture failed — toggle White model first');
+  var promptBase = readPromptBase();
+
+  // ANGLE-specific instruction. Goes ABOVE the constraint preamble
+  // so the model picks the camera up-front before reading the rest.
+  var angleInstr;
+  if (idx === 0) {
+    angleInstr =
+      'CAMERA: pedestrian eye-level (~1.7 m), looking at the most '
+      + 'prominent NEW volume from the public street side. Frontal-ish '
+      + 'three-quarter view. Show the ground floor + ~3-5 stories '
+      + 'clearly. Cinematic but realistic.';
+  } else if (idx === 1) {
+    angleInstr =
+      'CAMERA: pedestrian eye-level (~1.7 m) from a DIFFERENT vantage '
+      + 'than the previous render — rotate ~90° around the urban-block, '
+      + 'show a different facade. Same time of day and lighting as '
+      + 'previous render. SAME building, different angle.';
+  } else {
+    angleInstr =
+      'CAMERA: match the input massing study\'s framing as closely as '
+      + 'possible — same camera height, tilt, distance from subject. '
+      + 'This view should read like the input volumes if they were '
+      + 'finished buildings, photographed from where the user is now '
+      + 'looking. SAME building/materials as the previous renders.';
+  }
+
+  // Build the IMAGE legend dynamically. Refs go FIRST, then prior
+  // renders, then the subject. Indices are computed so the prompt
+  // text matches the order the API will receive.
+  var legend = [];
+  legend.push('IMAGE 1 (STYLE REFERENCE) — your DOMINANT VISUAL DRIVER. '
+    + 'ADOPT facade materials, window/balcony rhythms, color and '
+    + 'atmosphere from this image. Do NOT copy its building shape.');
+  for (var i = 0; i < prior.length; i++) {
+    var n = i + 2;
+    legend.push('IMAGE ' + n + ' (PRIOR RENDER, view '
+      + (i + 1) + ') — same building from a different angle. MATCH its '
+      + 'materials, colors, lighting, time of day and atmosphere '
+      + 'EXACTLY. The trio must look like ONE consistent building.');
+  }
+  var subjectIdx = 1 + prior.length + 1;
+  legend.push('IMAGE ' + subjectIdx + ' (massing study) — the GEOMETRIC '
+    + 'CONSTRAINT. Preserve every volume\'s footprint, position, height '
+    + 'and proportion EXACTLY per the rules below.');
+
+  var finalPrompt = angleInstr + '\n\n' + legend.join('\n') + '\n\n' + promptBase;
+
+  // refs to send: style ref + prior renders, in that order.
+  var refs = [ref.dataUrl].concat(prior);
+
+  var result = await generateRender({
+    prompt: finalPrompt,
+    imageDataUrl: sourceDataUrl,
+    referenceDataUrls: refs
   });
   if (!result || !result.dataUrl) throw new Error('model returned no image');
   return { sourceDataUrl: sourceDataUrl, renderDataUrl: result.dataUrl };
@@ -394,7 +476,10 @@ function bindEvents() {
   var refsBtn = document.getElementById('render-refs-btn');
   if (refsBtn) {
     refsBtn.addEventListener('click', function () {
-      openRefModal({ onRender: handleRenderFromModal });
+      openRefModal({
+        onRender: handleRenderFromModal,
+        onRender3: handleRender3FromModal
+      });
     });
   }
   // Keep a small "(N)" / "selected" indicator on the button.

@@ -400,9 +400,14 @@ function renderModalContent() {
     h += '<div style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"'
          + ' title="' + escapeHtml(sel.name) + '">' + escapeHtml(sel.name) + '</div>';
     h += '</div></div>';
+    h += '<div style="display:flex;gap:6px;margin-top:8px">';
     h += '<button class="render-btn" id="ai-cat-render" '
-         + 'style="margin-top:8px;width:100%;background:var(--primary);color:#fff;font-weight:700">'
+         + 'style="flex:1;background:var(--primary);color:#fff;font-weight:700">'
          + 'Render view</button>';
+    h += '<button class="render-btn render-btn--secondary" id="ai-cat-render3" '
+         + 'style="flex:1" title="Three angles in sequence: ground A → ground B → match current camera">'
+         + 'Render 3 views</button>';
+    h += '</div>';
     h += '<div id="ai-cat-status" style="font-size:11px;color:var(--text-muted);margin-top:4px;min-height:14px"></div>';
   } else {
     h += '<div style="font-size:12px;color:var(--text-muted)">'
@@ -493,10 +498,9 @@ function bindModalEvents(card, opts) {
       if (_busy) return;
       var ref = getSelected();
       if (!ref) return;
-      _busy = true;
+      setBusy(card, true);
       var statusEl = card.querySelector('#ai-cat-status');
       if (statusEl) statusEl.textContent = 'Rendering…';
-      renderBtn.disabled = true;
       try {
         var result = await opts.onRender(ref);
         if (statusEl) statusEl.textContent = 'Done.';
@@ -506,11 +510,61 @@ function bindModalEvents(card, opts) {
       } catch (err) {
         if (statusEl) statusEl.textContent = 'Error: ' + (err && err.message || err);
       } finally {
-        _busy = false;
-        renderBtn.disabled = false;
+        setBusy(card, false);
       }
     });
   }
+
+  // Render 3 views cascade — emits 3 calls in sequence, each later
+  // call carries the previous renders as anchors so the trio reads
+  // as the SAME building from different angles.
+  var render3Btn = card.querySelector('#ai-cat-render3');
+  if (render3Btn && opts.onRender3) {
+    render3Btn.addEventListener('click', async function () {
+      if (_busy) return;
+      var ref = getSelected();
+      if (!ref) return;
+      setBusy(card, true);
+      var statusEl = card.querySelector('#ai-cat-status');
+      try {
+        var prior = []; // accumulated outputs to feed forward
+        var sourceDataUrl = null;
+        var angles = [
+          { id: 'ground-a', label: 'Ground A — pedestrian eye-level' },
+          { id: 'ground-b', label: 'Ground B — alternate vantage' },
+          { id: 'current',  label: 'Match current camera' }
+        ];
+        for (var i = 0; i < angles.length; i++) {
+          if (statusEl) statusEl.textContent = 'Rendering view ' + (i + 1) + ' / 3 — ' + angles[i].label + '…';
+          var step = await opts.onRender3({
+            ref: ref,
+            angle: angles[i],
+            angleIndex: i,
+            priorRenders: prior.slice()
+          });
+          if (!step || !step.renderDataUrl) throw new Error('view ' + (i + 1) + ' failed');
+          if (!sourceDataUrl) sourceDataUrl = step.sourceDataUrl;
+          showResult(card, {
+            sourceDataUrl: step.sourceDataUrl,
+            renderDataUrl: step.renderDataUrl,
+            label: angles[i].label
+          }, ref);
+          prior.push(step.renderDataUrl);
+        }
+        if (statusEl) statusEl.textContent = 'All 3 views done.';
+      } catch (err) {
+        if (statusEl) statusEl.textContent = 'Error: ' + (err && err.message || err);
+      } finally {
+        setBusy(card, false);
+      }
+    });
+  }
+}
+
+function setBusy(card, busy) {
+  _busy = busy;
+  var btns = card.querySelectorAll('#ai-cat-render, #ai-cat-render3');
+  for (var i = 0; i < btns.length; i++) btns[i].disabled = busy;
 }
 
 /**
