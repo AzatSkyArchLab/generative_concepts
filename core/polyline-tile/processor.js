@@ -1176,6 +1176,10 @@ function buildSections(edges, tilesXY, step, depth, buffer, sideSign, isPolygon)
   if (!isPolygon && edges.length === 2 &&
       byEdge[0] && byEdge[0].length && byEdge[1] && byEdge[1].length) {
     result = buildSectionsOneCorner(ctx);
+  } else if (!isPolygon && edges.length === 3 &&
+      byEdge[0] && byEdge[0].length && byEdge[1] && byEdge[1].length &&
+      byEdge[2] && byEdge[2].length) {
+    result = buildSectionsTwoCorners(ctx);
   }
   if (!result) result = buildSectionsPerEdge(ctx);
   result.completeSet = ts.complete;
@@ -1252,112 +1256,339 @@ function chooseMmSplit(C0, C1, cornerArea, tripleArea, maxLon) {
   return best;
 }
 
-// One interior corner (2 edges). Forms cross-edge corner sections per
-// the Ш-Ш / Ш-М / М-Ш / М-М rules. Returns null if the corner can't be
-// assembled (caller falls back to per-edge for now; rounded-buffer
-// break is a later step).
-function buildSectionsOneCorner(ctx) {
-  var edges = ctx.edges, byEdge = ctx.byEdge;
-  var cells0 = byEdge[0], cells1 = byEdge[1];
-  var C0 = cells0.length, C1 = cells1.length;
-  var type0 = edges[0].type, type1 = edges[1].type;
+// Generalised cross-edge corner builder. The corner is at edgeA's TAIL
+// (b-end) and edgeB's HEAD (a-end), at vertex `vIdx`. cellsA/cellsB are
+// the AVAILABLE complete-triple cells on each edge (sorted by t0).
+//   emitAHead — also lay out edgeA's head straights (false when edgeA's
+//               head was already consumed by a previous corner).
+//   emitBTail — also lay out edgeB's tail straights.
+// Returns { sections, validKeys } or null if the corner can't form.
+function buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, vIdx, emitAHead, emitBTail) {
+  var edges = ctx.edges;
+  var nA = cellsA.length, nB = cellsB.length;
+  var typeA = edges[eiA].type, typeB = edges[eiB].type;
   var tripleArea = ctx.tripleArea, maxLon = ctx.maxLon, sideSign = ctx.sideSign, sd = ctx.sectionDepth;
-  var corner = cornerElementTiles(ctx.tilesXY, 1);
-  var cornerTypeStr = (type0 === 'lat' ? 'Ш' : 'М') + '-' + (type1 === 'lat' ? 'Ш' : 'М');
+  var corner = cornerElementTiles(ctx.tilesXY, vIdx);
+  var cornerTypeStr = (typeA === 'lat' ? 'Ш' : 'М') + '-' + (typeB === 'lat' ? 'Ш' : 'М');
 
   var sections = [], validKeys = {};
-  function markRun(edgeIdx, run) { for (var i = 0; i < run.length; i++) validKeys[edgeIdx + ':' + run[i].cellIdx] = true; }
-  function pushRun(edgeIdx, run, type) {
+  function markRun(ei, run) { for (var i = 0; i < run.length; i++) validKeys[ei + ':' + run[i].cellIdx] = true; }
+  function pushRun(ei, run, type) {
     if (!run.length) return;
-    var rect = runRect(edges[edgeIdx], run, sideSign, sd);
+    var rect = runRect(edges[ei], run, sideSign, sd);
     var areaRaw = run.length * tripleArea;
     sections.push({
       type: type, tripleCount: run.length,
       areaRaw: areaRaw, areaLiving: areaRaw * SECTION_LIVING_COEF,
-      polys: [rect], centroid: polysCentroid([rect])
+      polys: [rect], centroid: polysCentroid([rect]),
+      _ext: { kind: 'straight', ei: ei, cells: run.slice() }
     });
-    markRun(edgeIdx, run);
+    markRun(ei, run);
   }
-  // alignEnd=true → sections abut the END of cellList (the corner is at
-  // the far end), so any dropped sub-section cells fall at the START
-  // (the open polyline end). This pulls sections tight against the
-  // corner instead of leaving a gap there.
-  function pushParts(edgeIdx, cellList, type, parts, alignEnd) {
+  function pushParts(ei, cellList, type, parts, alignEnd) {
     var S = sumSizes(parts);
     var idx = alignEnd ? (cellList.length - S) : 0;
     if (idx < 0) idx = 0;
     for (var pp = 0; pp < parts.length; pp++) {
-      pushRun(edgeIdx, cellList.slice(idx, idx + parts[pp]), type);
+      pushRun(ei, cellList.slice(idx, idx + parts[pp]), type);
       idx += parts[pp];
     }
   }
-  function emitStraight(edgeIdx, cellList, type, alignEnd) {
-    pushParts(edgeIdx, cellList, type, partitionTriples(cellList.length, type, maxLon), alignEnd);
+  function emitStraight(ei, cellList, type, alignEnd) {
+    pushParts(ei, cellList, type, partitionTriples(cellList.length, type, maxLon), alignEnd);
   }
-  function pushCorner(cc0, cc1) {
-    // Single L-shaped ring (clean outer contour, no seams). Fall back
-    // to the multi-poly union if the outline can't be built.
-    var outline = cornerOutline(edges[0], edges[1], cc0, cc1, sideSign, sd);
+  function pushCorner(ccA, ccB) {
+    var outline = cornerOutline(edges[eiA], edges[eiB], ccA, ccB, sideSign, sd);
     var polys;
     if (outline) {
       polys = [outline];
     } else {
       polys = [];
-      if (cc0.length) polys.push(runRect(edges[0], cc0, sideSign, sd));
-      if (cc1.length) polys.push(runRect(edges[1], cc1, sideSign, sd));
+      if (ccA.length) polys.push(runRect(edges[eiA], ccA, sideSign, sd));
+      if (ccB.length) polys.push(runRect(edges[eiB], ccB, sideSign, sd));
       for (var i = 0; i < corner.polys.length; i++) polys.push(corner.polys[i]);
     }
     if (!polys.length) return;
-    var nCells = cc0.length + cc1.length;
+    var nCells = ccA.length + ccB.length;
     var areaRaw = nCells * tripleArea + corner.area;
     sections.push({
       type: cornerTypeStr, isCorner: true, tripleCount: nCells + 1,
       areaRaw: areaRaw, areaLiving: areaRaw * SECTION_LIVING_COEF,
-      polys: polys, centroid: polysCentroid(polys)
+      polys: polys, centroid: polysCentroid(polys),
+      _ext: { kind: 'corner', eiA: eiA, eiB: eiB, ccA: ccA.slice(), ccB: ccB.slice(), cornerArea: corner.area }
     });
-    markRun(0, cc0); markRun(1, cc1);
+    markRun(eiA, ccA); markRun(eiB, ccB);
   }
 
-  if (type0 === 'lat' && type1 === 'lat') {
-    // Ш-Ш: a + corner(1) + b = 6, a,b ∈ [1,4], minimise dropped.
+  if (typeA === 'lat' && typeB === 'lat') {
     var bestA = -1, bestDrop = Infinity;
     for (var a = 1; a <= 4; a++) {
       var b = 5 - a;
-      if (b < 1 || b > 4 || a > C0 || b > C1) continue;
-      var drop = ((C0 - a) % 6) + ((C1 - b) % 6);
+      if (b < 1 || b > 4 || a > nA || b > nB) continue;
+      var drop = ((nA - a) % 6) + ((nB - b) % 6);
       if (drop < bestDrop) { bestDrop = drop; bestA = a; }
     }
     if (bestA < 0) return null;
     var aa = bestA, bb = 5 - aa;
-    // edge0 is BEFORE the corner → align sections to its end (corner);
-    // edge1 is AFTER → align to its start (corner). Dropped cells fall
-    // on the open ends, never between a section and the corner.
-    emitStraight(0, cells0.slice(0, C0 - aa), 'lat', true);
-    emitStraight(1, cells1.slice(bb), 'lat', false);
-    pushCorner(cells0.slice(C0 - aa), cells1.slice(0, bb));
-  } else if (type0 === 'lat' && type1 === 'lon') {
-    // Ш-М: 1 lat + corner + M lon.
-    emitStraight(0, cells0.slice(0, C0 - 1), 'lat', true);
-    var rL = chooseLonSplit(C1, tripleArea + corner.area, tripleArea, maxLon);
+    if (emitAHead) emitStraight(eiA, cellsA.slice(0, nA - aa), 'lat', true);
+    if (emitBTail) emitStraight(eiB, cellsB.slice(bb), 'lat', false);
+    pushCorner(cellsA.slice(nA - aa), cellsB.slice(0, bb));
+  } else if (typeA === 'lat' && typeB === 'lon') {
+    if (nA < 1) return null;
+    if (emitAHead) emitStraight(eiA, cellsA.slice(0, nA - 1), 'lat', true);
+    var rL = chooseLonSplit(nB, tripleArea + corner.area, tripleArea, maxLon);
     if (!rL) return null;
-    pushCorner(cells0.slice(C0 - 1), cells1.slice(0, rL.M));
-    pushParts(1, cells1.slice(rL.M), 'lon', rL.parts, false);
-  } else if (type0 === 'lon' && type1 === 'lat') {
-    // М-Ш: M lon + corner + 1 lat.
-    emitStraight(1, cells1.slice(1), 'lat', false);
-    var rL2 = chooseLonSplit(C0, tripleArea + corner.area, tripleArea, maxLon);
+    pushCorner(cellsA.slice(nA - 1), cellsB.slice(0, rL.M));
+    if (emitBTail) pushParts(eiB, cellsB.slice(rL.M), 'lon', rL.parts, false);
+  } else if (typeA === 'lon' && typeB === 'lat') {
+    if (nB < 1) return null;
+    if (emitBTail) emitStraight(eiB, cellsB.slice(1), 'lat', false);
+    var rL2 = chooseLonSplit(nA, tripleArea + corner.area, tripleArea, maxLon);
     if (!rL2) return null;
-    pushParts(0, cells0.slice(0, C0 - rL2.M), 'lon', rL2.parts, true);
-    pushCorner(cells0.slice(C0 - rL2.M), cells1.slice(0, 1));
+    if (emitAHead) pushParts(eiA, cellsA.slice(0, nA - rL2.M), 'lon', rL2.parts, true);
+    pushCorner(cellsA.slice(nA - rL2.M), cellsB.slice(0, 1));
   } else {
-    // М-М: corner + lon both sides.
-    var rMM = chooseMmSplit(C0, C1, corner.area, tripleArea, maxLon);
+    var rMM = chooseMmSplit(nA, nB, corner.area, tripleArea, maxLon);
     if (!rMM) return null;
-    pushParts(0, cells0.slice(0, C0 - rMM.M0), 'lon', rMM.parts0, true);
-    pushParts(1, cells1.slice(rMM.M1), 'lon', rMM.parts1, false);
-    pushCorner(cells0.slice(C0 - rMM.M0), cells1.slice(0, rMM.M1));
+    if (emitAHead) pushParts(eiA, cellsA.slice(0, nA - rMM.M0), 'lon', rMM.parts0, true);
+    if (emitBTail) pushParts(eiB, cellsB.slice(rMM.M1), 'lon', rMM.parts1, false);
+    pushCorner(cellsA.slice(nA - rMM.M0), cellsB.slice(0, rMM.M1));
   }
 
+  return { sections: sections, validKeys: validKeys };
+}
+
+// One interior corner (2 edges).
+function buildSectionsOneCorner(ctx) {
+  return buildCornerBetween(ctx, 0, 1, ctx.byEdge[0], ctx.byEdge[1], 1, true, true);
+}
+
+// ── Buffer-break helpers (corner can't be assembled) ──
+function distPointSeg(px, py, ax, ay, bx, by) {
+  var dx = bx - ax, dy = by - ay;
+  var len2 = dx * dx + dy * dy;
+  var t = len2 > 1e-9 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  var cx = ax + t * dx, cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+// Min distance from a point to a set of polygon rings (0 if inside any).
+function minDistPointToPolys(px, py, polys) {
+  var best = Infinity;
+  for (var i = 0; i < polys.length; i++) {
+    var ring = polys[i];
+    if (pointInPolygon({ x: px, y: py }, ring)) return 0;
+    for (var j = 0; j < ring.length; j++) {
+      var a = ring[j], b = ring[(j + 1) % ring.length];
+      var d = distPointSeg(px, py, a.x, a.y, b.x, b.y);
+      if (d < best) best = d;
+    }
+  }
+  return best;
+}
+
+// Grow a section by one extra triple-cell (absorbing a middle gap),
+// recomputing its polygon + area. Returns false (no change) if the
+// growth would push the section over the 550 living cap.
+function extendSectionWithCell(section, cell, ctx) {
+  var ext = section._ext;
+  if (!ext) return false;
+  var edges = ctx.edges, sideSign = ctx.sideSign, sd = ctx.sectionDepth, tripleArea = ctx.tripleArea;
+  if (ext.kind === 'straight') {
+    var cells = ext.cells.concat([cell]);
+    cells.sort(function (a, b) { return a.t0 - b.t0; });
+    var areaRaw = cells.length * tripleArea;
+    if (areaRaw * SECTION_LIVING_COEF > SECTION_MAX_LIVING + 1e-6) return false;
+    var rect = runRect(edges[ext.ei], cells, sideSign, sd);
+    section.polys = [rect];
+    section.centroid = polysCentroid([rect]);
+    section.areaRaw = areaRaw;
+    section.areaLiving = areaRaw * SECTION_LIVING_COEF;
+    section.tripleCount = cells.length;
+    ext.cells = cells;
+    return true;
+  }
+  // corner
+  var onA = (cell.edgeIdx === ext.eiA);
+  var newCcA = onA ? ext.ccA.concat([cell]) : ext.ccA.slice();
+  var newCcB = onA ? ext.ccB.slice() : ext.ccB.concat([cell]);
+  newCcA.sort(function (a, b) { return a.t0 - b.t0; });
+  newCcB.sort(function (a, b) { return a.t0 - b.t0; });
+  var nCells = newCcA.length + newCcB.length;
+  var areaRaw2 = nCells * tripleArea + ext.cornerArea;
+  if (areaRaw2 * SECTION_LIVING_COEF > SECTION_MAX_LIVING + 1e-6) return false;
+  var outline = cornerOutline(edges[ext.eiA], edges[ext.eiB], newCcA, newCcB, sideSign, sd);
+  var polys = outline ? [outline] : section.polys;
+  section.polys = polys;
+  section.centroid = polysCentroid(polys);
+  section.areaRaw = areaRaw2;
+  section.areaLiving = areaRaw2 * SECTION_LIVING_COEF;
+  section.tripleCount = nCells + 1;
+  ext.ccA = newCcA; ext.ccB = newCcB;
+  return true;
+}
+
+// Absorb a small dropped middle-segment gap into adjacent sections:
+//   1 row  → nearest CORNER section grows +1 cell;
+//   2 rows → the two sections flanking the gap each grow +1 cell;
+//   ≥3 rows → acceptable, leave the gap.
+// Growth is skipped (gap stays) if it would exceed the 550 cap.
+function absorbMiddleGap(ctx, sections, validKeys, eiMid) {
+  var mid = (ctx.byEdge[eiMid] || []).filter(function (c) { return !validKeys[eiMid + ':' + c.cellIdx]; });
+  mid.sort(function (a, b) { return a.t0 - b.t0; });
+  var G = mid.length;
+  if (G < 1 || G > 2) return;
+
+  function cellsOnEdge1(sec) {
+    var ext = sec._ext; if (!ext) return [];
+    if (ext.kind === 'straight') return ext.ei === eiMid ? ext.cells : [];
+    if (ext.eiA === eiMid) return ext.ccA;
+    if (ext.eiB === eiMid) return ext.ccB;
+    return [];
+  }
+  function sectionEndingAt(t) {   // section whose edge1 cell has t1 ≈ t
+    for (var i = 0; i < sections.length; i++) {
+      var cs = cellsOnEdge1(sections[i]);
+      for (var j = 0; j < cs.length; j++) if (Math.abs(cs[j].t1 - t) < 0.6) return sections[i];
+    }
+    return null;
+  }
+  function sectionStartingAt(t) { // section whose edge1 cell has t0 ≈ t
+    for (var i = 0; i < sections.length; i++) {
+      var cs = cellsOnEdge1(sections[i]);
+      for (var j = 0; j < cs.length; j++) if (Math.abs(cs[j].t0 - t) < 0.6) return sections[i];
+    }
+    return null;
+  }
+
+  if (G === 1) {
+    var g = mid[0];
+    var after = sectionStartingAt(g.t1);   // v2-side
+    var before = sectionEndingAt(g.t0);    // v1-side
+    var target = (after && after.isCorner) ? after
+      : (before && before.isCorner) ? before
+      : (after || before);
+    if (target && extendSectionWithCell(target, g, ctx)) validKeys[eiMid + ':' + g.cellIdx] = true;
+  } else { // G === 2
+    var g0 = mid[0], g1 = mid[1];
+    var sBefore = sectionEndingAt(g0.t0);
+    var sAfter = sectionStartingAt(g1.t1);
+    if (sBefore && extendSectionWithCell(sBefore, g0, ctx)) validKeys[eiMid + ':' + g0.cellIdx] = true;
+    if (sAfter && extendSectionWithCell(sAfter, g1, ctx)) validKeys[eiMid + ':' + g1.cellIdx] = true;
+  }
+}
+
+// How many cells the v2 corner should RESERVE from edge1's tail, so
+// both corners can form (v2 "bites off" part of the middle segment).
+function decideV2EdgeShare(type1, type2, C1, C2, corner2Area, ctx) {
+  if (C1 < 2 || C2 < 1) return 0;
+  if (type1 === 'lat') {
+    if (type2 === 'lat') {
+      // Ш-Ш: a2 ∈ [1,4], b2 = 5-a2 ≤ C2. Minimise edge2 drop.
+      var bestA = -1, bestDrop = Infinity;
+      for (var a = 1; a <= 4; a++) {
+        var b = 5 - a;
+        if (b < 1 || b > 4 || b > C2) continue;
+        var d = (C2 - b) % 6;
+        if (d < bestDrop) { bestDrop = d; bestA = a; }
+      }
+      return bestA > 0 ? Math.min(bestA, C1 - 1) : 0;
+    }
+    return Math.min(1, C1 - 1);     // Ш-М: edge1 lat side = 1 cell
+  }
+  // edge1 lon: v2 takes M2 lon cells. Use a standalone estimate, capped
+  // so v1 keeps the majority and a middle section can still fit.
+  var base = corner2Area + ((type2 === 'lat') ? ctx.tripleArea : 0);
+  var r = chooseLonSplit(C1, base + ctx.tripleArea, ctx.tripleArea, ctx.maxLon);
+  var M2 = r ? r.M : 1;
+  return Math.max(1, Math.min(M2, Math.floor(C1 / 2)));
+}
+
+// Three segments (two corners). RESERVE part of edge1's tail for the
+// v2 corner first, lay out v1 (+ edge1 middle straights) on the rest,
+// then build the v2 corner from the reserved tail + edge2 head — so
+// BOTH corners form. If v2 still can't be built, BREAK: clear a 15 m
+// buffer from the v1 structure, trim edge2, and lay edge2 out straight.
+function buildSectionsTwoCorners(ctx) {
+  var edges = ctx.edges, byEdge = ctx.byEdge;
+  var sideSign = ctx.sideSign, sd = ctx.sectionDepth, tripleArea = ctx.tripleArea, maxLon = ctx.maxLon;
+  var cells1 = byEdge[1] || [];
+  var C1 = cells1.length;
+  var corner2 = cornerElementTiles(ctx.tilesXY, 2);
+  var a2 = decideV2EdgeShare(edges[1].type, edges[2].type, C1, (byEdge[2] || []).length, corner2.area, ctx);
+
+  // Lay out v1 on edge0 + edge1 HEAD (reserving a2 cells at edge1 tail).
+  var edge1Head = (a2 > 0) ? cells1.slice(0, C1 - a2) : cells1;
+  var r1 = buildCornerBetween(ctx, 0, 1, byEdge[0], edge1Head, 1, true, true);
+  if (!r1 && a2 > 0) {            // v1 failed with reservation → give it all
+    a2 = 0; edge1Head = cells1;
+    r1 = buildCornerBetween(ctx, 0, 1, byEdge[0], cells1, 1, true, true);
+  }
+  if (!r1) return null;
+
+  var sections = r1.sections.slice();
+  var validKeys = {};
+  for (var k in r1.validKeys) validKeys[k] = true;
+
+  // v2 corner from reserved edge1 tail + edge2.
+  var reservedTail = (a2 > 0) ? cells1.slice(C1 - a2) : [];
+  var r2 = reservedTail.length
+    ? buildCornerBetween(ctx, 1, 2, reservedTail, byEdge[2], 2, false, true)
+    : null;
+  if (r2) {
+    for (var i = 0; i < r2.sections.length; i++) sections.push(r2.sections[i]);
+    for (var k2 in r2.validKeys) validKeys[k2] = true;
+    // Absorb a 1–2 row dropped gap in the middle of edge1 into the
+    // flanking sections (≥3 rows left as acceptable).
+    absorbMiddleGap(ctx, sections, validKeys, 1);
+    return { sections: sections, validKeys: validKeys };
+  }
+
+  // ── Buffer break on edge2 ──
+  var refPolys = [];
+  for (var s = 0; s < r1.sections.length; s++) {
+    for (var p = 0; p < r1.sections[s].polys.length; p++) refPolys.push(r1.sections[s].polys[p]);
+  }
+  var cells2 = (byEdge[2] || []).slice().sort(function (a, b) { return a.t0 - b.t0; });
+  var e2 = edges[2], L2 = segLength(e2.a, e2.b);
+  var tx = (e2.b.x - e2.a.x) / L2, ty = (e2.b.y - e2.a.y) / L2;
+  var nx = -ty * sideSign, ny = tx * sideSign;
+  var BUFFER = 15;
+  // First edge2 cell whose footprint (4 corners) is wholly ≥ BUFFER from
+  // the v1 structure → start the fresh layout there.
+  var startIdx = -1;
+  for (var ci = 0; ci < cells2.length; ci++) {
+    var c = cells2[ci];
+    var corners = [
+      { x: e2.a.x + tx * c.t0 + nx * 0,  y: e2.a.y + ty * c.t0 + ny * 0 },
+      { x: e2.a.x + tx * c.t1 + nx * 0,  y: e2.a.y + ty * c.t1 + ny * 0 },
+      { x: e2.a.x + tx * c.t1 + nx * sd, y: e2.a.y + ty * c.t1 + ny * sd },
+      { x: e2.a.x + tx * c.t0 + nx * sd, y: e2.a.y + ty * c.t0 + ny * sd }
+    ];
+    var clear = true;
+    for (var cc = 0; cc < corners.length; cc++) {
+      if (minDistPointToPolys(corners[cc].x, corners[cc].y, refPolys) < BUFFER) { clear = false; break; }
+    }
+    if (clear) { startIdx = ci; break; }
+  }
+
+  if (startIdx >= 0) {
+    var keep = cells2.slice(startIdx);
+    var parts = partitionTriples(keep.length, e2.type, maxLon);
+    var idx = 0;
+    for (var pp = 0; pp < parts.length; pp++) {
+      var run = keep.slice(idx, idx + parts[pp]); idx += parts[pp];
+      if (!run.length) continue;
+      var rect = runRect(e2, run, sideSign, sd);
+      var areaRaw = run.length * tripleArea;
+      sections.push({
+        type: e2.type, tripleCount: run.length,
+        areaRaw: areaRaw, areaLiving: areaRaw * SECTION_LIVING_COEF,
+        polys: [rect], centroid: polysCentroid([rect])
+      });
+      for (var g = 0; g < run.length; g++) validKeys['2:' + run[g].cellIdx] = true;
+    }
+  }
   return { sections: sections, validKeys: validKeys };
 }
 
