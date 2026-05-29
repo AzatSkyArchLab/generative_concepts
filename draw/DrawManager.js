@@ -15,6 +15,9 @@ import { SectionChainTool } from './tools/SectionChainTool.js';
 import { TowerTool } from './tools/TowerTool.js';
 import { UrbanBlockTool } from './tools/UrbanBlockTool.js';
 import { RoadTool } from './tools/RoadTool.js';
+import { LibraryPlaceTool } from './tools/LibraryPlaceTool.js';
+import { PolylineTileTool } from './tools/PolylineTileTool.js';
+import { PolygonTileTool } from './tools/PolygonTileTool.js';
 
 export class DrawManager {
   /**
@@ -53,6 +56,12 @@ export class DrawManager {
     this._registerTool(new TowerTool(this, this._featureStore, this._mapManager));
     this._registerTool(new UrbanBlockTool(this, this._featureStore, this._mapManager));
     this._registerTool(new RoadTool(this, this._featureStore));
+    this._registerTool(new LibraryPlaceTool(this, this._featureStore));
+    // v2 (prototype-based) — parallel branch. Same drawing UX as
+    // SectionChainTool / UrbanBlockTool but produces tiles features
+    // that flow into the new cells→wedges→sections processor.
+    this._registerTool(new PolylineTileTool(this, this._featureStore));
+    this._registerTool(new PolygonTileTool(this, this._featureStore));
   }
 
   _registerTool(tool) {

@@ -20,6 +20,7 @@ import { renderInsolSection, updateInsolButton, showInsolResults, onInsolClear, 
 import { renderAptMixSection, showBuildingPlan, resetBuildingPlans, updateAptMixVisibility, resetDistributeState } from './panels/AptMixPanel.js';
 import { renderQuotaSection, updateQuotaResults, injectQuotaStyles } from './panels/QuotaPanel.js';
 import { renderRenderSection } from './panels/RenderPanel.js';
+import { renderLibrarySection } from './panels/LibraryPanel.js';
 import { updateStats } from './panels/StatsPanel.js';
 import { renderLayersSection, initLayersPanelEvents } from './panels/LayersPanel.js';
 import { log } from '../core/Logger.js';
@@ -65,6 +66,7 @@ export class FeaturePanel {
       '<div id="underground-section"></div>' +
       '<div id="apt-mix-section"></div>' +
       '<div id="render-section"></div>' +
+      '<div id="library-section"></div>' +
       '<div id="quota-section"></div>' +
       '<div id="stats-section"></div>' +
       '<div id="layers-section"></div></div>';
@@ -74,6 +76,7 @@ export class FeaturePanel {
     this._renderUnderground();
     renderAptMixSection();
     renderRenderSection();
+    renderLibrarySection();
     renderQuotaSection();
     injectQuotaStyles();
     // Remote-layers panel — independent of feature/section state.

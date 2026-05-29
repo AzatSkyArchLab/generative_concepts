@@ -154,6 +154,18 @@ html, body {
   outline: none;
 }
 
+/* Render-mode atmospheric haze overlay — parked for now, will return
+   to it with a better design. Element is kept in the DOM (hidden via
+   opacity:0) so we can revive it by re-introducing the gradient. */
+#map-fog-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  opacity: 0;
+  display: none;
+}
+
 .maplibregl-ctrl-attrib {
   font-size: 10px;
 }

@@ -15,6 +15,8 @@ import { CompoundCommand } from './core/commands/CompoundCommand.js';
 import { Toolbar } from './ui/Toolbar.js';
 import { StatusBar } from './ui/StatusBar.js';
 import { FeaturePanel } from './ui/FeaturePanel.js';
+import { initLibraryContextMenu } from './ui/panels/LibraryContextMenu.js';
+import { initLibraryParamsPopup } from './ui/panels/LibraryParamsPopup.js';
 import { CompassControl } from './ui/CompassControl.js';
 import { SunBar } from './ui/SunBar.js';
 import { ThreeOverlay } from './core/three/ThreeOverlay.js';
@@ -33,7 +35,16 @@ import greenzoneModule from './modules/greenzone/index.js';
 import metatilerModule from './modules/metatiler/index.js';
 import playgroundsModule from './modules/playgrounds/index.js';
 import aiRenderModule from './modules/ai-render/index.js';
+import libraryElementsModule from './modules/library-elements/index.js';
+import polylineTileModule from './modules/polyline-tile/index.js';
+import { registerLibraryElements } from './elements/bootstrap.js';
 import { log } from './core/Logger.js';
+
+// Register parametric library elements once at module-load. The
+// library-elements module reads from this registry on every
+// reconciliation, so the registration must happen before the module
+// stack initializes.
+registerLibraryElements();
 
 var MODULES = [
   urbanBlock3DModule,
@@ -53,7 +64,14 @@ var MODULES = [
   playgroundsModule,
   buffersModule,
   insolationModule,
-  aiRenderModule
+  aiRenderModule,
+  // library-elements renders placed parametric building modules
+  // (towers, sections, stylobates…) into the Three.js scene. Init
+  // last so it picks up the shared origin emitted by section-gen.
+  libraryElementsModule,
+  // polyline-tile (v2 generator branch) — renders cells + sections
+  // for `polyline-tile` / `polygon-tile` features as MapLibre fills.
+  polylineTileModule
 ];
 
 // ── State ──────────────────────────────────────────────
@@ -256,6 +274,15 @@ async function bootstrap() {
       _originalActivateTool(toolId);
     };
 
+    // Library picker → place tool: the LibraryPanel modal fires this
+    // event after stashing pendingElementId/pendingPreset on
+    // LibraryPlaceTool, and we forward to DrawManager so the cursor +
+    // active-tool indicator update like a toolbar click.
+    eventBus.on('tool:request-activate', function (d) {
+      if (!d || !d.toolId) return;
+      drawManager.activateTool(d.toolId);
+    });
+
     // Whitewash toggle from AptMixPanel (and any future trigger).
     // ThreeOverlay tracks the mode itself and re-applies the white
     // material to any meshes added afterwards, so we just forward
@@ -265,7 +292,7 @@ async function bootstrap() {
       var enabled = !!(d && d.enabled);
       threeOverlay.setWhitewash(enabled);
       // Broadcast the resulting state so any panel that owns a
-      // White-model toggle can sync its button label/enabled flag.
+      // render-mode toggle can sync its button label/enabled flag.
       eventBus.emit('whitewash:changed', { enabled: enabled });
     });
 
@@ -293,6 +320,19 @@ async function bootstrap() {
         console.error('Module "' + MODULES[i].id + '" failed to init:', err);
       }
     }
+
+    // Library-element interactions (right-click menu + params popup).
+    // Initialized after modules so they pick up the same eventBus +
+    // featureStore + mapManager refs.
+    initLibraryContextMenu({
+      mapManager: mapManager,
+      featureStore: featureStore,
+      drawManager: drawManager
+    });
+    initLibraryParamsPopup({
+      featureStore: featureStore,
+      eventBus: eventBus
+    });
 
     eventBus.emit('app:ready');
     log.debug('U·B·SYSTEM started (' + MODULES.length + ' modules, Three.js enabled)');

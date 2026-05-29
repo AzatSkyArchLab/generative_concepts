@@ -35,9 +35,23 @@ export class ThreeOverlay {
     // restores it. LineSegments / sprites / transparent materials
     // are skipped so the wireframes and glass keep reading correctly.
     this._whitewashed = false;
-    this._whiteMat = new THREE.MeshLambertMaterial({
-      color: 0xffffff, side: THREE.DoubleSide
+    // White-model material — Physical (not Lambert) so it picks up
+    // scene.environment for IBL reflections. Slight clearcoat gives
+    // a stone+glaze sheen; envMapIntensity stays subtle so volumes
+    // still read as solid massing rather than mirror balls.
+    // Stone/plaster look — high roughness, no metalness, very low
+    // env response. Reads as solid architectural massing rather than
+    // chrome. The env map is still there for soft ambient tint, but
+    // doesn't draw distracting reflections across the surface.
+    this._whiteMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, side: THREE.DoubleSide,
+      roughness: 0.95, metalness: 0.0,
+      envMapIntensity: 0.25
     });
+    // Fog is parked for now — needs more iteration on density/colour.
+    // To re-enable: restore the setWhitewash() fog assignment and the
+    // _installFogChunkOverride() call, plus uncomment the CSS overlay.
+    this._envMap = null;
 
     // Sun light + ground plane — created in init(). Sun position is
     // astronomical (computeSunVector); shadow casting is gated by
@@ -98,6 +112,23 @@ export class ThreeOverlay {
     // with whitewash) so the shadow pass only runs in white-model.
     this._renderer.shadowMap.enabled = true;
     this._renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // Linear tone mapping — preserves base material colours accurately
+    // (ACES was compressing brights, making every reflective surface
+    // look the same beige hue regardless of base colour). sRGB output
+    // is the standard, keeps colour-picker values WYSIWYG.
+    this._renderer.toneMapping = THREE.LinearToneMapping;
+    this._renderer.toneMappingExposure = 1.0;
+    if (THREE.SRGBColorSpace) this._renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    // Fog is currently disabled (parked for later iteration). When
+    // re-enabling, also restore _installFogChunkOverride() here —
+    // our custom MVP needs the chunk override for correct depth.
+
+    // Procedural env map — drives reflections on every Physical /
+    // Standard material via scene.environment. Always on (cost paid
+    // once at boot, ~10 ms), invisible without WM since most
+    // materials swap to the matte white anyway.
+    this._setupEnvironment();
 
     // Lighting — slightly brighter ambient so shadows on solid
     // surfaces (block ground plane, context buildings) read as soft
@@ -189,16 +220,95 @@ export class ThreeOverlay {
 
     var s = this._scale;
 
+    // modelMatrix: local-meters world → mercator world.
     var modelMatrix = new THREE.Matrix4()
       .makeTranslation(this._originX, this._originY, this._originZ)
       .scale(new THREE.Vector3(s, -s, s));
 
+    // Bake MapLibre's full MVP into a temp matrix.
     var mvp = new THREE.Matrix4().fromArray(this._lastMatrix).multiply(modelMatrix);
+
+    // ── Set camera world position so fog (and any other shader code
+    // that uses `cameraPosition` uniform) gets the real distance from
+    // the viewer. Three.js' renderer derives `cameraPosition` from
+    // camera.matrixWorld; if we leave it identity it stays (0,0,0).
+    //
+    // Strategy: compute MapLibre's camera in our local-meters frame,
+    // set camera.matrixWorld = T(camLocal). Three.js will then derive
+    // viewMatrix = T^-1 and apply it on render. To keep the final
+    // gl_Position identical to the simple "bake everything into
+    // projectionMatrix" approach, we pre-multiply mvp by T — the
+    // viewMatrix exactly cancels it out.
+    //
+    //   final_clip = projectionMatrix' · viewMatrix · objectModel · vertex
+    //              = (mvp · T) · T^-1 · objectModel · vertex
+    //              = mvp · objectModel · vertex   ← same as before
+    //
+    // Net effect on uniforms: `cameraPosition` is now correct
+    // local-meters camera position; `viewMatrix` is a pure translation
+    // by -camPos (cheap to compute). All shaders that use
+    // `cameraPosition` (env reflections, fog override, IBL) now work
+    // exactly as they would in a normal Three.js scene.
+    var camLocal = this._extractCameraLocalMeters();
+    if (camLocal) {
+      // Disable Three.js' auto-update so it doesn't overwrite the matrix
+      // we set manually. We still let it recompute matrixWorldInverse
+      // each frame (cheap, and it needs to stay in sync).
+      this._camera.matrixAutoUpdate = false;
+      this._camera.matrixWorldAutoUpdate = false;
+      this._camera.matrixWorld.makeTranslation(camLocal.x, camLocal.y, camLocal.z);
+      // Pre-compensate the projection so viewMatrix gets cancelled
+      // out. T is camera.matrixWorld; mvp' = mvp · T.
+      mvp.multiply(this._camera.matrixWorld);
+    }
 
     this._camera.projectionMatrix = mvp;
     this._camera.projectionMatrixInverse.copy(mvp).invert();
 
     this._renderer.render(this._scene, this._camera);
+  }
+
+  /**
+   * Extract MapLibre's camera world position and convert to our
+   * local-meters frame (the frame our 3D objects live in).
+   *
+   * Tries several MapLibre transform accessors in order of API
+   * stability; returns null if none are exposed (older versions or
+   * future refactors). Callers must handle the null case — fog
+   * silently degrades to "no fog" in that case rather than crashing.
+   */
+  _extractCameraLocalMeters() {
+    var map = this._map;
+    if (!map || !map.transform) return null;
+    var t = map.transform;
+
+    // MapLibre 4.x — internal _camera.position is [x, y, z] in mercator
+    // world units (the unit cube spanning the whole Earth). This has
+    // been stable through 3.x → 4.x.
+    var pos = null;
+    if (t._camera && t._camera.position) {
+      pos = { x: t._camera.position[0], y: t._camera.position[1], z: t._camera.position[2] };
+    } else if (t.cameraPosition && typeof t.cameraPosition.x === 'number') {
+      pos = { x: t.cameraPosition.x, y: t.cameraPosition.y, z: t.cameraPosition.z || 0 };
+    } else if (t.position && typeof t.position.x === 'number') {
+      // Some MapLibre forks expose this on .position
+      pos = { x: t.position.x, y: t.position.y, z: t.position.z || 0 };
+    }
+    if (!pos) return null;
+
+    // Convert mercator → local meters. Our modelMatrix is:
+    //   T(originX, originY, originZ) · S(s, -s, s)
+    // So: mercator = origin + (localX, -localY, localZ) * s
+    //     localX = (mercator.x - originX) / s
+    //     localY = -(mercator.y - originY) / s    ← note the negation
+    //     localZ = (mercator.z - originZ) / s
+    var s = this._scale;
+    if (s === 0) return null;
+    return {
+      x:  (pos.x - this._originX) / s,
+      y: -(pos.y - this._originY) / s,
+      z:  (pos.z - this._originZ) / s
+    };
   }
 
   getScene() { return this._scene; }
@@ -287,6 +397,9 @@ export class ThreeOverlay {
     // shadow map is hidden behind colourful materials anyway and the
     // perf hit is real on heavy scenes.
     if (this._sunLight) this._sunLight.castShadow = enabled;
+    // Scene fog parked — see ctor comment. Render-mode currently
+    // just swaps materials + shadows; no atmospheric haze yet.
+    this._scene.fog = null;
     if (this._map) this._map.triggerRepaint();
   }
 
@@ -340,8 +453,12 @@ export class ThreeOverlay {
       // urban-block stack.
       if (obj.userData.isTowerMesh) {
         if (!this._whiteTowerMat) {
-          this._whiteTowerMat = new THREE.MeshLambertMaterial({
-            color: 0xe8d4a8, side: THREE.DoubleSide
+          // Warm-beige Physical material — matches the AI prompt
+          // colour-code and picks up env reflections like _whiteMat.
+          this._whiteTowerMat = new THREE.MeshStandardMaterial({
+            color: 0xe8d4a8, side: THREE.DoubleSide,
+            roughness: 0.9, metalness: 0.0,
+            envMapIntensity: 0.3
           });
         }
         obj.material = this._whiteTowerMat;
@@ -352,6 +469,89 @@ export class ThreeOverlay {
       obj.material = obj.userData.origMat;
       obj.userData.origMat = null;
     }
+  }
+
+  // ── Visual preset helpers ───────────────────────────────
+
+  /**
+   * Build a procedural environment cube from a beige sky gradient
+   * (zenith → sand horizon → dark earth) and assign it to
+   * scene.environment. Every MeshStandardMaterial / MeshPhysicalMaterial
+   * in the scene picks it up automatically via its envMap slot. Tower
+   * facades (clearcoat + metalness 0.55) get the strongest read; matte
+   * materials get a subtle ambient tint. Disposed in destroy().
+   */
+  _setupEnvironment() {
+    if (!this._renderer || !this._scene) return;
+    var canvas = document.createElement('canvas');
+    canvas.width = 1024;
+    canvas.height = 512;
+    var cctx = canvas.getContext('2d');
+    // Very soft sky → ground gradient with NO sharp horizon line.
+    // Sharp horizons create a visible band that slides across glossy
+    // facades as the camera moves — the "weird highlights" effect.
+    // Keep the transition gentle so PMREM produces a smooth IBL
+    // without distinct features that reflective materials can pick
+    // up as a moving silhouette.
+    var grad = cctx.createLinearGradient(0, 0, 0, 512);
+    // Sky → ground with REAL luminance variation so reflective
+    // surfaces have a clear "up vs down" signal — glass on a tower
+    // shows bright sky on top and darker ground below, making the
+    // volumes legible. Smooth transitions (no sharp horizon band)
+    // so PMREM produces clean IBL without artefacts that slide
+    // across facades on camera move.
+    grad.addColorStop(0.00, '#fbf5e6'); // zenith — bright cream
+    grad.addColorStop(0.30, '#e8dcc4'); // upper sky — warm beige
+    grad.addColorStop(0.55, '#9a8c75'); // horizon — taupe (soft)
+    grad.addColorStop(0.75, '#4a4239'); // shaded ground
+    grad.addColorStop(1.00, '#1a1612'); // nadir — dark earth
+    cctx.fillStyle = grad;
+    cctx.fillRect(0, 0, 1024, 512);
+
+    var tex = new THREE.CanvasTexture(canvas);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+
+    var pmrem = new THREE.PMREMGenerator(this._renderer);
+    pmrem.compileEquirectangularShader();
+    this._envMap = pmrem.fromEquirectangular(tex).texture;
+    this._scene.environment = this._envMap;
+
+    tex.dispose();
+    pmrem.dispose();
+  }
+
+  /**
+   * Override Three.js' built-in fog-distance shader chunk so fog
+   * intensity uses horizontal distance from the world origin (the
+   * urban-block centre) instead of view-space depth. The custom MVP
+   * camera setup we use (projection × view baked into camera.projectionMatrix,
+   * viewMatrix = identity) breaks the default `-mvPosition.z` formula —
+   * it ends up reading world Z (height) instead of distance from camera.
+   *
+   * This patch is global and applies to every material with USE_FOG.
+   * Only called once at init.
+   */
+  _installFogChunkOverride() {
+    if (!THREE.ShaderChunk || !THREE.ShaderChunk.fog_vertex) return;
+    // Real depth-based fog using `cameraPosition` uniform (now correct
+    // because _renderFrame sets camera.matrixWorld to MapLibre's actual
+    // camera position in local-meters). This is the SAME formula that
+    // Three.js' default fog would use in a normal scene with a proper
+    // view matrix — we just bypass Three's `mvPosition.z` (which doesn't
+    // work for our custom MVP) and compute world-space distance from
+    // camera directly. Distance is in METERS, so fogNear/fogFar can be
+    // set to natural values (e.g. 300, 1800).
+    THREE.ShaderChunk.fog_vertex = [
+      '#ifdef USE_FOG',
+      '  vec4 _fogLocalPos = vec4( transformed, 1.0 );',
+      '  #ifdef USE_INSTANCING',
+      '    _fogLocalPos = instanceMatrix * _fogLocalPos;',
+      '  #endif',
+      '  vec3 _fogWorld = ( modelMatrix * _fogLocalPos ).xyz;',
+      '  vFogDepth = length( _fogWorld - cameraPosition );',
+      '#endif'
+    ].join('\n');
   }
 
   removeMesh(obj) {
@@ -494,6 +694,11 @@ export class ThreeOverlay {
 
   destroy() {
     this.clear();
+    if (this._envMap) {
+      this._scene.environment = null;
+      this._envMap.dispose();
+      this._envMap = null;
+    }
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
       this._resizeObserver = null;

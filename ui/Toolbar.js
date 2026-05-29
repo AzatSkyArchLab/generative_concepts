@@ -1,5 +1,9 @@
 /**
- * Toolbar — V=select, P=polygon, L=line, S=section, C=section-chain, B=buffers, Delete=remove
+ * Toolbar shortcuts:
+ *   V = select          P = polygon         L = line          R = road
+ *   S = section         C = section-chain   T = tower         U = urban-block
+ *   G = polyline-tile   H = polygon-tile        ← v2 generator branch
+ *   B = buffers         I = insolation      Delete = remove
  */
 
 import { eventBus } from '../core/EventBus.js';
@@ -13,7 +17,13 @@ const ICONS = {
   tower: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="3" width="14" height="18" rx="1"/><rect x="8" y="6" width="8" height="12" rx="0" stroke-dasharray="2 1"/><line x1="12" y1="6" x2="12" y2="3"/></svg>',
   urbanBlock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="1"/><rect x="5" y="5" width="5" height="3" rx="0.5" fill="currentColor" opacity="0.3"/><rect x="14" y="5" width="5" height="3" rx="0.5" fill="currentColor" opacity="0.3"/><rect x="5" y="16" width="5" height="3" rx="0.5" fill="currentColor" opacity="0.3"/><rect x="14" y="16" width="5" height="3" rx="0.5" fill="currentColor" opacity="0.3"/><rect x="3" y="9" width="3" height="6" rx="0.5" fill="currentColor" opacity="0.3"/><rect x="18" y="9" width="3" height="6" rx="0.5" fill="currentColor" opacity="0.3"/></svg>',
   delete: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>',
-  road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20L8 4"/><path d="M16 4l4 16"/><line x1="9" y1="12" x2="15" y2="12" stroke-dasharray="2 2"/><line x1="8" y1="16" x2="16" y2="16" stroke-dasharray="2 2"/><line x1="10" y1="8" x2="14" y2="8" stroke-dasharray="2 2"/></svg>'
+  road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20L8 4"/><path d="M16 4l4 16"/><line x1="9" y1="12" x2="15" y2="12" stroke-dasharray="2 2"/><line x1="8" y1="16" x2="16" y2="16" stroke-dasharray="2 2"/><line x1="10" y1="8" x2="14" y2="8" stroke-dasharray="2 2"/></svg>',
+  // v2 generator — polyline branch. A bent axis with three tiles
+  // along it: evokes "sections tiled along a polyline with a corner".
+  polylineTile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 18 L11 18 L14 6 L21 6" opacity="0.55"/><rect x="4" y="14.5" width="5" height="3.5" rx="0.5"/><rect x="11.5" y="11" width="5" height="3.5" rx="0.5" transform="rotate(-20 14 12.75)"/><rect x="16" y="3.5" width="5" height="3.5" rx="0.5"/></svg>',
+  // v2 generator — polygon branch. Outer contour with inner-perimeter
+  // tiles: "sections tiled around the inside of a polygon".
+  polygonTile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 3 L21 3 L21 21 L3 21 Z" opacity="0.55"/><rect x="5" y="5" width="4.5" height="3" rx="0.5"/><rect x="10" y="5" width="4.5" height="3" rx="0.5"/><rect x="15" y="5" width="4" height="3" rx="0.5"/><rect x="15.5" y="8.5" width="3.5" height="3" rx="0.5"/><rect x="15.5" y="12.5" width="3.5" height="3" rx="0.5"/><rect x="15" y="16" width="4" height="3" rx="0.5"/><rect x="10" y="16" width="4.5" height="3" rx="0.5"/><rect x="5" y="16" width="4.5" height="3" rx="0.5"/><rect x="5" y="8.5" width="3.5" height="3" rx="0.5"/><rect x="5" y="12.5" width="3.5" height="3" rx="0.5"/></svg>'
 };
 
 export class Toolbar {
@@ -39,9 +49,11 @@ export class Toolbar {
       '<button class="tool-btn" data-tool="line" data-tooltip="Line (L)">' + ICONS.line + '</button>' +
       '<button class="tool-btn" data-tool="section" data-tooltip="Section (S)">' + ICONS.section + '</button>' +
       '<button class="tool-btn" data-tool="section-chain" data-tooltip="Section Chain (C)">' + ICONS.sectionChain + '</button>' +
+      '<button class="tool-btn" data-tool="polyline-tile" data-tooltip="Polyline Tile · v2 (G)">' + ICONS.polylineTile + '</button>' +
       '<button class="tool-btn" data-tool="tower" data-tooltip="Tower (T)">' + ICONS.tower + '</button>' +
       '<div class="toolbar-divider"></div>' +
       '<button class="tool-btn" data-tool="urban-block" data-tooltip="Urban Block (U)">' + ICONS.urbanBlock + '</button>' +
+      '<button class="tool-btn" data-tool="polygon-tile" data-tooltip="Polygon Tile · v2 (H)">' + ICONS.polygonTile + '</button>' +
       '<button class="tool-btn" data-tool="road" data-tooltip="Road (R)">' + ICONS.road + '</button>' +
       '<div class="toolbar-divider"></div>' +
       '<button class="tool-btn tool-btn--danger" data-tool="delete" data-tooltip="Delete (Del)">' + ICONS.delete + '</button>';
@@ -78,7 +90,13 @@ export class Toolbar {
       if (e.key.toLowerCase() === 'b') { eventBus.emit('buffers:toggle'); return; }
       if (e.key.toLowerCase() === 'i') { eventBus.emit('insolation:analyze:global'); return; }
 
-      var shortcuts = { 'v': 'select', 'p': 'polygon', 'l': 'line', 'r': 'road', 's': 'section', 'c': 'section-chain', 't': 'tower', 'u': 'urban-block' };
+      var shortcuts = {
+        'v': 'select', 'p': 'polygon', 'l': 'line', 'r': 'road',
+        's': 'section', 'c': 'section-chain', 't': 'tower', 'u': 'urban-block',
+        // v2 generator branch
+        'g': 'polyline-tile',
+        'h': 'polygon-tile'
+      };
       var tool = shortcuts[e.key.toLowerCase()];
       if (tool) { self._selectTool(tool); return; }
 

@@ -162,7 +162,7 @@ export function renderRenderSection() {
   var h = '<div class="props-divider"></div>';
   h += '<div class="render-panel" id="render-panel">';
   h += '<div class="render-panel-title">Render</div>';
-  h += '<button class="render-btn" id="render-whitewash-btn">White model</button>';
+  h += '<button class="render-btn" id="render-whitewash-btn">Render mode</button>';
   h += '<button class="render-btn render-btn--secondary" id="render-basemap-btn">Basemap: ' + (_basemap === 'satellite' ? 'Satellite' : 'Vector') + '</button>';
   h += '<button class="render-btn render-btn--secondary" id="render-screenshot-btn" disabled>Save composite PNG</button>';
   // References catalog — opens a modal where the user picks ONE
@@ -348,7 +348,7 @@ function readPromptBase() {
 async function handleRenderFromModal(ref) {
   if (!ref || !ref.dataUrl) throw new Error('no reference selected');
   var sourceDataUrl = captureComposite();
-  if (!sourceDataUrl) throw new Error('capture failed — toggle White model first');
+  if (!sourceDataUrl) throw new Error('capture failed — toggle Render mode first');
   var promptBase = readPromptBase();
   var finalPrompt =
     'IMAGE 1 (STYLE REFERENCE) — your DOMINANT VISUAL DRIVER. '
@@ -394,7 +394,7 @@ async function handleRender3FromModal(ctx) {
   var prior = ctx.priorRenders || [];
   if (!ref || !ref.dataUrl) throw new Error('no reference selected');
   var sourceDataUrl = captureComposite();
-  if (!sourceDataUrl) throw new Error('capture failed — toggle White model first');
+  if (!sourceDataUrl) throw new Error('capture failed — toggle Render mode first');
   var promptBase = readPromptBase();
 
   // ANGLE-specific instruction. Goes ABOVE everything so the model
@@ -871,14 +871,14 @@ function applyState(on) {
   var shotBtn = document.getElementById('render-screenshot-btn');
   var hint = document.getElementById('render-hint');
   if (wwBtn) {
-    wwBtn.textContent = on ? 'Show colors' : 'White model';
+    wwBtn.textContent = on ? 'Edit mode' : 'Render mode';
     wwBtn.classList.toggle('render-btn--active', on);
   }
   if (shotBtn) shotBtn.disabled = !on;
   if (hint) {
     hint.textContent = on
-      ? 'White model active. Edit the prompt and click Generate.'
-      : 'Toggle white model first.';
+      ? 'Render mode active. Edit the prompt and click Generate.'
+      : 'Toggle render mode first.';
   }
   refreshGoBtn();
 }

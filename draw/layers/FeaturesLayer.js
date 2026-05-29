@@ -27,6 +27,11 @@ export class FeaturesLayer {
     this.LINE_HITBOX_LAYER = 'features-line-hitbox';
     this.SELECTED_LAYER = 'features-selected';
     this.VERTEX_LAYER = 'features-vertices';
+    // Library elements are Point features; rendered as small circle
+    // markers so the user has a visible / clickable handle on the
+    // map even when the 3D scene is off (or the camera is too far
+    // out to see the building mesh).
+    this.LIBRARY_MARKER_LAYER = 'features-library-marker';
   }
 
   init() {
@@ -212,6 +217,46 @@ export class FeaturesLayer {
         'line-width': Config.draw.selectedWidth
       }
     });
+
+    // Library element markers — invisible halo for an oversized hit
+    // area, then a visible gold dot on top. Two layers because the
+    // halo doubles as the click target (queryRenderedFeatures /
+    // map.on('click', layerId)) without making the visible marker
+    // ugly. Filters set in _setupFilters().
+    map.addLayer({
+      id: this.LIBRARY_MARKER_LAYER + '-halo',
+      type: 'circle',
+      source: this.SOURCE_ID,
+      paint: {
+        'circle-radius': 16,
+        'circle-color': '#000000',
+        'circle-opacity': 0.001  // effectively transparent but still hit-testable
+      }
+    });
+    // Visible marker uses the app's primary blue (matches selection
+    // highlights, render buttons, slider accent). Stroke white when
+    // unselected for crisp readability over satellite + vector
+    // basemaps; primary when selected to read as "active".
+    map.addLayer({
+      id: this.LIBRARY_MARKER_LAYER,
+      type: 'circle',
+      source: this.SOURCE_ID,
+      paint: {
+        'circle-radius': [
+          'case',
+          ['==', ['get', 'selected'], true], 9,
+          7
+        ],
+        'circle-color': '#3b82f6',  // --primary
+        'circle-opacity': 1,
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': [
+          'case',
+          ['==', ['get', 'selected'], true], 3,
+          2
+        ]
+      }
+    });
   }
 
   _setupFilters() {
@@ -239,6 +284,12 @@ export class FeaturesLayer {
       notChainHolder
     ]);
     map.setFilter(this.SELECTED_LAYER, ['==', ['get', 'selected'], true]);
+    var libFilter = ['all',
+      ['==', ['geometry-type'], 'Point'],
+      ['==', ['coalesce', ['get', 'type'], ''], 'library-element']
+    ];
+    map.setFilter(this.LIBRARY_MARKER_LAYER, libFilter);
+    map.setFilter(this.LIBRARY_MARKER_LAYER + '-halo', libFilter);
   }
 
   _setupEventListeners() {
@@ -398,11 +449,17 @@ export class FeaturesLayer {
 
   queryAtPoint(point) {
     return this._mapManager.queryRenderedFeatures([point.x, point.y], {
-      layers: [this.FILL_LAYER, this.LINE_LAYER, this.LINE_HITBOX_LAYER]
+      layers: [
+        this.FILL_LAYER, this.LINE_LAYER, this.LINE_HITBOX_LAYER,
+        this.LIBRARY_MARKER_LAYER, this.LIBRARY_MARKER_LAYER + '-halo'
+      ]
     });
   }
 
   getInteractiveLayers() {
-    return [this.FILL_LAYER, this.LINE_LAYER, this.LINE_HITBOX_LAYER];
+    return [
+      this.FILL_LAYER, this.LINE_LAYER, this.LINE_HITBOX_LAYER,
+      this.LIBRARY_MARKER_LAYER, this.LIBRARY_MARKER_LAYER + '-halo'
+    ];
   }
 }
