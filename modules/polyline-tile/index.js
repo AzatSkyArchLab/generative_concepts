@@ -57,6 +57,7 @@ var REMNANT_FILL  = 'rgba(22, 163, 74, 0.35)';    // green — нестанда�
 var NEUTRAL_FILL  = 'rgba(180, 180, 180, 0.28)';  // fallback
 var STYLOBATE_FILL = 'rgba(120, 120, 120, 0.38)'; // gray — стилобат (base/podium)
 var STYLOBATE_BORDER = 'rgba(90, 90, 90, 0.6)';
+var LLU_FILL = 'rgba(219, 39, 119, 0.88)';        // magenta — ЛЛУ (stair-elevator core)
 var CELL_BORDER   = 'rgba(110, 110, 110, 0.55)';
 var WEDGE_BORDER  = 'rgba(147, 51, 234, 0.85)';
 var REMNANT_BORDER = 'rgba(22, 163, 74, 0.85)';
@@ -435,6 +436,58 @@ var module_ = {
             },
             geometry: { type: 'Point', coordinates: sec.centroidLngLat }
           });
+          // ЛЛУ (stair-elevator core) — magenta block + "LLU" label,
+          // centered on the section's northernmost long side (non-corner
+          // sections only). Pushed AFTER the section fill so it draws on
+          // top within the section-fill layer.
+          if (sec.lluLngLat) {
+            var lluRing = closeRing(sec.lluLngLat);
+            if (lluRing && lluRing.length >= 4) {
+              sectionFeats.push({
+                type: 'Feature',
+                properties: {
+                  featureId: p.id, isLLU: true,
+                  fillColor: LLU_FILL, lineColor: '#3a3a3a', label: 'LLU'
+                },
+                geometry: { type: 'Polygon', coordinates: [lluRing] }
+              });
+            }
+            if (sec.lluCentroidLngLat) {
+              sectionFeats.push({
+                type: 'Feature',
+                properties: {
+                  featureId: p.id, isLabel: true, label: 'LLU',
+                  fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)'
+                },
+                geometry: { type: 'Point', coordinates: sec.lluCentroidLngLat }
+              });
+            }
+          }
+          // Лестница в угловой секции — одна рядовая ячейка вплотную к
+          // фиолетовому угловому элементу, на самой северной стороне.
+          if (sec.cornerStairLngLat) {
+            var stRing = closeRing(sec.cornerStairLngLat);
+            if (stRing && stRing.length >= 4) {
+              sectionFeats.push({
+                type: 'Feature',
+                properties: {
+                  featureId: p.id, isLLU: true,
+                  fillColor: LLU_FILL, lineColor: '#3a3a3a', label: 'Л'
+                },
+                geometry: { type: 'Polygon', coordinates: [stRing] }
+              });
+            }
+            if (sec.cornerStairCentroidLngLat) {
+              sectionFeats.push({
+                type: 'Feature',
+                properties: {
+                  featureId: p.id, isLabel: true, label: 'Л',
+                  fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)'
+                },
+                geometry: { type: 'Point', coordinates: sec.cornerStairCentroidLngLat }
+              });
+            }
+          }
           sectionSeq++;
         }
       }

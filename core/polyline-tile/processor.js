@@ -226,6 +226,30 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       });
     });
     var cll = proj.toLngLat(s.centroid.x, -s.centroid.y);
+    // ЛЛУ (stair-elevator core) — non-corner straight sections only.
+    var lluLngLat = null, lluCentroidLngLat = null;
+    var lluXY = computeSectionLLU(s, edges, sideSign, depth, buffer);
+    if (lluXY) {
+      lluLngLat = lluXY.map(function (p) {
+        var ll = proj.toLngLat(p.x, -p.y);
+        return [ll[0], ll[1]];
+      });
+      var lc = polysCentroid([lluXY]);
+      var lcll = proj.toLngLat(lc.x, -lc.y);
+      lluCentroidLngLat = [lcll[0], lcll[1]];
+    }
+    // Лестница в угловой секции (staircase in a corner section).
+    var stairLngLat = null, stairCentroidLngLat = null;
+    var stairXY = computeCornerStaircase(s, edges, tilesXY, sideSign, step, depth, buffer);
+    if (stairXY) {
+      stairLngLat = stairXY.map(function (p) {
+        var ll = proj.toLngLat(p.x, -p.y);
+        return [ll[0], ll[1]];
+      });
+      var sc = polysCentroid([stairXY]);
+      var scll = proj.toLngLat(sc.x, -sc.y);
+      stairCentroidLngLat = [scll[0], scll[1]];
+    }
     return {
       type: s.type,
       isCorner: !!s.isCorner,
@@ -233,7 +257,11 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       areaRaw: s.areaRaw,
       areaLiving: s.areaLiving,
       polygonsLngLat: polysLngLat,
-      centroidLngLat: [cll[0], cll[1]]
+      centroidLngLat: [cll[0], cll[1]],
+      lluLngLat: lluLngLat,
+      lluCentroidLngLat: lluCentroidLngLat,
+      cornerStairLngLat: stairLngLat,
+      cornerStairCentroidLngLat: stairCentroidLngLat
     };
   });
 
@@ -1103,6 +1131,117 @@ function runRect(edge, runCells, sideSign, sectionDepth) {
   ];
 }
 
+// Лестнично-лифтовой узел (stair-elevator core) for a NON-corner
+// straight section: a pair of grid cells in the MIDDLE of the section's
+// length, on its NORTHERNMOST long side (one row deep). Returns the quad
+// (internal XY) or null for corner sections / sections without a layout.
+//   depth  = one row depth; buffer = corridor width.
+// North = smallest internal-y (internal frame is canvas-y-down, so the
+// geographic north has the most-negative y).
+function computeSectionLLU(section, edges, sideSign, depth, buffer) {
+  if (!section || section.isCorner) return null;
+  var ext = section._ext;
+  if (!ext || ext.kind !== 'straight') return null;
+  var cells = ext.cells.slice().sort(function (a, b) { return a.t0 - b.t0; });
+  if (!cells.length) return null;
+  var e = edges[ext.ei];
+  var L = segLength(e.a, e.b);
+  if (L < 1e-6) return null;
+  var tx = (e.b.x - e.a.x) / L, ty = (e.b.y - e.a.y) / L;
+  var nx = -ty * sideSign, ny = tx * sideSign;
+
+  // Center pair of columns (2 cells wide). Round toward the center.
+  var nC = cells.length;
+  var startCol = Math.round(nC / 2 - 1);
+  if (startCol < 0) startCol = 0;
+  if (startCol > nC - 1) startCol = nC - 1;
+  var t0 = cells[startCol].t0;
+  var t1 = cells[Math.min(startCol + 1, nC - 1)].t1;
+
+  var sd = 2 * depth + buffer;
+  function quad(nA, nB) {
+    return [
+      { x: e.a.x + tx * t0 + nx * nA, y: e.a.y + ty * t0 + ny * nA },
+      { x: e.a.x + tx * t1 + nx * nA, y: e.a.y + ty * t1 + ny * nA },
+      { x: e.a.x + tx * t1 + nx * nB, y: e.a.y + ty * t1 + ny * nB },
+      { x: e.a.x + tx * t0 + nx * nB, y: e.a.y + ty * t0 + ny * nB }
+    ];
+  }
+  var outerQ = quad(0, depth);             // axis-side row
+  var innerQ = quad(depth + buffer, sd);   // far-side row
+  function cy(q) { var s = 0; for (var i = 0; i < q.length; i++) s += q[i].y; return s / q.length; }
+  return (cy(outerQ) <= cy(innerQ)) ? outerQ : innerQ;   // smaller y = north
+}
+
+// Extent [minT, maxT] of the wedge tiles of a given row at vertex vIdx,
+// projected onto an edge's tangent (distance along the edge from a).
+function wedgeRowExtent(tilesXY, vIdx, edge, rowLabel) {
+  var L = segLength(edge.a, edge.b);
+  if (L < 1e-6) return null;
+  var tx = (edge.b.x - edge.a.x) / L, ty = (edge.b.y - edge.a.y) / L;
+  var minT = Infinity, maxT = -Infinity, found = false;
+  for (var i = 0; i < tilesXY.length; i++) {
+    var t = tilesXY[i];
+    if (t.vertexIdx !== vIdx || t.kind !== 'wedge' || t.row !== rowLabel) continue;
+    for (var c = 0; c < t.corners.length; c++) {
+      var tt = (t.corners[c].x - edge.a.x) * tx + (t.corners[c].y - edge.a.y) * ty;
+      if (tt < minT) minT = tt;
+      if (tt > maxT) maxT = tt;
+      found = true;
+    }
+  }
+  return found ? { minT: minT, maxT: maxT } : null;
+}
+
+// Лестница (staircase) for a CORNER section: one standard cell built
+// flush against the purple wedge, on the NORTHERNMOST candidate among
+// the corner's two arms × two rows — but never on an arm that contributes
+// only ONE cell (the "торец" / lone end cap). Returns the cell quad
+// (internal XY) or null.
+function computeCornerStaircase(section, edges, tilesXY, sideSign, step, depth, buffer) {
+  var ext = section._ext;
+  if (!ext || ext.kind !== 'corner') return null;
+  var vIdx = ext.vIdx;
+  var sd = 2 * depth + buffer;
+
+  // Candidate arms — exclude lone single-cell arms (торец).
+  var arms = [];
+  if (ext.ccA && ext.ccA.length >= 2) arms.push({ ei: ext.eiA, side: 'tail' });
+  if (ext.ccB && ext.ccB.length >= 2) arms.push({ ei: ext.eiB, side: 'head' });
+  if (!arms.length) return null;
+
+  var rows = [
+    { label: 'outer', n0: 0, n1: depth },
+    { label: 'inner', n0: depth + buffer, n1: sd }
+  ];
+  var best = null, bestY = Infinity;
+  for (var ai = 0; ai < arms.length; ai++) {
+    var arm = arms[ai], e = edges[arm.ei];
+    var L = segLength(e.a, e.b);
+    if (L < 1e-6) continue;
+    var tx = (e.b.x - e.a.x) / L, ty = (e.b.y - e.a.y) / L;
+    var nx = -ty * sideSign, ny = tx * sideSign;
+    for (var ri = 0; ri < rows.length; ri++) {
+      var row = rows[ri];
+      var wext = wedgeRowExtent(tilesXY, vIdx, e, row.label);
+      if (!wext) continue;
+      var t0, t1;
+      if (arm.side === 'head') { t0 = wext.maxT; t1 = t0 + step; }   // away from vertex (+t)
+      else { t1 = wext.minT; t0 = t1 - step; }                       // away from vertex (-t)
+      if (t1 - t0 < 1e-6) continue;
+      var quad = [
+        { x: e.a.x + tx * t0 + nx * row.n0, y: e.a.y + ty * t0 + ny * row.n0 },
+        { x: e.a.x + tx * t1 + nx * row.n0, y: e.a.y + ty * t1 + ny * row.n0 },
+        { x: e.a.x + tx * t1 + nx * row.n1, y: e.a.y + ty * t1 + ny * row.n1 },
+        { x: e.a.x + tx * t0 + nx * row.n1, y: e.a.y + ty * t0 + ny * row.n1 }
+      ];
+      var cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4;
+      if (cy < bestY) { bestY = cy; best = quad; }   // smaller y = north
+    }
+  }
+  return best;
+}
+
 // Single L-shaped outer outline ring for a corner section spanning
 // edge0 (cells cc0 up to the vertex) and edge1 (cells cc1 from the
 // vertex). Hexagon: inner along edge0 → V → inner along edge1 → outer
@@ -1265,7 +1404,8 @@ function buildSectionsPerEdge(ctx) {
       sections.push({
         type: type, tripleCount: run.length,
         areaRaw: areaRaw, areaLiving: areaRaw * SECTION_LIVING_COEF,
-        polys: [rect], centroid: polysCentroid([rect])
+        polys: [rect], centroid: polysCentroid([rect]),
+        _ext: { kind: 'straight', ei: ei, cells: run.slice() }
       });
       for (var gc = 0; gc < run.length; gc++) validKeys[ei + ':' + run[gc].cellIdx] = true;
     }
@@ -1376,7 +1516,7 @@ function buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, vIdx, emitAHead, emit
       type: cornerTypeStr, isCorner: true, tripleCount: nCells + 1,
       areaRaw: areaRaw, areaLiving: areaRaw * SECTION_LIVING_COEF,
       polys: polys, centroid: polysCentroid(polys),
-      _ext: { kind: 'corner', eiA: eiA, eiB: eiB, ccA: ccA.slice(), ccB: ccB.slice(), cornerArea: corner.area }
+      _ext: { kind: 'corner', eiA: eiA, eiB: eiB, vIdx: vIdx, ccA: ccA.slice(), ccB: ccB.slice(), cornerArea: corner.area }
     });
     markRun(eiA, ccA); markRun(eiB, ccB);
   }
