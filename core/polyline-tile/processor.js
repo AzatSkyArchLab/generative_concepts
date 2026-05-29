@@ -238,10 +238,28 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var lcll = proj.toLngLat(lc.x, -lc.y);
       lluCentroidLngLat = [lcll[0], lcll[1]];
     }
-    // Лестница в угловой секции (staircase in a corner section).
+    // ЛЛУ в угловой секции: лестница + лифты.
+    //   Case 1 (open corner element, reflex vertex): stair + adjacent cell.
+    //   Case 2 (purple wedge, convex vertex): stair + wedge-as-elevators
+    //           (if wedge ≥ std cell) else adjacent cell.
     var stairLngLat = null, stairCentroidLngLat = null;
-    var stairXY = computeCornerStaircase(s, edges, tilesXY, sideSign, step, depth, buffer);
-    if (stairXY) {
+    var elevLngLat = null, elevCentroidLngLat = null, elevKind = null;
+    var lluGroupCentroidLngLat = null, lluIsOpen = false;
+
+    // Case detection from the corner's vertex class.
+    var vc = (s._ext && s._ext.kind === 'corner' && s._ext.vIdx != null && vertexClasses[s._ext.vIdx])
+      ? vertexClasses[s._ext.vIdx].class : null;
+    lluIsOpen = (vc === 'reflex');
+    // For OPEN (reflex) corners the elevators take the inner corner cell;
+    // reserve it up-front so the staircase never lands on it.
+    var innerXY = null, excludeC = null;
+    if (lluIsOpen && s._ext && s._ext.kind === 'corner') {
+      innerXY = innerCornerCell(tilesXY, edges, s._ext);
+      if (innerXY) excludeC = polysCentroid([innerXY]);
+    }
+    var stair = computeCornerStaircase(s, edges, tilesXY, sideSign, step, depth, buffer, excludeC);
+    if (stair) {
+      var stairXY = stair.quad;
       stairLngLat = stairXY.map(function (p) {
         var ll = proj.toLngLat(p.x, -p.y);
         return [ll[0], ll[1]];
@@ -249,6 +267,24 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var sc = polysCentroid([stairXY]);
       var scll = proj.toLngLat(sc.x, -sc.y);
       stairCentroidLngLat = [scll[0], scll[1]];
+
+      var elev = (lluIsOpen && innerXY)
+        ? { polyXY: innerXY, kind: 'inner-corner' }
+        : computeCornerElevator(s, edges, tilesXY, sideSign, step, depth, buffer, stair, lluIsOpen);
+      if (elev) {
+        elevKind = elev.kind;
+        elevLngLat = elev.polyXY.map(function (p) {
+          var ll = proj.toLngLat(p.x, -p.y);
+          return [ll[0], ll[1]];
+        });
+        var ec = polysCentroid([elev.polyXY]);
+        var ecll = proj.toLngLat(ec.x, -ec.y);
+        elevCentroidLngLat = [ecll[0], ecll[1]];
+        // LLU group label anchor — midpoint of stair + elevator centroids.
+        var gx = (sc.x + ec.x) / 2, gy = (sc.y + ec.y) / 2;
+        var gll = proj.toLngLat(gx, -gy);
+        lluGroupCentroidLngLat = [gll[0], gll[1]];
+      }
     }
     return {
       type: s.type,
@@ -261,7 +297,12 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       lluLngLat: lluLngLat,
       lluCentroidLngLat: lluCentroidLngLat,
       cornerStairLngLat: stairLngLat,
-      cornerStairCentroidLngLat: stairCentroidLngLat
+      cornerStairCentroidLngLat: stairCentroidLngLat,
+      cornerElevLngLat: elevLngLat,
+      cornerElevCentroidLngLat: elevCentroidLngLat,
+      cornerElevKind: elevKind,
+      cornerLLUIsOpen: lluIsOpen,
+      cornerLLUGroupCentroidLngLat: lluGroupCentroidLngLat
     };
   });
 
@@ -1173,73 +1214,134 @@ function computeSectionLLU(section, edges, sideSign, depth, buffer) {
   return (cy(outerQ) <= cy(innerQ)) ? outerQ : innerQ;   // smaller y = north
 }
 
-// Extent [minT, maxT] of the wedge tiles of a given row at vertex vIdx,
-// projected onto an edge's tangent (distance along the edge from a).
-function wedgeRowExtent(tilesXY, vIdx, edge, rowLabel) {
+// Regular cells on a given edge + row, sorted by distance along the edge
+// (t). LLU sits on the COMMON GRID (no flush offset), so we pick the
+// wedge-adjacent grid cell — the first regular cell AFTER the green
+// remnants — and the next one along the arm.
+function rowCellsOnEdge(tilesXY, ei, rowLabel, edge) {
   var L = segLength(edge.a, edge.b);
-  if (L < 1e-6) return null;
+  if (L < 1e-6) return [];
   var tx = (edge.b.x - edge.a.x) / L, ty = (edge.b.y - edge.a.y) / L;
-  var minT = Infinity, maxT = -Infinity, found = false;
+  var arr = [];
+  for (var i = 0; i < tilesXY.length; i++) {
+    var t = tilesXY[i];
+    if (t.kind !== 'cell' || t.row !== rowLabel || t.edgeIdx !== ei) continue;
+    var c = tileCentroid({ corners: t.corners });
+    arr.push({ tile: t, t: (c.x - edge.a.x) * tx + (c.y - edge.a.y) * ty });
+  }
+  arr.sort(function (a, b) { return a.t - b.t; });
+  return arr;
+}
+
+// Wedge-adjacent regular grid cell on an arm+row + the NEXT one along the
+// arm (away from the vertex). head arm → first cell; tail arm → last.
+function armRowCells(tilesXY, ei, rowLabel, edge, side) {
+  var cells = rowCellsOnEdge(tilesXY, ei, rowLabel, edge);
+  if (!cells.length) return null;
+  if (side === 'head') return { cell: cells[0].tile, next: cells[1] ? cells[1].tile : null };
+  return {
+    cell: cells[cells.length - 1].tile,
+    next: cells.length >= 2 ? cells[cells.length - 2].tile : null
+  };
+}
+
+// Largest-area wedge tile of a given row at vertex vIdx (corner element).
+function wedgeTileOnRow(tilesXY, vIdx, rowLabel) {
+  var best = null, bestA = -1;
   for (var i = 0; i < tilesXY.length; i++) {
     var t = tilesXY[i];
     if (t.vertexIdx !== vIdx || t.kind !== 'wedge' || t.row !== rowLabel) continue;
-    for (var c = 0; c < t.corners.length; c++) {
-      var tt = (t.corners[c].x - edge.a.x) * tx + (t.corners[c].y - edge.a.y) * ty;
-      if (tt < minT) minT = tt;
-      if (tt > maxT) maxT = tt;
-      found = true;
-    }
+    var a = polygonAreaM2(t.corners);
+    if (a > bestA) { bestA = a; best = t; }
   }
-  return found ? { minT: minT, maxT: maxT } : null;
+  return best ? { corners: best.corners, area: bestA } : null;
 }
 
-// Лестница (staircase) for a CORNER section: one standard cell built
-// flush against the purple wedge, on the NORTHERNMOST candidate among
-// the corner's two arms × two rows — but never on an arm that contributes
-// only ONE cell (the "торец" / lone end cap). Returns the cell quad
-// (internal XY) or null.
-function computeCornerStaircase(section, edges, tilesXY, sideSign, step, depth, buffer) {
+// Лестница (staircase) for a CORNER section: ONE regular grid cell next
+// to the corner element, on the NORTHERNMOST candidate among the corner's
+// two arms × two rows — but never on an arm that contributes only ONE
+// cell (the "торец"). Grid-aligned (after the green remnants), no flush
+// offset. Returns placement metadata or null.
+function computeCornerStaircase(section, edges, tilesXY, sideSign, step, depth, buffer, excludeCentroid) {
   var ext = section._ext;
   if (!ext || ext.kind !== 'corner') return null;
-  var vIdx = ext.vIdx;
-  var sd = 2 * depth + buffer;
-
-  // Candidate arms — exclude lone single-cell arms (торец).
   var arms = [];
   if (ext.ccA && ext.ccA.length >= 2) arms.push({ ei: ext.eiA, side: 'tail' });
   if (ext.ccB && ext.ccB.length >= 2) arms.push({ ei: ext.eiB, side: 'head' });
   if (!arms.length) return null;
 
-  var rows = [
-    { label: 'outer', n0: 0, n1: depth },
-    { label: 'inner', n0: depth + buffer, n1: sd }
-  ];
+  var rowLabels = ['outer', 'inner'];
   var best = null, bestY = Infinity;
   for (var ai = 0; ai < arms.length; ai++) {
     var arm = arms[ai], e = edges[arm.ei];
-    var L = segLength(e.a, e.b);
-    if (L < 1e-6) continue;
-    var tx = (e.b.x - e.a.x) / L, ty = (e.b.y - e.a.y) / L;
-    var nx = -ty * sideSign, ny = tx * sideSign;
-    for (var ri = 0; ri < rows.length; ri++) {
-      var row = rows[ri];
-      var wext = wedgeRowExtent(tilesXY, vIdx, e, row.label);
-      if (!wext) continue;
-      var t0, t1;
-      if (arm.side === 'head') { t0 = wext.maxT; t1 = t0 + step; }   // away from vertex (+t)
-      else { t1 = wext.minT; t0 = t1 - step; }                       // away from vertex (-t)
-      if (t1 - t0 < 1e-6) continue;
-      var quad = [
-        { x: e.a.x + tx * t0 + nx * row.n0, y: e.a.y + ty * t0 + ny * row.n0 },
-        { x: e.a.x + tx * t1 + nx * row.n0, y: e.a.y + ty * t1 + ny * row.n0 },
-        { x: e.a.x + tx * t1 + nx * row.n1, y: e.a.y + ty * t1 + ny * row.n1 },
-        { x: e.a.x + tx * t0 + nx * row.n1, y: e.a.y + ty * t0 + ny * row.n1 }
-      ];
-      var cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4;
-      if (cy < bestY) { bestY = cy; best = quad; }   // smaller y = north
+    if (segLength(e.a, e.b) < 1e-6) continue;
+    for (var ri = 0; ri < rowLabels.length; ri++) {
+      var rc = armRowCells(tilesXY, arm.ei, rowLabels[ri], e, arm.side);
+      if (!rc || !rc.cell) continue;
+      var ctr = tileCentroid({ corners: rc.cell.corners });
+      // Skip the cell reserved for the elevators (inner corner cell).
+      if (excludeCentroid &&
+          Math.hypot(ctr.x - excludeCentroid.x, ctr.y - excludeCentroid.y) < 1e-3) continue;
+      if (ctr.y < bestY) {   // smaller internal y = more north
+        bestY = ctr.y;
+        best = {
+          quad: rc.cell.corners.slice(), nextTile: rc.next,
+          ei: arm.ei, side: arm.side, rowLabel: rowLabels[ri]
+        };
+      }
     }
   }
   return best;
+}
+
+// Внутренняя угловая ячейка (inner corner cell): the inner-row regular
+// cell of this corner nearest the inner wedge (corner element). Used for
+// the elevators at OPEN (reflex) corners — the open (outer) corner cell
+// must never hold the lifts.
+function innerCornerCell(tilesXY, edges, ext) {
+  var iw = wedgeTileOnRow(tilesXY, ext.vIdx, 'inner');
+  var target = iw ? polysCentroid([iw.corners])
+    : (edges[ext.eiB] ? edges[ext.eiB].a : null);
+  if (!target) return null;
+  var best = null, bestD = Infinity;
+  for (var i = 0; i < tilesXY.length; i++) {
+    var t = tilesXY[i];
+    if (t.kind !== 'cell' || t.row !== 'inner') continue;
+    if (t.edgeIdx !== ext.eiA && t.edgeIdx !== ext.eiB) continue;
+    var c = tileCentroid({ corners: t.corners });
+    var d = Math.hypot(c.x - target.x, c.y - target.y);
+    if (d < bestD) { bestD = d; best = t; }
+  }
+  return best ? best.corners.slice() : null;
+}
+
+// Лифты (elevators) of a corner LLU.
+//   Case 1 (open / reflex): the inner corner cell — never the open
+//     (outer) corner cell.
+//   Case 2 (purple wedge / convex): the wedge if its (per-row) area ≥ a
+//     standard cell; otherwise the next grid cell along the arm.
+// Returns { polyXY, kind } or null.
+function computeCornerElevator(section, edges, tilesXY, sideSign, step, depth, buffer, stair, isOpen) {
+  if (!stair) return null;
+  var ext = section._ext;
+
+  if (isOpen) {
+    var inner = innerCornerCell(tilesXY, edges, ext);
+    if (inner) {
+      // Guard against the inner corner cell coinciding with the stair.
+      var ic = polysCentroid([inner]), sc = polysCentroid([stair.quad]);
+      if (Math.hypot(ic.x - sc.x, ic.y - sc.y) > 1e-3) {
+        return { polyXY: inner, kind: 'inner-corner' };
+      }
+    }
+  } else {
+    var wt = wedgeTileOnRow(tilesXY, ext.vIdx, stair.rowLabel);
+    if (wt && wt.area >= step * depth - 1e-6) {
+      return { polyXY: wt.corners.slice(), kind: 'wedge' };
+    }
+  }
+  if (stair.nextTile) return { polyXY: stair.nextTile.corners.slice(), kind: 'cell' };
+  return null;
 }
 
 // Single L-shaped outer outline ring for a corner section spanning

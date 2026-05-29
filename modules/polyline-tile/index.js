@@ -57,7 +57,8 @@ var REMNANT_FILL  = 'rgba(22, 163, 74, 0.35)';    // green — нестанда�
 var NEUTRAL_FILL  = 'rgba(180, 180, 180, 0.28)';  // fallback
 var STYLOBATE_FILL = 'rgba(120, 120, 120, 0.38)'; // gray — стилобат (base/podium)
 var STYLOBATE_BORDER = 'rgba(90, 90, 90, 0.6)';
-var LLU_FILL = 'rgba(219, 39, 119, 0.88)';        // magenta — ЛЛУ (stair-elevator core)
+var LLU_FILL = 'rgba(219, 39, 119, 0.88)';        // magenta — лестница (staircase)
+var LLU_ELEV_FILL = 'rgba(124, 58, 237, 0.85)';   // violet — лифты (elevators)
 var CELL_BORDER   = 'rgba(110, 110, 110, 0.55)';
 var WEDGE_BORDER  = 'rgba(147, 51, 234, 0.85)';
 var REMNANT_BORDER = 'rgba(22, 163, 74, 0.85)';
@@ -463,8 +464,8 @@ var module_ = {
               });
             }
           }
-          // Лестница в угловой секции — одна рядовая ячейка вплотную к
-          // фиолетовому угловому элементу, на самой северной стороне.
+          // ЛЛУ в угловой секции: лестница (маджента) + лифты (фиолет.),
+          // разграниченные контуром, с общей подписью «LLU общий».
           if (sec.cornerStairLngLat) {
             var stRing = closeRing(sec.cornerStairLngLat);
             if (stRing && stRing.length >= 4) {
@@ -477,14 +478,31 @@ var module_ = {
                 geometry: { type: 'Polygon', coordinates: [stRing] }
               });
             }
-            if (sec.cornerStairCentroidLngLat) {
+            // Лифты — соседняя ячейка / фиолетовый угол.
+            if (sec.cornerElevLngLat) {
+              var evRing = closeRing(sec.cornerElevLngLat);
+              if (evRing && evRing.length >= 4) {
+                sectionFeats.push({
+                  type: 'Feature',
+                  properties: {
+                    featureId: p.id, isLLU: true,
+                    fillColor: LLU_ELEV_FILL, lineColor: '#3a3a3a', label: 'Лифт'
+                  },
+                  geometry: { type: 'Polygon', coordinates: [evRing] }
+                });
+              }
+            }
+            // One group label "LLU общий" between the two cells (or on the
+            // staircase alone when there's no elevator).
+            var lluPt = sec.cornerLLUGroupCentroidLngLat || sec.cornerStairCentroidLngLat;
+            if (lluPt) {
               sectionFeats.push({
                 type: 'Feature',
                 properties: {
-                  featureId: p.id, isLabel: true, label: 'Л',
+                  featureId: p.id, isLabel: true, label: 'LLU общий',
                   fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)'
                 },
-                geometry: { type: 'Point', coordinates: sec.cornerStairCentroidLngLat }
+                geometry: { type: 'Point', coordinates: lluPt }
               });
             }
           }
