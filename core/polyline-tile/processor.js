@@ -1233,14 +1233,15 @@ function buildSections(edges, tilesXY, step, depth, buffer, sideSign, isPolygon)
     sectionDepth: sectionDepth, tripleArea: tripleArea, maxLon: maxLon, byEdge: byEdge
   };
   var result = null;
-  if (!isPolygon && edges.length === 2 &&
-      byEdge[0] && byEdge[0].length && byEdge[1] && byEdge[1].length) {
-    result = buildSectionsOneCorner(ctx);
-  } else if (!isPolygon && edges.length === 3 &&
-      byEdge[0] && byEdge[0].length && byEdge[1] && byEdge[1].length &&
-      byEdge[2] && byEdge[2].length) {
-    result = buildSectionsTwoCorners(ctx);
+  // Any open polyline with ≥2 edges (≥1 interior corner) is handled by the
+  // universal multi-corner processor, PROVIDED every edge carries at least
+  // one complete triple (so each corner has cells on both sides). Otherwise
+  // fall back to plain per-edge straights.
+  var allHaveCells = !isPolygon && edges.length >= 2;
+  for (var gi = 0; allHaveCells && gi < edges.length; gi++) {
+    if (!byEdge[gi] || !byEdge[gi].length) allHaveCells = false;
   }
+  if (allHaveCells) result = buildSectionsMultiCorner(ctx);
   if (!result) result = buildSectionsPerEdge(ctx);
   result.completeSet = ts.complete;
   return result;
@@ -1418,9 +1419,82 @@ function buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, vIdx, emitAHead, emit
   return { sections: sections, validKeys: validKeys };
 }
 
-// One interior corner (2 edges).
-function buildSectionsOneCorner(ctx) {
-  return buildCornerBetween(ctx, 0, 1, ctx.byEdge[0], ctx.byEdge[1], 1, true, true);
+// Universal multi-corner processor for any open polyline with N ≥ 2 edges
+// (N-1 interior corners at vertices v1…v(N-1)). Generalises the proven
+// one- and two-corner logic by CHAINING it left to right:
+//
+//   • Each interior vertex v is the corner between edge(v-1) [its tail] and
+//     edge(v) [its head].
+//   • Every MIDDLE edge ei (1 ≤ ei ≤ N-2) is shared by two corners — its
+//     HEAD feeds corner v=ei, its TAIL is RESERVED for corner v=ei+1. The
+//     reservation size is chosen up-front by decideV2EdgeShare (same rule
+//     used for the 3-segment case) so both flanking corners can form.
+//   • End edges have one free end (edge0's head, edge(N-1)'s tail).
+//
+// For each corner, left to right: lay the corner + any straights on the
+// not-yet-consumed parts of its two edges. If a corner can't be assembled
+// (e.g. its reserved tail is too short) we first try giving it the full
+// edge (dropping that edge's reservation), then fall back to a 15 m
+// buffer-break: lay the edge out straight beyond a 15 m clearance from the
+// structure built so far. Finally absorb any 1–2 row middle gaps.
+//
+// With N=2 this reduces to the single-corner case; with N=3 it reproduces
+// the two-corner case exactly.
+function buildSectionsMultiCorner(ctx) {
+  var edges = ctx.edges, byEdge = ctx.byEdge, N = edges.length;
+
+  // 1. Reserve a tail slice of every middle edge for its RIGHT corner.
+  var reserve = [];
+  for (var ri = 0; ri < N; ri++) reserve.push(0);
+  for (var ei = 1; ei <= N - 2; ei++) {
+    var cornerNext = cornerElementTiles(ctx.tilesXY, ei + 1);
+    reserve[ei] = decideV2EdgeShare(
+      edges[ei].type, edges[ei + 1].type,
+      (byEdge[ei] || []).length, (byEdge[ei + 1] || []).length,
+      cornerNext.area, ctx);
+  }
+
+  var sections = [], validKeys = {};
+  function merge(r) {
+    for (var i = 0; i < r.sections.length; i++) sections.push(r.sections[i]);
+    for (var k in r.validKeys) validKeys[k] = true;
+  }
+
+  // 2. Build corners v = 1 … N-1, left to right.
+  for (var v = 1; v <= N - 1; v++) {
+    var eiA = v - 1, eiB = v;
+    var cellsAll_A = byEdge[eiA] || [], cellsAll_B = byEdge[eiB] || [];
+    var CA = cellsAll_A.length, CB = cellsAll_B.length;
+
+    var cellsA, emitAHead;
+    if (eiA === 0) { cellsA = cellsAll_A; emitAHead = true; }
+    else { cellsA = cellsAll_A.slice(CA - reserve[eiA]); emitAHead = false; }
+
+    var emitBTail = true;
+    var cellsB = (eiB <= N - 2) ? cellsAll_B.slice(0, CB - reserve[eiB]) : cellsAll_B;
+
+    var r = buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, v, emitAHead, emitBTail);
+
+    // Retry: corner failed because we over-reserved edge eiB's tail → give
+    // it the whole edge (corner v+1 then has no reserved tail and will, in
+    // turn, buffer-break on its own far edge).
+    if (!r && eiB <= N - 2 && reserve[eiB] > 0) {
+      reserve[eiB] = 0;
+      cellsB = cellsAll_B;
+      r = buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, v, emitAHead, emitBTail);
+    }
+
+    if (r) { merge(r); continue; }
+
+    // Corner v can't form → buffer-break edge eiB beyond a 15 m clearance.
+    bufferBreakEdge(ctx, eiB, sections, validKeys);
+    if (eiB <= N - 2) reserve[eiB] = 0;   // tail consumed by the break
+  }
+
+  // 3. Absorb 1–2 row dropped gaps on each middle edge.
+  for (var em = 1; em <= N - 2; em++) absorbMiddleGap(ctx, sections, validKeys, em);
+
+  return { sections: sections, validKeys: validKeys };
 }
 
 // ── Buffer-break helpers (corner can't be assembled) ──
@@ -1564,66 +1638,35 @@ function decideV2EdgeShare(type1, type2, C1, C2, corner2Area, ctx) {
   return Math.max(1, Math.min(M2, Math.floor(C1 / 2)));
 }
 
-// Three segments (two corners). RESERVE part of edge1's tail for the
-// v2 corner first, lay out v1 (+ edge1 middle straights) on the rest,
-// then build the v2 corner from the reserved tail + edge2 head — so
-// BOTH corners form. If v2 still can't be built, BREAK: clear a 15 m
-// buffer from the v1 structure, trim edge2, and lay edge2 out straight.
-function buildSectionsTwoCorners(ctx) {
-  var edges = ctx.edges, byEdge = ctx.byEdge;
-  var sideSign = ctx.sideSign, sd = ctx.sectionDepth, tripleArea = ctx.tripleArea, maxLon = ctx.maxLon;
-  var cells1 = byEdge[1] || [];
-  var C1 = cells1.length;
-  var corner2 = cornerElementTiles(ctx.tilesXY, 2);
-  var a2 = decideV2EdgeShare(edges[1].type, edges[2].type, C1, (byEdge[2] || []).length, corner2.area, ctx);
+// Buffer-break a single edge that couldn't join a corner: skip its cells
+// until the first one whose whole footprint clears a 15 m buffer from the
+// structure built so far, then lay the rest out straight. Mirrors the
+// 3-segment edge2 break, generalised to any edge / accumulated structure.
+function bufferBreakEdge(ctx, edgeIdx, sections, validKeys) {
+  var edges = ctx.edges, sideSign = ctx.sideSign, sd = ctx.sectionDepth;
+  var tripleArea = ctx.tripleArea, maxLon = ctx.maxLon;
 
-  // Lay out v1 on edge0 + edge1 HEAD (reserving a2 cells at edge1 tail).
-  var edge1Head = (a2 > 0) ? cells1.slice(0, C1 - a2) : cells1;
-  var r1 = buildCornerBetween(ctx, 0, 1, byEdge[0], edge1Head, 1, true, true);
-  if (!r1 && a2 > 0) {            // v1 failed with reservation → give it all
-    a2 = 0; edge1Head = cells1;
-    r1 = buildCornerBetween(ctx, 0, 1, byEdge[0], cells1, 1, true, true);
-  }
-  if (!r1) return null;
-
-  var sections = r1.sections.slice();
-  var validKeys = {};
-  for (var k in r1.validKeys) validKeys[k] = true;
-
-  // v2 corner from reserved edge1 tail + edge2.
-  var reservedTail = (a2 > 0) ? cells1.slice(C1 - a2) : [];
-  var r2 = reservedTail.length
-    ? buildCornerBetween(ctx, 1, 2, reservedTail, byEdge[2], 2, false, true)
-    : null;
-  if (r2) {
-    for (var i = 0; i < r2.sections.length; i++) sections.push(r2.sections[i]);
-    for (var k2 in r2.validKeys) validKeys[k2] = true;
-    // Absorb a 1–2 row dropped gap in the middle of edge1 into the
-    // flanking sections (≥3 rows left as acceptable).
-    absorbMiddleGap(ctx, sections, validKeys, 1);
-    return { sections: sections, validKeys: validKeys };
-  }
-
-  // ── Buffer break on edge2 ──
   var refPolys = [];
-  for (var s = 0; s < r1.sections.length; s++) {
-    for (var p = 0; p < r1.sections[s].polys.length; p++) refPolys.push(r1.sections[s].polys[p]);
+  for (var s = 0; s < sections.length; s++) {
+    for (var p = 0; p < sections[s].polys.length; p++) refPolys.push(sections[s].polys[p]);
   }
-  var cells2 = (byEdge[2] || []).slice().sort(function (a, b) { return a.t0 - b.t0; });
-  var e2 = edges[2], L2 = segLength(e2.a, e2.b);
-  var tx = (e2.b.x - e2.a.x) / L2, ty = (e2.b.y - e2.a.y) / L2;
+  var cells = (ctx.byEdge[edgeIdx] || []).filter(function (c) {
+    return !validKeys[edgeIdx + ':' + c.cellIdx];
+  }).sort(function (a, b) { return a.t0 - b.t0; });
+  if (!cells.length) return;
+
+  var e = edges[edgeIdx], L = segLength(e.a, e.b);
+  var tx = (e.b.x - e.a.x) / L, ty = (e.b.y - e.a.y) / L;
   var nx = -ty * sideSign, ny = tx * sideSign;
   var BUFFER = 15;
-  // First edge2 cell whose footprint (4 corners) is wholly ≥ BUFFER from
-  // the v1 structure → start the fresh layout there.
   var startIdx = -1;
-  for (var ci = 0; ci < cells2.length; ci++) {
-    var c = cells2[ci];
+  for (var ci = 0; ci < cells.length; ci++) {
+    var c = cells[ci];
     var corners = [
-      { x: e2.a.x + tx * c.t0 + nx * 0,  y: e2.a.y + ty * c.t0 + ny * 0 },
-      { x: e2.a.x + tx * c.t1 + nx * 0,  y: e2.a.y + ty * c.t1 + ny * 0 },
-      { x: e2.a.x + tx * c.t1 + nx * sd, y: e2.a.y + ty * c.t1 + ny * sd },
-      { x: e2.a.x + tx * c.t0 + nx * sd, y: e2.a.y + ty * c.t0 + ny * sd }
+      { x: e.a.x + tx * c.t0 + nx * 0,  y: e.a.y + ty * c.t0 + ny * 0 },
+      { x: e.a.x + tx * c.t1 + nx * 0,  y: e.a.y + ty * c.t1 + ny * 0 },
+      { x: e.a.x + tx * c.t1 + nx * sd, y: e.a.y + ty * c.t1 + ny * sd },
+      { x: e.a.x + tx * c.t0 + nx * sd, y: e.a.y + ty * c.t0 + ny * sd }
     ];
     var clear = true;
     for (var cc = 0; cc < corners.length; cc++) {
@@ -1631,25 +1674,24 @@ function buildSectionsTwoCorners(ctx) {
     }
     if (clear) { startIdx = ci; break; }
   }
+  if (startIdx < 0) return;
 
-  if (startIdx >= 0) {
-    var keep = cells2.slice(startIdx);
-    var parts = partitionTriples(keep.length, e2.type, maxLon);
-    var idx = 0;
-    for (var pp = 0; pp < parts.length; pp++) {
-      var run = keep.slice(idx, idx + parts[pp]); idx += parts[pp];
-      if (!run.length) continue;
-      var rect = runRect(e2, run, sideSign, sd);
-      var areaRaw = run.length * tripleArea;
-      sections.push({
-        type: e2.type, tripleCount: run.length,
-        areaRaw: areaRaw, areaLiving: areaRaw * SECTION_LIVING_COEF,
-        polys: [rect], centroid: polysCentroid([rect])
-      });
-      for (var g = 0; g < run.length; g++) validKeys['2:' + run[g].cellIdx] = true;
-    }
+  var keep = cells.slice(startIdx);
+  var parts = partitionTriples(keep.length, e.type, maxLon);
+  var idx = 0;
+  for (var pp = 0; pp < parts.length; pp++) {
+    var run = keep.slice(idx, idx + parts[pp]); idx += parts[pp];
+    if (!run.length) continue;
+    var rect = runRect(e, run, sideSign, sd);
+    var areaRaw = run.length * tripleArea;
+    sections.push({
+      type: e.type, tripleCount: run.length,
+      areaRaw: areaRaw, areaLiving: areaRaw * SECTION_LIVING_COEF,
+      polys: [rect], centroid: polysCentroid([rect]),
+      _ext: { kind: 'straight', ei: edgeIdx, cells: run.slice() }
+    });
+    for (var g = 0; g < run.length; g++) validKeys[edgeIdx + ':' + run[g].cellIdx] = true;
   }
-  return { sections: sections, validKeys: validKeys };
 }
 
 // Closes the dead corner past the two extension chains: a quad whose
