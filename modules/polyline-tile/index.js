@@ -55,6 +55,8 @@ var CORRIDOR_FILL = 'rgba(115, 115, 115, 0.22)';  // corridor cells
 var WEDGE_FILL    = 'rgba(147, 51, 234, 0.40)';   // purple — угловые элементы
 var REMNANT_FILL  = 'rgba(22, 163, 74, 0.35)';    // green — нестандартные ячейки у углов
 var NEUTRAL_FILL  = 'rgba(180, 180, 180, 0.28)';  // fallback
+var STYLOBATE_FILL = 'rgba(120, 120, 120, 0.38)'; // gray — стилобат (base/podium)
+var STYLOBATE_BORDER = 'rgba(90, 90, 90, 0.6)';
 var CELL_BORDER   = 'rgba(110, 110, 110, 0.55)';
 var WEDGE_BORDER  = 'rgba(147, 51, 234, 0.85)';
 var REMNANT_BORDER = 'rgba(22, 163, 74, 0.85)';
@@ -110,6 +112,7 @@ var module_ = {
     // remnants stay gray (otherwise they'd be tinted purple/green).
     var fillColor = [
       'case',
+      ['==', ['get', 'stylobate'], true], STYLOBATE_FILL,  // gray base — FIRST
       ['==', ['get', 'row'],  'corridor'], CORRIDOR_FILL,
       ['==', ['get', 'kind'], 'wedge'],   WEDGE_FILL,
       ['==', ['get', 'kind'], 'remnant'], REMNANT_FILL,
@@ -130,6 +133,7 @@ var module_ = {
     // accents only on outer/inner rows.
     var lineColor = [
       'case',
+      ['==', ['get', 'stylobate'], true], STYLOBATE_BORDER,
       ['==', ['get', 'row'],  'corridor'], CELL_BORDER,
       ['==', ['get', 'kind'], 'wedge'],   WEDGE_BORDER,
       ['==', ['get', 'kind'], 'remnant'], REMNANT_BORDER,
@@ -137,6 +141,7 @@ var module_ = {
     ];
     var lineWidth = [
       'case',
+      ['==', ['get', 'stylobate'], true], 0.7,
       ['==', ['get', 'row'],  'corridor'], 0.7,
       ['==', ['get', 'kind'], 'wedge'],   1.2,
       ['==', ['get', 'kind'], 'remnant'], 1.2,
@@ -332,6 +337,7 @@ var module_ = {
             kind: tile.kind,
             row: tile.row,
             type: tile.type,
+            stylobate: !!tile.stylobate,
             edgeIdx:   (tile.edgeIdx   == null ? -1 : tile.edgeIdx),
             cellIdx:   (tile.cellIdx   == null ? -1 : tile.cellIdx),
             vertexIdx: (tile.vertexIdx == null ? -1 : tile.vertexIdx)
@@ -430,6 +436,18 @@ var module_ = {
             geometry: { type: 'Point', coordinates: sec.centroidLngLat }
           });
           sectionSeq++;
+        }
+      }
+
+      // Stylobate labels — one "стилобат" per gray region.
+      if (result.stylobate && result.stylobate.length) {
+        for (var st = 0; st < result.stylobate.length; st++) {
+          sectionFeats.push({
+            type: 'Feature',
+            properties: { featureId: p.id, isLabel: true, label: 'стилобат',
+              fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)' },
+            geometry: { type: 'Point', coordinates: result.stylobate[st].centroidLngLat }
+          });
         }
       }
     }

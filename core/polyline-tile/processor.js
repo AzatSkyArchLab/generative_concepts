@@ -117,23 +117,37 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   // sections. Triples not in any kept section are DROPPED — their
   // outer/corridor/inner cells are removed from the tile output.
   var sectionsXY = [];
+  var styloRegionsXY = [];
   if (rows === 3) {
     var secResult = buildSections(edges, tilesXY, step, depth, buffer, sideSign, isPolygon);
     sectionsXY = secResult.sections;
     var vk = secResult.validKeys;
-    var completeSet = secResult.completeSet;
-    tilesXY = tilesXY.filter(function (t) {
-      var isRegular = (t.kind === 'cell' || t.kind === 'corridor') &&
-        t.edgeIdx != null && t.cellIdx != null && t.cellIdx >= 0;
-      if (!isRegular) return true;  // keep wedges, remnants, extensions
-      var key = t.edgeIdx + ':' + t.cellIdx;
-      // Incomplete triples (outer-only cells near convex corners) are
-      // structural — keep them; they're just not part of any section.
-      if (!completeSet[key]) return true;
-      // Complete-triple cells survive only if their triple is in a
-      // kept section (drops section remainders).
-      return vk[key] === true;
-    });
+    // Don't drop anything. A regular cell is STYLOBATE (gray podium
+    // base) only if it is BOTH (a) not in a kept section by cell-key
+    // AND (b) geometrically outside every section polygon. The
+    // geometric test is essential: a corner section's L-ring covers
+    // more cells (incomplete triples, dead-corner fill) than its
+    // cell-key list, and those must NOT be greyed inside the corner.
+    var secPolysXY = [];
+    for (var si = 0; si < sectionsXY.length; si++) {
+      for (var pii = 0; pii < sectionsXY[si].polys.length; pii++) {
+        secPolysXY.push(sectionsXY[si].polys[pii]);
+      }
+    }
+    for (var ti = 0; ti < tilesXY.length; ti++) {
+      var tt = tilesXY[ti];
+      var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
+        tt.edgeIdx != null && tt.cellIdx != null && tt.cellIdx >= 0;
+      if (!isReg) continue;
+      if (vk[tt.edgeIdx + ':' + tt.cellIdx] === true) continue;   // in a section
+      var ctr = tileCentroid({ corners: tt.corners });
+      var inside = false;
+      for (var pj = 0; pj < secPolysXY.length; pj++) {
+        if (pointInPolygon(ctr, secPolysXY[pj])) { inside = true; break; }
+      }
+      if (!inside) tt.stylobate = true;
+    }
+    styloRegionsXY = buildStylobateRegions(tilesXY, edges, sideSign, 2 * depth + buffer);
   }
 
   // ─── Vertex diagnostic (which corners did the algorithm pick?) ───
@@ -187,12 +201,19 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       kind: srcT.kind,
       row: srcT.row,
       type: srcT.type,
+      stylobate: !!srcT.stylobate,
       edgeIdx: srcT.edgeIdx != null ? srcT.edgeIdx : undefined,
       cellIdx: srcT.cellIdx != null ? srcT.cellIdx : undefined,
       vertexIdx: srcT.vertexIdx != null ? srcT.vertexIdx : undefined,
       cornersLngLat: cornersLngLat
     };
   }
+
+  // ─── Convert stylobate regions to lng/lat centroids (for labels) ───
+  var outStylobate = styloRegionsXY.map(function (r) {
+    var cll = proj.toLngLat(r.centroid.x, -r.centroid.y);
+    return { centroidLngLat: [cll[0], cll[1]], count: r.count };
+  });
 
   // ─── Convert sections to lng/lat ───
   // Each section carries one OR more polygons (corner sections are
@@ -221,12 +242,13 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     edges: edges.map(function (e) { return { type: e.type, lengthM: e.length }; }),
     vertices: outVertices,
     sections: outSections,
+    stylobate: outStylobate,
     projection: { originLng: origin[0], originLat: origin[1] }
   };
 }
 
 function emptyResult() {
-  return { tiles: [], edges: [], vertices: [], sections: [], projection: null };
+  return { tiles: [], edges: [], vertices: [], sections: [], stylobate: [], projection: null };
 }
 
 // ===================================================================
@@ -1150,6 +1172,44 @@ function computeTripleSets(tilesXY) {
     byEdge[e].sort(function (a, b) { return a.t0 - b.t0; });
   }
   return { byEdge: byEdge, complete: complete };
+}
+
+// Group stylobate OUTER cells into contiguous runs per edge and return
+// a label anchor (mid-band centroid) + cell count for each run. Used to
+// drop one "стилобат" label per gray region.
+function buildStylobateRegions(tilesXY, edges, sideSign, sectionDepth) {
+  var byEdge = {};
+  for (var i = 0; i < tilesXY.length; i++) {
+    var t = tilesXY[i];
+    if (t.stylobate && t.kind === 'cell' && t.row === 'outer' && t.cellIdx != null && t.t0 != null) {
+      (byEdge[t.edgeIdx] = byEdge[t.edgeIdx] || []).push(t);
+    }
+  }
+  var regions = [];
+  for (var e in byEdge) {
+    var ei = +e;
+    var cells = byEdge[e].sort(function (a, b) { return a.t0 - b.t0; });
+    var runs = [[cells[0]]];
+    for (var j = 1; j < cells.length; j++) {
+      if (Math.abs(cells[j].t0 - cells[j - 1].t1) < 0.6) runs[runs.length - 1].push(cells[j]);
+      else runs.push([cells[j]]);
+    }
+    var edge = edges[ei];
+    var L = segLength(edge.a, edge.b);
+    if (L < 1e-6) continue;
+    var tx = (edge.b.x - edge.a.x) / L, ty = (edge.b.y - edge.a.y) / L;
+    var nx = -ty * sideSign, ny = tx * sideSign;
+    for (var r = 0; r < runs.length; r++) {
+      var run = runs[r];
+      var t0 = run[0].t0, t1 = run[run.length - 1].t1;
+      var tm = (t0 + t1) / 2, nm = sectionDepth / 2;
+      regions.push({
+        centroid: { x: edge.a.x + tx * tm + nx * nm, y: edge.a.y + ty * tm + ny * nm },
+        count: run.length
+      });
+    }
+  }
+  return regions;
 }
 
 function sumSizes(parts) { var s = 0; for (var i = 0; i < parts.length; i++) s += parts[i]; return s; }
