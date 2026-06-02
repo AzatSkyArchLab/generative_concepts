@@ -529,43 +529,49 @@ var module_ = {
           });
         }
       }
-      // Tower footprint (+Tower is on in tileParams). The 15-m buffer
-      // around the tower is drawn first (underneath) as a pale amber
-      // ring; the solid tower square sits on top.
-      if (result.tower && result.tower.bufferLngLat) {
-        var bufRing = closeRing(result.tower.bufferLngLat);
-        if (bufRing && bufRing.length >= 4) {
-          sectionFeats.push({
-            type: 'Feature',
-            properties: {
-              featureId: p.id, isTowerBuffer: true,
-              fillColor: TOWER_BUFFER_FILL, lineColor: TOWER_BUFFER_BORDER, label: ''
-            },
-            geometry: { type: 'Polygon', coordinates: [bufRing] }
-          });
+      // Tower footprint (+Tower / +Tower 2 is on in tileParams). The
+      // 15-m buffer around each tower is drawn first (underneath) as a
+      // pale amber ring; the solid tower square sits on top.
+      var towersToRender = [result.tower, result.tower2];
+      for (var twi = 0; twi < towersToRender.length; twi++) {
+        var twOut = towersToRender[twi];
+        if (!twOut) continue;
+        var twLabel = twi === 0 ? 'Tower' : 'Tower 2';
+        if (twOut.bufferLngLat) {
+          var bufRing = closeRing(twOut.bufferLngLat);
+          if (bufRing && bufRing.length >= 4) {
+            sectionFeats.push({
+              type: 'Feature',
+              properties: {
+                featureId: p.id, isTowerBuffer: true,
+                fillColor: TOWER_BUFFER_FILL, lineColor: TOWER_BUFFER_BORDER, label: ''
+              },
+              geometry: { type: 'Polygon', coordinates: [bufRing] }
+            });
+          }
         }
-      }
-      if (result.tower && result.tower.footprintLngLat) {
-        var towerRing = closeRing(result.tower.footprintLngLat);
-        if (towerRing && towerRing.length >= 4) {
-          sectionFeats.push({
-            type: 'Feature',
-            properties: {
-              featureId: p.id, isTower: true,
-              fillColor: TOWER_FILL, lineColor: TOWER_BORDER, label: 'Tower'
-            },
-            geometry: { type: 'Polygon', coordinates: [towerRing] }
-          });
-        }
-        if (result.tower.centroidLngLat) {
-          sectionFeats.push({
-            type: 'Feature',
-            properties: {
-              featureId: p.id, isLabel: true, label: 'Tower',
-              fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)'
-            },
-            geometry: { type: 'Point', coordinates: result.tower.centroidLngLat }
-          });
+        if (twOut.footprintLngLat) {
+          var towerRing = closeRing(twOut.footprintLngLat);
+          if (towerRing && towerRing.length >= 4) {
+            sectionFeats.push({
+              type: 'Feature',
+              properties: {
+                featureId: p.id, isTower: true,
+                fillColor: TOWER_FILL, lineColor: TOWER_BORDER, label: twLabel
+              },
+              geometry: { type: 'Polygon', coordinates: [towerRing] }
+            });
+          }
+          if (twOut.centroidLngLat) {
+            sectionFeats.push({
+              type: 'Feature',
+              properties: {
+                featureId: p.id, isLabel: true, label: twLabel,
+                fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)'
+              },
+              geometry: { type: 'Point', coordinates: twOut.centroidLngLat }
+            });
+          }
         }
       }
     }

@@ -126,10 +126,12 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   }
 
   var towerXY = null;   // tower footprint (4 corners, internal frame) if +Tower is on
+  var towerXY2 = null;  // second tower (at diagonal bbox corner of polygon)
   if (isPolygon && pts.length >= 3) {
     var sd = 2 * depth + buffer;
     var trimR = 15;
     var withTower = !!(tileParams && tileParams.withTower);
+    var withTower2 = !!(tileParams && tileParams.withTower2);
     var TOWER_CELL = 3.3, TOWER_CELLS = 7;        // small tower: 7×7 cells
     var towerSize = TOWER_CELL * TOWER_CELLS;     // = 23.1 m (smallest tower)
     var Npts0 = pts.length;
@@ -215,6 +217,85 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
               break;
             }
           }
+          // ─── Second tower (visual + buffer cull, NO polyline trim) ───
+          // Determined by the bounding-box diagonal:
+          //   1. Compute axis-aligned bbox of polygon.
+          //   2. Find which bbox corner is closest to tower 1's centre.
+          //   3. Take the DIAGONAL bbox corner.
+          //   4. Pick the polygon vertex (excluding v0) closest to that
+          //      diagonal — that's where tower 2 anchors.
+          //   5. Place tower 2 axes-aligned with the outgoing edge from
+          //      that vertex, stepping back along it on acute corners
+          //      (same algorithm as tower 1). Skip if vertex is reflex
+          //      or no fit possible.
+          // Tower 2 does NOT trim the polyline (the polyline opening is
+          // at v0 only). It is purely visual + its 15-m buffer culls
+          // стилобат cells the same way tower 1's buffer does.
+          if (withTower2 && towerXY) {
+            var xmn = Infinity, xmx = -Infinity, ymn = Infinity, ymx = -Infinity;
+            for (var bi = 0; bi < Npts0; bi++) {
+              if (pts[bi].x < xmn) xmn = pts[bi].x;
+              if (pts[bi].x > xmx) xmx = pts[bi].x;
+              if (pts[bi].y < ymn) ymn = pts[bi].y;
+              if (pts[bi].y > ymx) ymx = pts[bi].y;
+            }
+            var bbc = [
+              { x: xmn, y: ymn }, { x: xmx, y: ymn },
+              { x: xmx, y: ymx }, { x: xmn, y: ymx }
+            ];
+            var t1cx = (towerXY[0].x + towerXY[2].x) / 2;
+            var t1cy = (towerXY[0].y + towerXY[2].y) / 2;
+            var bestC = 0, bestCd = Infinity;
+            for (var cii = 0; cii < 4; cii++) {
+              var ddx = bbc[cii].x - t1cx, ddy = bbc[cii].y - t1cy;
+              var dd = ddx * ddx + ddy * ddy;
+              if (dd < bestCd) { bestCd = dd; bestC = cii; }
+            }
+            var diagC = bbc[(bestC + 2) % 4];
+            // Rank polygon vertices by distance to diagC (closest first).
+            // Skip v0 (= pts[0]); on reflex/unfit candidates fall through
+            // to the next-closest until one fits or we run out.
+            var ord = [];
+            for (var vi2 = 1; vi2 < Npts0; vi2++) {
+              var ddxv = pts[vi2].x - diagC.x, ddyv = pts[vi2].y - diagC.y;
+              ord.push({ i: vi2, d2: ddxv * ddxv + ddyv * ddyv });
+            }
+            ord.sort(function (A, B) { return A.d2 - B.d2; });
+            var BUF2 = 15;
+            for (var oi = 0; oi < ord.length && !towerXY2; oi++) {
+              var vk = ord[oi].i;
+              var v0_2 = pts[vk];
+              var pv_2 = pts[(vk - 1 + Npts0) % Npts0];
+              var nv_2 = pts[(vk + 1) % Npts0];
+              var dP_2 = _u(pv_2, v0_2);
+              var dN_2 = _u(v0_2, nv_2);
+              if (!dP_2 || !dN_2) continue;
+              var crossDN_2 = dP_2.x * dN_2.y - dP_2.y * dN_2.x;
+              if (crossDN_2 <= 1e-9) continue;   // reflex / collinear — skip
+              var nN_2 = { x: -dN_2.y, y: dN_2.x };
+              for (var d2 = 0; d2 <= dN_2.L - towerSize - 0.5; d2 += 0.5) {
+                var ox2 = v0_2.x + d2 * dN_2.x, oy2 = v0_2.y + d2 * dN_2.y;
+                var twD2 = [
+                  { x: ox2, y: oy2 },
+                  { x: ox2 + towerSize * dN_2.x, y: oy2 + towerSize * dN_2.y },
+                  { x: ox2 + towerSize * (dN_2.x + nN_2.x), y: oy2 + towerSize * (dN_2.y + nN_2.y) },
+                  { x: ox2 + towerSize * nN_2.x, y: oy2 + towerSize * nN_2.y }
+                ];
+                if (!towerFitCheck(twD2)) continue;
+                // Reject placements that overlap tower 1's footprint
+                // (centres closer than ts + 2·BUF — tower 1 and tower 2
+                // buffers would visibly merge, which the user clearly
+                // doesn't want when they ask for two distinct towers).
+                var c2cx = (twD2[0].x + twD2[2].x) / 2;
+                var c2cy = (twD2[0].y + twD2[2].y) / 2;
+                var cdx = c2cx - t1cx, cdy = c2cy - t1cy;
+                var cdist = Math.hypot(cdx, cdy);
+                if (cdist < towerSize + 2 * BUF2) continue;
+                towerXY2 = twD2;
+                break;
+              }
+            }
+          }
         }
         if (truncA === 0 || truncB === 0) {
           // Fill in the missing trim(s) with the standard 15-m circle
@@ -295,28 +376,37 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     // distance to the tower square is ≤ 15². Tower is axes-aligned with
     // the v0 edges (dN, nN), but here we recover its frame from the 4
     // corners so the predicate doesn't depend on dN/nN being in scope.
-    var towerBufferContains = null;
-    if (towerXY && towerXY.length === 4) {
-      var tcA = towerXY[0], tcB = towerXY[1], tcD = towerXY[3];
+    // With +Tower 2 we collect a predicate per tower and OR them.
+    function makeTowerBufferPredicate(twXY) {
+      if (!twXY || twXY.length !== 4) return null;
+      var tcA = twXY[0], tcB = twXY[1], tcD = twXY[3];
       var axx = tcB.x - tcA.x, axy = tcB.y - tcA.y;
       var ayx = tcD.x - tcA.x, ayy = tcD.y - tcA.y;
       var Lx = Math.hypot(axx, axy), Ly = Math.hypot(ayx, ayy);
-      if (Lx > 1e-9 && Ly > 1e-9) {
-        var uxx = axx / Lx, uxy = axy / Lx;
-        var uyx = ayx / Ly, uyy = ayy / Ly;
-        var cxT = (tcA.x + towerXY[2].x) / 2, cyT = (tcA.y + towerXY[2].y) / 2;
-        var hwT = Lx / 2, hhT = Ly / 2;
-        var BUF = 15, BUF2 = BUF * BUF;
-        towerBufferContains = function (p) {
-          var dx0 = p.x - cxT, dy0 = p.y - cyT;
-          var lxp = dx0 * uxx + dy0 * uxy;
-          var lyp = dx0 * uyx + dy0 * uyy;
-          var ex = Math.abs(lxp) - hwT; if (ex < 0) ex = 0;
-          var ey = Math.abs(lyp) - hhT; if (ey < 0) ey = 0;
-          return (ex * ex + ey * ey) <= BUF2;
-        };
-      }
+      if (Lx < 1e-9 || Ly < 1e-9) return null;
+      var uxx = axx / Lx, uxy = axy / Lx;
+      var uyx = ayx / Ly, uyy = ayy / Ly;
+      var cxT = (tcA.x + twXY[2].x) / 2, cyT = (tcA.y + twXY[2].y) / 2;
+      var hwT = Lx / 2, hhT = Ly / 2;
+      var BUFR = 15, BUFR2 = BUFR * BUFR;
+      return function (p) {
+        var dx0 = p.x - cxT, dy0 = p.y - cyT;
+        var lxp = dx0 * uxx + dy0 * uxy;
+        var lyp = dx0 * uyx + dy0 * uyy;
+        var ex = Math.abs(lxp) - hwT; if (ex < 0) ex = 0;
+        var ey = Math.abs(lyp) - hhT; if (ey < 0) ey = 0;
+        return (ex * ex + ey * ey) <= BUFR2;
+      };
     }
+    var towerBufPreds = [];
+    var bp1 = makeTowerBufferPredicate(towerXY);  if (bp1) towerBufPreds.push(bp1);
+    var bp2 = makeTowerBufferPredicate(towerXY2); if (bp2) towerBufPreds.push(bp2);
+    var towerBufferContains = towerBufPreds.length === 0 ? null : function (p) {
+      for (var bpi = 0; bpi < towerBufPreds.length; bpi++) {
+        if (towerBufPreds[bpi](p)) return true;
+      }
+      return false;
+    };
     for (var ti = 0; ti < tilesXY.length; ti++) {
       var tt = tilesXY[ti];
       var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
@@ -489,31 +579,32 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     };
   });
 
-  // Tower footprint (when +Tower is on for a polygon) → lng/lat. Also a
-  // 15-m buffer ring around the tower (Minkowski-square approximation,
-  // sharp corners) so the user can see the no-build zone visually.
-  var outTower = null;
-  if (towerXY) {
-    var ringLngLat = towerXY.map(function (p) {
+  // Tower footprint (when +Tower / +Tower 2 is on for a polygon) →
+  // lng/lat. Also a 15-m rounded buffer ring around the tower
+  // (Minkowski-square approximation with quarter-circle arc corners) so
+  // the user can see the no-build zone visually.
+  function buildTowerOutput(twXY) {
+    if (!twXY) return null;
+    var ringLngLat = twXY.map(function (p) {
       var ll = proj.toLngLat(p.x, -p.y);
       return [ll[0], ll[1]];
     });
-    var tc = polysCentroid([towerXY]);
+    var tc = polysCentroid([twXY]);
     var tcll = proj.toLngLat(tc.x, -tc.y);
     // 15 m rounded buffer: Minkowski sum of the tower square with a 15-m
     // disk → straight edges parallel to the tower offset 15 m outward,
     // connected by quarter-circle arcs of radius 15 m at each corner.
     var BUF = 15;
     var ARC_SEGS = 6;   // segments per quarter arc → 24-point smooth ring
-    var Nt = towerXY.length;
+    var Nt = twXY.length;
     // Centroid (used to pick the outward direction of each edge).
     var cTx = 0, cTy = 0;
-    for (var ti = 0; ti < Nt; ti++) { cTx += towerXY[ti].x; cTy += towerXY[ti].y; }
+    for (var ti = 0; ti < Nt; ti++) { cTx += twXY[ti].x; cTy += twXY[ti].y; }
     cTx /= Nt; cTy /= Nt;
-    // Outward unit normal of each edge i (from towerXY[i] to towerXY[i+1]).
+    // Outward unit normal of each edge i (from twXY[i] to twXY[i+1]).
     var nOuts = [];
     for (var ei = 0; ei < Nt; ei++) {
-      var ta = towerXY[ei], tb = towerXY[(ei + 1) % Nt];
+      var ta = twXY[ei], tb = twXY[(ei + 1) % Nt];
       var ex = tb.x - ta.x, ey = tb.y - ta.y;
       var eL = Math.hypot(ex, ey);
       if (eL < 1e-9) { nOuts.push({ x: 0, y: 0 }); continue; }
@@ -536,7 +627,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var da = aOut - aIn;
       while (da >  Math.PI) da -= 2 * Math.PI;
       while (da < -Math.PI) da += 2 * Math.PI;
-      var corner = towerXY[ci];
+      var corner = twXY[ci];
       for (var s = 0; s <= ARC_SEGS; s++) {
         var ang = aIn + (s / ARC_SEGS) * da;
         bufXY.push({
@@ -549,12 +640,14 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var ll = proj.toLngLat(p.x, -p.y);
       return [ll[0], ll[1]];
     });
-    outTower = {
+    return {
       footprintLngLat: ringLngLat,
       bufferLngLat: bufLngLat,
       centroidLngLat: [tcll[0], tcll[1]]
     };
   }
+  var outTower  = buildTowerOutput(towerXY);
+  var outTower2 = buildTowerOutput(towerXY2);
 
   return {
     tiles: outTiles,
@@ -563,6 +656,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     sections: outSections,
     stylobate: outStylobate,
     tower: outTower,
+    tower2: outTower2,
     projection: { originLng: origin[0], originLat: origin[1] }
   };
 }

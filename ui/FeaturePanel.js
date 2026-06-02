@@ -1050,6 +1050,7 @@ export class FeaturePanel {
     var buffer = tp.buffer != null ? tp.buffer : 2;
     var sectionWidth = Math.round(2 * depth + buffer);
     var withTower = tp.withTower === true;
+    var withTower2 = tp.withTower2 === true;
     var typeName = (p.type === 'polygon-tile') ? 'Polygon tile' : 'Polyline tile';
     var label = features.length === 1
       ? typeName + ' ' + (p.id ? p.id.slice(0, 6) : '')
@@ -1072,6 +1073,15 @@ export class FeaturePanel {
     h += '<div class="param-row"><label class="param-label">+ Tower</label>';
     h += '<div class="param-input-wrap"><input type="checkbox" class="param-input" data-key="withTower" data-target="tile"';
     h += (withTower ? ' checked' : '') + '></div></div>';
+    // +Tower 2 — second tower at the bbox-diagonal vertex; only meaningful
+    // when +Tower is on, but we keep the input enabled so the user can
+    // toggle it independently. The processor ignores withTower2 unless
+    // tower 1 actually got placed.
+    h += '<div class="param-row"><label class="param-label">+ Tower 2</label>';
+    h += '<div class="param-input-wrap"><input type="checkbox" class="param-input" data-key="withTower2" data-target="tile"';
+    h += (withTower2 ? ' checked' : '');
+    h += (withTower ? '' : ' disabled');
+    h += '></div></div>';
     if (p.type === 'polygon-tile') {
       var sv = (tp.startVertex != null) ? tp.startVertex : 0;
       h += '<div class="param-row" style="margin-top:6px"><button class="ug-toggle-btn" data-action="shuffle" data-target="tile" style="width:100%;text-align:center">';
