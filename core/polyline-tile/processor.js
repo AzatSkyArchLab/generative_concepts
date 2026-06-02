@@ -127,6 +127,12 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
 
   var towerXY = null;   // tower footprint (4 corners, internal frame) if +Tower is on
   var towerXY2 = null;  // second tower (at diagonal bbox corner of polygon)
+  // T2 cut parameters — only populated when the tower-2 trim is valid;
+  // then the polygon splits into TWO open polylines at v_k.
+  var t2VertIdx = -1, t2dP = null, t2dN = null;
+  var t2TruncA = 0, t2TruncB = 0;
+  var t2nP = null, t2nN = null, t2crossDN = 0;
+  var ptsList = null;   // populated during polygon→polyline conversion (1 or 2 polylines)
   if (isPolygon && pts.length >= 3) {
     var sd = 2 * depth + buffer;
     var trimR = 15;
@@ -262,8 +268,12 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             }
             ord.sort(function (A, B) { return A.d2 - B.d2; });
             var BUF2 = 15;
+            // Require v_k ∈ [2, Npts0-2] so the split into TWO polylines
+            // leaves at least one interior vertex on each side; otherwise
+            // polyA / polyB would degenerate to just [Q_x, Q_y].
             for (var oi = 0; oi < ord.length && !towerXY2; oi++) {
               var vk = ord[oi].i;
+              if (vk < 2 || vk > Npts0 - 2) continue;
               var v0_2 = pts[vk];
               var pv_2 = pts[(vk - 1 + Npts0) % Npts0];
               var nv_2 = pts[(vk + 1) % Npts0];
@@ -273,6 +283,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
               var crossDN_2 = dP_2.x * dN_2.y - dP_2.y * dN_2.x;
               if (crossDN_2 <= 1e-9) continue;   // reflex / collinear — skip
               var nN_2 = { x: -dN_2.y, y: dN_2.x };
+              var nP_2 = { x: -dP_2.y, y: dP_2.x };
               for (var d2 = 0; d2 <= dN_2.L - towerSize - 0.5; d2 += 0.5) {
                 var ox2 = v0_2.x + d2 * dN_2.x, oy2 = v0_2.y + d2 * dN_2.y;
                 var twD2 = [
@@ -292,6 +303,17 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
                 var cdist = Math.hypot(cdx, cdy);
                 if (cdist < towerSize + 2 * BUF2) continue;
                 towerXY2 = twD2;
+                t2VertIdx = vk;
+                t2dP = dP_2; t2dN = dN_2;
+                t2nP = nP_2; t2nN = nN_2;
+                t2crossDN = crossDN_2;
+                // Tower 2 polyline trim at v_k — same logic as v0/T1.
+                var ttB2 = d2 + towerSize + trimR;
+                if (dN_2.L - ttB2 >= MIN_POLY_EDGE) t2TruncB = ttB2;
+                if (d2 <= 0.5) {
+                  var ttA2 = towerSize + trimR;
+                  if (dP_2.L - ttA2 >= MIN_POLY_EDGE) t2TruncA = ttA2;
+                }
                 break;
               }
             }
@@ -315,13 +337,46 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             if (truncB === 0) truncB = sParam + trimR;
           }
         }
+        // Same fallback for T2 trims (standard 15-m circle trim at v_k).
+        if (towerXY2 && (t2TruncA === 0 || t2TruncB === 0)) {
+          var rhsX2 = sd * (t2nP.x - t2nN.x);
+          var rhsY2 = sd * (t2nP.y - t2nN.y);
+          var det2 = -t2crossDN;
+          if (Math.abs(det2) > 1e-9) {
+            var tParam2 = (rhsX2 * t2dN.y - t2dN.x * rhsY2) / det2;
+            var sParam2 = (-t2dP.x * rhsY2 + rhsX2 * t2dP.y) / det2;
+            if (t2TruncA === 0) t2TruncA = trimR - tParam2;
+            if (t2TruncB === 0) t2TruncB = sParam2 + trimR;
+          }
+        }
         if (truncA > 0 && truncB > 0 && truncA < dP.L * 0.95 && truncB < dN.L * 0.95) {
           var QA = { x: v0.x - truncA * dP.x, y: v0.y - truncA * dP.y };
           var QB = { x: v0.x + truncB * dN.x, y: v0.y + truncB * dN.y };
-          var newPts = [QB];
-          for (var i = 1; i < Npts0; i++) newPts.push(pts[i]);
-          newPts.push(QA);
-          pts = newPts;
+          // T2 is "valid for splitting" only if its trim distances are
+          // both > 0, leave enough edge on both sides, and we captured
+          // a valid interior vertex index. Otherwise the single-polyline
+          // path runs and T2 stays visual-only.
+          var t2Valid =
+            !!towerXY2 && t2VertIdx >= 2 && t2VertIdx <= Npts0 - 2 &&
+            t2TruncA > 0 && t2TruncB > 0 &&
+            t2TruncA < t2dP.L * 0.95 && t2TruncB < t2dN.L * 0.95;
+          if (t2Valid) {
+            var vK = pts[t2VertIdx];
+            var Qin  = { x: vK.x - t2TruncA * t2dP.x, y: vK.y - t2TruncA * t2dP.y };
+            var Qout = { x: vK.x + t2TruncB * t2dN.x, y: vK.y + t2TruncB * t2dN.y };
+            var polyA = [QB];
+            for (var ai = 1; ai < t2VertIdx; ai++) polyA.push(pts[ai]);
+            polyA.push(Qin);
+            var polyB = [Qout];
+            for (var bi2 = t2VertIdx + 1; bi2 < Npts0; bi2++) polyB.push(pts[bi2]);
+            polyB.push(QA);
+            ptsList = [polyA, polyB];
+          } else {
+            var newPts = [QB];
+            for (var i = 1; i < Npts0; i++) newPts.push(pts[i]);
+            newPts.push(QA);
+            ptsList = [newPts];
+          }
           converted = true;
         }
       }
@@ -337,247 +392,256 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
         var ff = (LF - gapMF) / LF;
         pts.push({ x: pvF.x + dxF * ff, y: pvF.y + dyF * ff });
       }
+      ptsList = [pts];
     }
     isPolygon = false;
   }
+  // Pure polyline input (or any path that didn't set ptsList above).
+  if (!ptsList) ptsList = [pts];
 
-  // ─── Build tiles (cells + wedges + remnants + corridor) ───
-  var built = buildTiles(pts, isPolygon, step, depth, buffer, rows, sideSign);
-  var tilesXY = built.tiles;
-  var vertexClasses = built.vertexClasses; // length = pts.length
-
-  var edges = getEdges(pts, isPolygon);
-
-  // ─── Section grouping (per straight edge) ───
-  // A "triple" is one column: outer cell + corridor cell + inner cell.
-  // lat → chunks of exactly 6 triples; lon → balanced 7..14-triple
-  // sections. Triples not in any kept section are DROPPED — their
-  // outer/corridor/inner cells are removed from the tile output.
-  var sectionsXY = [];
-  var styloRegionsXY = [];
-  if (rows === 3) {
-    var secResult = buildSections(edges, tilesXY, step, depth, buffer, sideSign, isPolygon);
-    sectionsXY = secResult.sections;
-    var vk = secResult.validKeys;
-    // Don't drop anything. A regular cell is STYLOBATE (gray podium
-    // base) only if it is BOTH (a) not in a kept section by cell-key
-    // AND (b) geometrically outside every section polygon. The
-    // geometric test is essential: a corner section's L-ring covers
-    // more cells (incomplete triples, dead-corner fill) than its
-    // cell-key list, and those must NOT be greyed inside the corner.
-    var secPolysXY = [];
-    for (var si = 0; si < sectionsXY.length; si++) {
-      for (var pii = 0; pii < sectionsXY[si].polys.length; pii++) {
-        secPolysXY.push(sectionsXY[si].polys[pii]);
-      }
-    }
-    // Tower-buffer predicate: a point is inside the 15-m rounded buffer
-    // (Minkowski sum of tower square + 15-m disk) iff the squared
-    // distance to the tower square is ≤ 15². Tower is axes-aligned with
-    // the v0 edges (dN, nN), but here we recover its frame from the 4
-    // corners so the predicate doesn't depend on dN/nN being in scope.
-    // With +Tower 2 we collect a predicate per tower and OR them.
-    function makeTowerBufferPredicate(twXY) {
-      if (!twXY || twXY.length !== 4) return null;
-      var tcA = twXY[0], tcB = twXY[1], tcD = twXY[3];
-      var axx = tcB.x - tcA.x, axy = tcB.y - tcA.y;
-      var ayx = tcD.x - tcA.x, ayy = tcD.y - tcA.y;
-      var Lx = Math.hypot(axx, axy), Ly = Math.hypot(ayx, ayy);
-      if (Lx < 1e-9 || Ly < 1e-9) return null;
-      var uxx = axx / Lx, uxy = axy / Lx;
-      var uyx = ayx / Ly, uyy = ayy / Ly;
-      var cxT = (tcA.x + twXY[2].x) / 2, cyT = (tcA.y + twXY[2].y) / 2;
-      var hwT = Lx / 2, hhT = Ly / 2;
-      var BUFR = 15, BUFR2 = BUFR * BUFR;
-      return function (p) {
-        var dx0 = p.x - cxT, dy0 = p.y - cyT;
-        var lxp = dx0 * uxx + dy0 * uxy;
-        var lyp = dx0 * uyx + dy0 * uyy;
-        var ex = Math.abs(lxp) - hwT; if (ex < 0) ex = 0;
-        var ey = Math.abs(lyp) - hhT; if (ey < 0) ey = 0;
-        return (ex * ex + ey * ey) <= BUFR2;
-      };
-    }
-    var towerBufPreds = [];
-    var bp1 = makeTowerBufferPredicate(towerXY);  if (bp1) towerBufPreds.push(bp1);
-    var bp2 = makeTowerBufferPredicate(towerXY2); if (bp2) towerBufPreds.push(bp2);
-    var towerBufferContains = towerBufPreds.length === 0 ? null : function (p) {
-      for (var bpi = 0; bpi < towerBufPreds.length; bpi++) {
-        if (towerBufPreds[bpi](p)) return true;
-      }
-      return false;
+  // ─── Tower-buffer predicate (hoisted; OR of T1 + T2) ───
+  // A point is inside the 15-m rounded buffer (Minkowski sum of tower
+  // square + 15-m disk) iff squared distance to the tower square ≤ 15².
+  // Built once over both towers so the per-polyline pipeline below
+  // doesn't re-build it.
+  function makeTowerBufferPredicate(twXY) {
+    if (!twXY || twXY.length !== 4) return null;
+    var tcA = twXY[0], tcB = twXY[1], tcD = twXY[3];
+    var axx = tcB.x - tcA.x, axy = tcB.y - tcA.y;
+    var ayx = tcD.x - tcA.x, ayy = tcD.y - tcA.y;
+    var Lx = Math.hypot(axx, axy), Ly = Math.hypot(ayx, ayy);
+    if (Lx < 1e-9 || Ly < 1e-9) return null;
+    var uxx = axx / Lx, uxy = axy / Lx;
+    var uyx = ayx / Ly, uyy = ayy / Ly;
+    var cxT = (tcA.x + twXY[2].x) / 2, cyT = (tcA.y + twXY[2].y) / 2;
+    var hwT = Lx / 2, hhT = Ly / 2;
+    var BUFR = 15, BUFR2 = BUFR * BUFR;
+    return function (p) {
+      var dx0 = p.x - cxT, dy0 = p.y - cyT;
+      var lxp = dx0 * uxx + dy0 * uxy;
+      var lyp = dx0 * uyx + dy0 * uyy;
+      var ex = Math.abs(lxp) - hwT; if (ex < 0) ex = 0;
+      var ey = Math.abs(lyp) - hhT; if (ey < 0) ey = 0;
+      return (ex * ex + ey * ey) <= BUFR2;
     };
-    for (var ti = 0; ti < tilesXY.length; ti++) {
-      var tt = tilesXY[ti];
-      var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
-        tt.edgeIdx != null && tt.cellIdx != null && tt.cellIdx >= 0;
-      if (!isReg) continue;
-      if (vk[tt.edgeIdx + ':' + tt.cellIdx] === true) continue;   // in a section
-      var ctr = tileCentroid({ corners: tt.corners });
-      var inside = false;
-      for (var pj = 0; pj < secPolysXY.length; pj++) {
-        if (pointInPolygon(ctr, secPolysXY[pj])) { inside = true; break; }
-      }
-      if (!inside) {
-        // Cell would become стилобат — but if its centroid falls inside
-        // the tower's 15-m rounded buffer, drop it from output entirely
-        // so the buffer footprint reads clean (no grey podium under the
-        // tower / its halo).
-        if (towerBufferContains && towerBufferContains(ctr)) {
-          tt._dropFromOutput = true;
-        } else {
-          tt.stylobate = true;
+  }
+  var towerBufPreds = [];
+  var bp1 = makeTowerBufferPredicate(towerXY);  if (bp1) towerBufPreds.push(bp1);
+  var bp2 = makeTowerBufferPredicate(towerXY2); if (bp2) towerBufPreds.push(bp2);
+  var towerBufferContains = towerBufPreds.length === 0 ? null : function (p) {
+    for (var bpi = 0; bpi < towerBufPreds.length; bpi++) {
+      if (towerBufPreds[bpi](p)) return true;
+    }
+    return false;
+  };
+
+  // ─── Per-polyline pipeline ───
+  // Build tiles, edges, sections, and стилобат markers independently
+  // for each polyline in ptsList. Output conversion below iterates
+  // these per-polyline arrays and concatenates the lng/lat results.
+  var tilesXYList = [], edgesList = [], sectionsXYList = [];
+  var vertexClassesList = [], styloRegionsXYList = [];
+  for (var pli = 0; pli < ptsList.length; pli++) {
+    var ptsi = ptsList[pli];
+    var built_i = buildTiles(ptsi, isPolygon, step, depth, buffer, rows, sideSign);
+    var tilesXY_i = built_i.tiles;
+    var vertexClasses_i = built_i.vertexClasses;
+    var edges_i = getEdges(ptsi, isPolygon);
+    var sectionsXY_i = [];
+    var styloRegionsXY_i = [];
+    if (rows === 3) {
+      var secResult_i = buildSections(edges_i, tilesXY_i, step, depth, buffer, sideSign, isPolygon);
+      sectionsXY_i = secResult_i.sections;
+      var vk_i = secResult_i.validKeys;
+      var secPolysXY_i = [];
+      for (var si = 0; si < sectionsXY_i.length; si++) {
+        for (var pii = 0; pii < sectionsXY_i[si].polys.length; pii++) {
+          secPolysXY_i.push(sectionsXY_i[si].polys[pii]);
         }
       }
-    }
-    styloRegionsXY = buildStylobateRegions(tilesXY, edges, sideSign, 2 * depth + buffer);
-  }
-
-  // ─── Vertex diagnostic (which corners did the algorithm pick?) ───
-  var nEdgesV = edges.length;
-  var outVertices = new Array(pts.length);
-  for (var vi = 0; vi < pts.length; vi++) {
-    var pXY = pts[vi];
-    var lngLatV = proj.toLngLat(pXY.x, -pXY.y);
-    var vc = vertexClasses[vi] || { class: 'end', cosInterior: null, shifted: false, outerXY: null };
-    var outerLngLat = null;
-    if (vc.outerXY) {
-      var oll = proj.toLngLat(vc.outerXY.x, -vc.outerXY.y);
-      outerLngLat = [oll[0], oll[1]];
-    }
-    // Corner type from the two adjacent edges' axis types:
-    //   lat → Ш (широтная), lon → М (меридиональная).
-    // Ordered prev-edge → next-edge, e.g. 'Ш-М', 'М-Ш', 'Ш-Ш', 'М-М'.
-    var cornerType = null;
-    if (vc.class !== 'end') {
-      var prevEi = isPolygon ? (vi - 1 + nEdgesV) % nEdgesV : (vi - 1);
-      var nextEi = isPolygon ? (vi % nEdgesV) : vi;
-      if (prevEi >= 0 && prevEi < nEdgesV && nextEi >= 0 && nextEi < nEdgesV) {
-        var pT = (edges[prevEi].type === 'lat') ? 'Ш' : 'М';
-        var nT = (edges[nextEi].type === 'lat') ? 'Ш' : 'М';
-        cornerType = pT + '-' + nT;
+      for (var ti = 0; ti < tilesXY_i.length; ti++) {
+        var tt = tilesXY_i[ti];
+        var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
+          tt.edgeIdx != null && tt.cellIdx != null && tt.cellIdx >= 0;
+        if (!isReg) continue;
+        if (vk_i[tt.edgeIdx + ':' + tt.cellIdx] === true) continue;
+        var ctr = tileCentroid({ corners: tt.corners });
+        var inside = false;
+        for (var pj = 0; pj < secPolysXY_i.length; pj++) {
+          if (pointInPolygon(ctr, secPolysXY_i[pj])) { inside = true; break; }
+        }
+        if (!inside) {
+          if (towerBufferContains && towerBufferContains(ctr)) {
+            tt._dropFromOutput = true;
+          } else {
+            tt.stylobate = true;
+          }
+        }
       }
+      styloRegionsXY_i = buildStylobateRegions(tilesXY_i, edges_i, sideSign, 2 * depth + buffer);
     }
-    outVertices[vi] = {
-      idx: vi,
-      lngLat: [lngLatV[0], lngLatV[1]],
-      outerLngLat: outerLngLat,
-      class: vc.class,
-      cosInterior: vc.cosInterior,
-      shifted: !!vc.shifted,
-      cornerType: cornerType
-    };
+    tilesXYList.push(tilesXY_i);
+    edgesList.push(edges_i);
+    sectionsXYList.push(sectionsXY_i);
+    vertexClassesList.push(vertexClasses_i);
+    styloRegionsXYList.push(styloRegionsXY_i);
   }
 
-  // ─── Convert tile corners back to lng/lat ───
-  // Skip tiles flagged with _dropFromOutput (стилобаты swallowed by the
-  // tower-buffer footprint).
+  // ─── Output conversion — iterate per polyline, concatenate results ───
+  var outVertices = [];
   var outTiles = [];
-  for (var k = 0; k < tilesXY.length; k++) {
-    var srcT = tilesXY[k];
-    if (srcT._dropFromOutput) continue;
-    var cornersLngLat = new Array(srcT.corners.length);
-    for (var c = 0; c < srcT.corners.length; c++) {
-      var p = srcT.corners[c];
-      // Y FLIP back to math-y-up before projection inversion.
-      var lngLat = proj.toLngLat(p.x, -p.y);
-      cornersLngLat[c] = [lngLat[0], lngLat[1]];
+  var outStylobate = [];
+  var outSections = [];
+  var outEdgesMeta = [];
+  for (var po = 0; po < ptsList.length; po++) {
+    var ptsO = ptsList[po];
+    var edgesO = edgesList[po];
+    var tilesXYO = tilesXYList[po];
+    var sectionsXYO = sectionsXYList[po];
+    var vertexClassesO = vertexClassesList[po];
+    var styloRegionsXYO = styloRegionsXYList[po];
+    var nEdgesO = edgesO.length;
+
+    // Vertices for this polyline. Open-polyline endpoints have class
+    // 'end' (no corner classification). Each polyline numbers its
+    // vertices locally; downstream code distinguishes polylines via
+    // polylineIdx field if needed.
+    for (var vi = 0; vi < ptsO.length; vi++) {
+      var pXY = ptsO[vi];
+      var lngLatV = proj.toLngLat(pXY.x, -pXY.y);
+      var vc = vertexClassesO[vi] || { class: 'end', cosInterior: null, shifted: false, outerXY: null };
+      var outerLngLat = null;
+      if (vc.outerXY) {
+        var oll = proj.toLngLat(vc.outerXY.x, -vc.outerXY.y);
+        outerLngLat = [oll[0], oll[1]];
+      }
+      var cornerType = null;
+      if (vc.class !== 'end') {
+        var prevEi = vi - 1, nextEi = vi;
+        if (prevEi >= 0 && prevEi < nEdgesO && nextEi >= 0 && nextEi < nEdgesO) {
+          var pT = (edgesO[prevEi].type === 'lat') ? 'Ш' : 'М';
+          var nT = (edgesO[nextEi].type === 'lat') ? 'Ш' : 'М';
+          cornerType = pT + '-' + nT;
+        }
+      }
+      outVertices.push({
+        idx: vi,
+        polylineIdx: po,
+        lngLat: [lngLatV[0], lngLatV[1]],
+        outerLngLat: outerLngLat,
+        class: vc.class,
+        cosInterior: vc.cosInterior,
+        shifted: !!vc.shifted,
+        cornerType: cornerType
+      });
     }
-    outTiles.push({
-      kind: srcT.kind,
-      row: srcT.row,
-      type: srcT.type,
-      stylobate: !!srcT.stylobate,
-      edgeIdx: srcT.edgeIdx != null ? srcT.edgeIdx : undefined,
-      cellIdx: srcT.cellIdx != null ? srcT.cellIdx : undefined,
-      vertexIdx: srcT.vertexIdx != null ? srcT.vertexIdx : undefined,
-      cornersLngLat: cornersLngLat
-    });
-  }
 
-  // ─── Convert stylobate regions to lng/lat centroids (for labels) ───
-  var outStylobate = styloRegionsXY.map(function (r) {
-    var cll = proj.toLngLat(r.centroid.x, -r.centroid.y);
-    return { centroidLngLat: [cll[0], cll[1]], count: r.count };
-  });
-
-  // ─── Convert sections to lng/lat ───
-  // Each section carries one OR more polygons (corner sections are
-  // L-shaped = multiple polys). polygonsLngLat is an array of rings.
-  var outSections = sectionsXY.map(function (s) {
-    var polysLngLat = s.polys.map(function (ring) {
-      return ring.map(function (p) {
-        var ll = proj.toLngLat(p.x, -p.y);
-        return [ll[0], ll[1]];
+    // Tiles for this polyline. Skip tiles flagged _dropFromOutput
+    // (стилобаты swallowed by the tower-buffer footprint).
+    for (var k = 0; k < tilesXYO.length; k++) {
+      var srcT = tilesXYO[k];
+      if (srcT._dropFromOutput) continue;
+      var cornersLngLat = new Array(srcT.corners.length);
+      for (var c = 0; c < srcT.corners.length; c++) {
+        var p = srcT.corners[c];
+        // Y FLIP back to math-y-up before projection inversion.
+        var lngLat = proj.toLngLat(p.x, -p.y);
+        cornersLngLat[c] = [lngLat[0], lngLat[1]];
+      }
+      outTiles.push({
+        kind: srcT.kind,
+        row: srcT.row,
+        type: srcT.type,
+        stylobate: !!srcT.stylobate,
+        edgeIdx: srcT.edgeIdx != null ? srcT.edgeIdx : undefined,
+        cellIdx: srcT.cellIdx != null ? srcT.cellIdx : undefined,
+        vertexIdx: srcT.vertexIdx != null ? srcT.vertexIdx : undefined,
+        polylineIdx: po,
+        cornersLngLat: cornersLngLat
       });
-    });
-    var cll = proj.toLngLat(s.centroid.x, -s.centroid.y);
-    // ЛЛУ (stair-elevator core) — non-corner straight sections only.
-    var lluLngLat = null, lluCentroidLngLat = null;
-    var lluXY = computeSectionLLU(s, edges, sideSign, depth, buffer);
-    if (lluXY) {
-      lluLngLat = lluXY.map(function (p) {
-        var ll = proj.toLngLat(p.x, -p.y);
-        return [ll[0], ll[1]];
-      });
-      var lc = polysCentroid([lluXY]);
-      var lcll = proj.toLngLat(lc.x, -lc.y);
-      lluCentroidLngLat = [lcll[0], lcll[1]];
     }
-    // ЛЛУ в угловой секции: лестница + лифты.
-    //   Case 1 (open corner element, reflex vertex): stair + adjacent cell.
-    //   Case 2 (purple wedge, convex vertex): stair + wedge-as-elevators
-    //           (if wedge ≥ std cell) else adjacent cell.
-    var stairLngLat = null, stairCentroidLngLat = null;
-    var elevPolysLngLat = null, elevCentroidLngLat = null;
-    var lluGroupCentroidLngLat = null;
-    // EXTERNAL corner element = ≥2 edges on the section's outer contour
-    // (reflex vertex); INTERNAL = only the vertex touches (convex). Lifts
-    // are placed in INTERNAL elements only.
-    var cvc = (s._ext && s._ext.kind === 'corner' && s._ext.vIdx != null && vertexClasses[s._ext.vIdx])
-      ? vertexClasses[s._ext.vIdx].class : null;
-    var isExternalCorner = (cvc === 'reflex');
-    var clu = computeCornerLLU(s, edges, tilesXY, sideSign, step, depth, buffer, isExternalCorner);
-    if (clu) {
-      stairLngLat = clu.stairXY.map(function (p) {
-        var ll = proj.toLngLat(p.x, -p.y);
-        return [ll[0], ll[1]];
-      });
-      var sc = polysCentroid([clu.stairXY]);
-      var scll = proj.toLngLat(sc.x, -sc.y);
-      stairCentroidLngLat = [scll[0], scll[1]];
 
-      elevPolysLngLat = clu.elevPolysXY.map(function (poly) {
-        return poly.map(function (p) {
+    // Stylobate region centroids for this polyline.
+    for (var sri = 0; sri < styloRegionsXYO.length; sri++) {
+      var r = styloRegionsXYO[sri];
+      var cllS = proj.toLngLat(r.centroid.x, -r.centroid.y);
+      outStylobate.push({ centroidLngLat: [cllS[0], cllS[1]], count: r.count });
+    }
+
+    // Sections for this polyline. Pass the polyline's own edges,
+    // tilesXY, vertexClasses into the LLU helpers.
+    for (var sIdx = 0; sIdx < sectionsXYO.length; sIdx++) {
+      var s = sectionsXYO[sIdx];
+      var polysLngLat = s.polys.map(function (ring) {
+        return ring.map(function (p) {
           var ll = proj.toLngLat(p.x, -p.y);
           return [ll[0], ll[1]];
         });
       });
-      var ec = polysCentroid(clu.elevPolysXY);
-      var ecll = proj.toLngLat(ec.x, -ec.y);
-      elevCentroidLngLat = [ecll[0], ecll[1]];
-      // LLU group label anchor — midpoint of stair + elevator centroids.
-      var gx = (sc.x + ec.x) / 2, gy = (sc.y + ec.y) / 2;
-      var gll = proj.toLngLat(gx, -gy);
-      lluGroupCentroidLngLat = [gll[0], gll[1]];
+      var cll = proj.toLngLat(s.centroid.x, -s.centroid.y);
+      var lluLngLat = null, lluCentroidLngLat = null;
+      var lluXY = computeSectionLLU(s, edgesO, sideSign, depth, buffer);
+      if (lluXY) {
+        lluLngLat = lluXY.map(function (p) {
+          var ll = proj.toLngLat(p.x, -p.y);
+          return [ll[0], ll[1]];
+        });
+        var lc = polysCentroid([lluXY]);
+        var lcll = proj.toLngLat(lc.x, -lc.y);
+        lluCentroidLngLat = [lcll[0], lcll[1]];
+      }
+      var stairLngLat = null, stairCentroidLngLat = null;
+      var elevPolysLngLat = null, elevCentroidLngLat = null;
+      var lluGroupCentroidLngLat = null;
+      var cvc = (s._ext && s._ext.kind === 'corner' && s._ext.vIdx != null && vertexClassesO[s._ext.vIdx])
+        ? vertexClassesO[s._ext.vIdx].class : null;
+      var isExternalCorner = (cvc === 'reflex');
+      var clu = computeCornerLLU(s, edgesO, tilesXYO, sideSign, step, depth, buffer, isExternalCorner);
+      if (clu) {
+        stairLngLat = clu.stairXY.map(function (p) {
+          var ll = proj.toLngLat(p.x, -p.y);
+          return [ll[0], ll[1]];
+        });
+        var sc = polysCentroid([clu.stairXY]);
+        var scll = proj.toLngLat(sc.x, -sc.y);
+        stairCentroidLngLat = [scll[0], scll[1]];
+        elevPolysLngLat = clu.elevPolysXY.map(function (poly) {
+          return poly.map(function (p) {
+            var ll = proj.toLngLat(p.x, -p.y);
+            return [ll[0], ll[1]];
+          });
+        });
+        var ec = polysCentroid(clu.elevPolysXY);
+        var ecll = proj.toLngLat(ec.x, -ec.y);
+        elevCentroidLngLat = [ecll[0], ecll[1]];
+        var gx = (sc.x + ec.x) / 2, gy = (sc.y + ec.y) / 2;
+        var gll = proj.toLngLat(gx, -gy);
+        lluGroupCentroidLngLat = [gll[0], gll[1]];
+      }
+      outSections.push({
+        type: s.type,
+        isCorner: !!s.isCorner,
+        tripleCount: s.tripleCount,
+        areaRaw: s.areaRaw,
+        areaLiving: s.areaLiving,
+        polylineIdx: po,
+        polygonsLngLat: polysLngLat,
+        centroidLngLat: [cll[0], cll[1]],
+        lluLngLat: lluLngLat,
+        lluCentroidLngLat: lluCentroidLngLat,
+        cornerStairLngLat: stairLngLat,
+        cornerStairCentroidLngLat: stairCentroidLngLat,
+        cornerElevPolysLngLat: elevPolysLngLat,
+        cornerElevCentroidLngLat: elevCentroidLngLat,
+        cornerLLUGroupCentroidLngLat: lluGroupCentroidLngLat
+      });
     }
-    return {
-      type: s.type,
-      isCorner: !!s.isCorner,
-      tripleCount: s.tripleCount,
-      areaRaw: s.areaRaw,
-      areaLiving: s.areaLiving,
-      polygonsLngLat: polysLngLat,
-      centroidLngLat: [cll[0], cll[1]],
-      lluLngLat: lluLngLat,
-      lluCentroidLngLat: lluCentroidLngLat,
-      cornerStairLngLat: stairLngLat,
-      cornerStairCentroidLngLat: stairCentroidLngLat,
-      cornerElevPolysLngLat: elevPolysLngLat,
-      cornerElevCentroidLngLat: elevCentroidLngLat,
-      cornerLLUGroupCentroidLngLat: lluGroupCentroidLngLat
-    };
-  });
+
+    // Edges meta for this polyline.
+    for (var ei2 = 0; ei2 < edgesO.length; ei2++) {
+      outEdgesMeta.push({ type: edgesO[ei2].type, lengthM: edgesO[ei2].length });
+    }
+  }
 
   // Tower footprint (when +Tower / +Tower 2 is on for a polygon) →
   // lng/lat. Also a 15-m rounded buffer ring around the tower
@@ -651,7 +715,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
 
   return {
     tiles: outTiles,
-    edges: edges.map(function (e) { return { type: e.type, lengthM: e.length }; }),
+    edges: outEdgesMeta,
     vertices: outVertices,
     sections: outSections,
     stylobate: outStylobate,
