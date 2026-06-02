@@ -196,14 +196,15 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           // enough from edge A that the standard 15-m circle trim handles
           // edge A (truncA filled in by the block below).
           //
-          // GUARD: if tower trim would leave the polyline edge shorter
-          // than MIN_POLY_EDGE, fall back to standard 15-m circle trim
-          // on that side (truncA/truncB stay 0 → filled by block below).
-          // Without this guard, on small urban-blocks some shuffle
-          // positions leave the Q_A-end polyline edge with 0 complete
-          // triples → multi-corner dispatcher rejects the whole layout
-          // and every cell becomes стилобат.
-          var MIN_POLY_EDGE = 8 * step;   // ~26 m at default step=3.3
+          // Buffer ALWAYS trims the polyline — even on small polygons.
+          // On a too-short polyline edge the multi-corner section
+          // dispatcher will fail back to per-edge (no corner sections,
+          // some стилобаты), but the buffer footprint stays visually
+          // clean. Earlier we had a MIN_POLY_EDGE guard that fell back
+          // to the standard 15-m circle trim (~33 m) when the buffer
+          // trim (38 m) would leave less than ~26 m of polyline; that
+          // made the polyline enter the buffer on small blocks, which
+          // is exactly the bug the user flagged.
           for (var d = 0; d <= dN.L - towerSize - 0.5; d += 0.5) {
             var ox = v0.x + d * dN.x, oy = v0.y + d * dN.y;
             var twD = [
@@ -214,12 +215,8 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             ];
             if (towerFitCheck(twD)) {
               towerXY = twD;
-              var ttB = d + towerSize + trimR;
-              if (dN.L - ttB >= MIN_POLY_EDGE) truncB = ttB;
-              if (d <= 0.5) {
-                var ttA = towerSize + trimR;
-                if (dP.L - ttA >= MIN_POLY_EDGE) truncA = ttA;
-              }
+              truncB = d + towerSize + trimR;
+              if (d <= 0.5) truncA = towerSize + trimR;
               break;
             }
           }
@@ -307,13 +304,10 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
                 t2dP = dP_2; t2dN = dN_2;
                 t2nP = nP_2; t2nN = nN_2;
                 t2crossDN = crossDN_2;
-                // Tower 2 polyline trim at v_k — same logic as v0/T1.
-                var ttB2 = d2 + towerSize + trimR;
-                if (dN_2.L - ttB2 >= MIN_POLY_EDGE) t2TruncB = ttB2;
-                if (d2 <= 0.5) {
-                  var ttA2 = towerSize + trimR;
-                  if (dP_2.L - ttA2 >= MIN_POLY_EDGE) t2TruncA = ttA2;
-                }
+                // Tower 2 polyline trim at v_k — buffer always trims
+                // (no MIN_POLY_EDGE guard; see comment at T1's loop).
+                t2TruncB = d2 + towerSize + trimR;
+                if (d2 <= 0.5) t2TruncA = towerSize + trimR;
                 break;
               }
             }
@@ -459,23 +453,57 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           secPolysXY_i.push(sectionsXY_i[si].polys[pii]);
         }
       }
+      // Pass 1 — collect стилобат triples (whole column = outer +
+      // corridor + inner cells with same edgeIdx:cellIdx) where ANY
+      // of the column's cells has centroid inside the tower buffer.
+      // The triple is a single visual structure across the section
+      // depth; dropping only one cell of the column leaves a broken
+      // half-base, so we drop the WHOLE triple. We do NOT drop cells
+      // that belong to a kept section (those passed buffer trim).
+      var bufferTripleKeys = {};
+      if (towerBufferContains) {
+        for (var tj = 0; tj < tilesXY_i.length; tj++) {
+          var tj_t = tilesXY_i[tj];
+          if (tj_t.kind !== 'cell' && tj_t.kind !== 'corridor') continue;
+          if (tj_t.edgeIdx == null || tj_t.cellIdx == null || tj_t.cellIdx < 0) continue;
+          var keyJ = tj_t.edgeIdx + ':' + tj_t.cellIdx;
+          if (vk_i[keyJ] === true) continue;
+          var ctrJ = tileCentroid({ corners: tj_t.corners });
+          if (towerBufferContains(ctrJ)) {
+            bufferTripleKeys[keyJ] = true;
+          }
+        }
+      }
+      // Pass 2 — apply drop / stylobate marking.
       for (var ti = 0; ti < tilesXY_i.length; ti++) {
         var tt = tilesXY_i[ti];
         var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
           tt.edgeIdx != null && tt.cellIdx != null && tt.cellIdx >= 0;
         if (!isReg) continue;
-        if (vk_i[tt.edgeIdx + ':' + tt.cellIdx] === true) continue;
+        var key = tt.edgeIdx + ':' + tt.cellIdx;
+        if (bufferTripleKeys[key]) {
+          // Any cell of this column was in the buffer → drop the whole triple.
+          tt._dropFromOutput = true;
+          continue;
+        }
+        if (vk_i[key] === true) continue;
         var ctr = tileCentroid({ corners: tt.corners });
         var inside = false;
         for (var pj = 0; pj < secPolysXY_i.length; pj++) {
           if (pointInPolygon(ctr, secPolysXY_i[pj])) { inside = true; break; }
         }
-        if (!inside) {
-          if (towerBufferContains && towerBufferContains(ctr)) {
-            tt._dropFromOutput = true;
-          } else {
-            tt.stylobate = true;
-          }
+        if (!inside) tt.stylobate = true;
+      }
+      // Pass 3 — catch-all: any remaining tile (wedges, remnants,
+      // corner-fill geometry that has no triple key) whose centroid
+      // falls inside the tower buffer is also dropped, so the buffer
+      // footprint stays visually clean across ALL tile kinds.
+      if (towerBufferContains) {
+        for (var tk = 0; tk < tilesXY_i.length; tk++) {
+          var tk_t = tilesXY_i[tk];
+          if (tk_t._dropFromOutput) continue;
+          var ctrK = tileCentroid({ corners: tk_t.corners });
+          if (towerBufferContains(ctrK)) tk_t._dropFromOutput = true;
         }
       }
       styloRegionsXY_i = buildStylobateRegions(tilesXY_i, edges_i, sideSign, 2 * depth + buffer);
