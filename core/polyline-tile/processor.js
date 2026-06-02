@@ -459,24 +459,42 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           secPolysXY_i.push(sectionsXY_i[si].polys[pii]);
         }
       }
+      // Pass 1 — collect стилобат-CANDIDATE triples (whole columns
+      // outer+corridor+inner sharing edgeIdx:cellIdx) where ANY cell
+      // of the column has centroid inside the tower buffer. We only
+      // look at non-section cells here: section cells passed buffer
+      // trim and stay. The triple is one visual structure across the
+      // section depth — partial drop leaves a broken half-base.
+      var bufferTripleKeys = {};
+      if (towerBufferContains) {
+        for (var tj = 0; tj < tilesXY_i.length; tj++) {
+          var tj_t = tilesXY_i[tj];
+          if (tj_t.kind !== 'cell' && tj_t.kind !== 'corridor') continue;
+          if (tj_t.edgeIdx == null || tj_t.cellIdx == null || tj_t.cellIdx < 0) continue;
+          var keyJ = tj_t.edgeIdx + ':' + tj_t.cellIdx;
+          if (vk_i[keyJ] === true) continue;
+          var ctrJ = tileCentroid({ corners: tj_t.corners });
+          if (towerBufferContains(ctrJ)) bufferTripleKeys[keyJ] = true;
+        }
+      }
+      // Pass 2 — mark стилобат / drop.
       for (var ti = 0; ti < tilesXY_i.length; ti++) {
         var tt = tilesXY_i[ti];
         var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
           tt.edgeIdx != null && tt.cellIdx != null && tt.cellIdx >= 0;
         if (!isReg) continue;
-        if (vk_i[tt.edgeIdx + ':' + tt.cellIdx] === true) continue;
+        var key = tt.edgeIdx + ':' + tt.cellIdx;
+        if (bufferTripleKeys[key]) {
+          tt._dropFromOutput = true;
+          continue;
+        }
+        if (vk_i[key] === true) continue;
         var ctr = tileCentroid({ corners: tt.corners });
         var inside = false;
         for (var pj = 0; pj < secPolysXY_i.length; pj++) {
           if (pointInPolygon(ctr, secPolysXY_i[pj])) { inside = true; break; }
         }
-        if (!inside) {
-          if (towerBufferContains && towerBufferContains(ctr)) {
-            tt._dropFromOutput = true;
-          } else {
-            tt.stylobate = true;
-          }
-        }
+        if (!inside) tt.stylobate = true;
       }
       styloRegionsXY_i = buildStylobateRegions(tilesXY_i, edges_i, sideSign, 2 * depth + buffer);
     }
