@@ -601,6 +601,7 @@ export class FeaturePanel {
     var blockFeature = null; var roadFeatures = [];
     var chainFeatures = [];
     var cornerFeatures = [];
+    var tileFeatures = [];
     for (var i = 0; i < this._selectedIds.length; i++) {
       var f = this._featureStore.get(this._selectedIds[i]);
       if (!f) continue;
@@ -608,6 +609,7 @@ export class FeaturePanel {
       else if (f.properties.type === 'tower-axis') towerFeatures.push(f);
       else if (f.properties.type === 'section-chain') chainFeatures.push(f);
       else if (f.properties.type === 'section-chain-corner') cornerFeatures.push(f);
+      else if (f.properties.type === 'polygon-tile' || f.properties.type === 'polyline-tile') tileFeatures.push(f);
       else if (f.properties.urbanBlock) blockFeature = f;
       else if (f.properties.type === 'road') roadFeatures.push(f);
       else if (f.geometry.type === 'LineString') lineFeatures.push(f);
@@ -621,6 +623,7 @@ export class FeaturePanel {
     if (towerFeatures.length > 0) html += this._renderTowerProps(towerFeatures);
     if (chainFeatures.length > 0) html += this._renderChainProps(chainFeatures);
     if (cornerFeatures.length > 0) html += this._renderCornerProps(cornerFeatures);
+    if (tileFeatures.length > 0) html += this._renderTileProps(tileFeatures);
     if (roadFeatures.length > 0) html += this._renderRoadProps(roadFeatures);
     if (lineFeatures.length > 0) html += this._renderLineProps(lineFeatures);
     propsEl.innerHTML = html;
@@ -1033,6 +1036,51 @@ export class FeaturePanel {
     return h;
   }
 
+  _renderTileProps(features) {
+    // Properties panel for polygon-tile / polyline-tile features:
+    // urban-block-style parameter controls. Two params for now —
+    //   • Section width (15..18 m, int)  → mapped to tileParams.depth via
+    //     sd = 2*depth + buffer (buffer stays 2 m).
+    //   • Cell width   (3..3.3 m, float) → tileParams.step.
+    var f = features[0];
+    var p = f.properties;
+    var tp = p.tileParams || { step: 3.3, depth: 8, buffer: 2, rows: 3, cornerR: 20 };
+    var step = tp.step != null ? tp.step : 3.3;
+    var depth = tp.depth != null ? tp.depth : 8;
+    var buffer = tp.buffer != null ? tp.buffer : 2;
+    var sectionWidth = Math.round(2 * depth + buffer);
+    var withTower = tp.withTower === true;
+    var typeName = (p.type === 'polygon-tile') ? 'Polygon tile' : 'Polyline tile';
+    var label = features.length === 1
+      ? typeName + ' ' + (p.id ? p.id.slice(0, 6) : '')
+      : features.length + ' tile features';
+    var h = '<div class="props-section"><div class="props-header">' + label + '</div>';
+    h += '<div class="props-divider"></div>';
+    h += '<div class="params-toggle" id="params-toggle">';
+    h += '<span class="params-toggle-label">Parameters</span>';
+    h += '<span class="params-toggle-chevron' + (this._paramsOpen ? ' open' : '') + '" id="params-chevron">▸</span>';
+    h += '</div>';
+    h += '<div class="params-body' + (this._paramsOpen ? ' open' : '') + '" id="params-body">';
+    h += '<div class="param-row"><label class="param-label">Section width</label>';
+    h += '<div class="param-input-wrap"><input type="number" class="param-input" data-key="sectionWidth" data-target="tile"';
+    h += ' value="' + sectionWidth + '" min="15" max="18" step="1">';
+    h += '<span class="param-unit">m</span></div></div>';
+    h += '<div class="param-row"><label class="param-label">Cell width</label>';
+    h += '<div class="param-input-wrap"><input type="number" class="param-input" data-key="step" data-target="tile"';
+    h += ' value="' + step + '" min="3" max="3.3" step="0.1">';
+    h += '<span class="param-unit">m</span></div></div>';
+    h += '<div class="param-row"><label class="param-label">+ Tower</label>';
+    h += '<div class="param-input-wrap"><input type="checkbox" class="param-input" data-key="withTower" data-target="tile"';
+    h += (withTower ? ' checked' : '') + '></div></div>';
+    if (p.type === 'polygon-tile') {
+      var sv = (tp.startVertex != null) ? tp.startVertex : 0;
+      h += '<div class="param-row" style="margin-top:6px"><button class="ug-toggle-btn" data-action="shuffle" data-target="tile" style="width:100%;text-align:center">';
+      h += 'Shuffle <small style="color:var(--text-muted)">#' + sv + '</small></button></div>';
+    }
+    h += '</div></div>';
+    return h;
+  }
+
   _renderRoadProps(features) {
     var RTYPES = [
       { id: 0, label: '2 lanes (6m)', lanes: 2, width: 6 },
@@ -1335,6 +1383,67 @@ export class FeaturePanel {
           var oldP = {}; oldP[key] = oldVal;
           commandManager.execute(new UpdateFeatureCommand(
             self._featureStore, self._selectedIds[si], newP, oldP
+          ));
+        }
+        eventBus.emit('features:changed');
+      });
+    }
+
+    // Shuffle button for polygon-tile: cycles the polyline start vertex
+    // (tileParams.startVertex) through 0..N-1 of the polygon's outer ring.
+    var tileShuffles = this._container.querySelectorAll('button[data-action="shuffle"][data-target="tile"]');
+    for (var i = 0; i < tileShuffles.length; i++) {
+      tileShuffles[i].addEventListener('click', function () {
+        for (var si = 0; si < self._selectedIds.length; si++) {
+          var f = self._featureStore.get(self._selectedIds[si]);
+          if (!f || f.properties.type !== 'polygon-tile') continue;
+          var coords = (f.geometry && f.geometry.coordinates && f.geometry.coordinates[0]) || [];
+          var Nv = coords.length;
+          if (Nv >= 2 &&
+              Math.abs(coords[0][0] - coords[Nv - 1][0]) < 1e-9 &&
+              Math.abs(coords[0][1] - coords[Nv - 1][1]) < 1e-9) Nv--;
+          if (Nv < 1) continue;
+          var oldTp = f.properties.tileParams || { step: 3.3, depth: 8, buffer: 2, rows: 3, cornerR: 20 };
+          var newTp = Object.assign({}, oldTp);
+          var cur = (typeof oldTp.startVertex === 'number') ? oldTp.startVertex : 0;
+          newTp.startVertex = (cur + 1) % Nv;
+          commandManager.execute(new UpdateFeatureCommand(
+            self._featureStore, self._selectedIds[si],
+            { tileParams: newTp }, { tileParams: oldTp }
+          ));
+        }
+        eventBus.emit('features:changed');
+      });
+    }
+
+    // Tile inputs (polygon-tile / polyline-tile parameters). Section
+    // width maps to depth via sd = 2*depth + buffer; cell width = step;
+    // withTower is a boolean checkbox. tileParams is a nested object —
+    // pass the whole new object on update.
+    var tileInputs = this._container.querySelectorAll('[data-target="tile"]');
+    for (var i = 0; i < tileInputs.length; i++) {
+      tileInputs[i].addEventListener('change', function (e) {
+        var key = e.target.dataset.key;
+        var isBool = (e.target.type === 'checkbox');
+        var val = isBool ? !!e.target.checked : parseFloat(e.target.value);
+        if (!isBool && isNaN(val)) return;
+        if (key === 'sectionWidth') val = Math.max(15, Math.min(18, Math.round(val)));
+        else if (key === 'step')    val = Math.max(3,  Math.min(3.3, val));
+        for (var si = 0; si < self._selectedIds.length; si++) {
+          var f = self._featureStore.get(self._selectedIds[si]);
+          if (!f) continue;
+          var t = f.properties.type;
+          if (t !== 'polygon-tile' && t !== 'polyline-tile') continue;
+          var oldTp = f.properties.tileParams || { step: 3.3, depth: 8, buffer: 2, rows: 3, cornerR: 20 };
+          var newTp = Object.assign({}, oldTp);
+          if (key === 'sectionWidth') {
+            newTp.depth = (val - (oldTp.buffer != null ? oldTp.buffer : 2)) / 2;
+          } else {
+            newTp[key] = val;
+          }
+          commandManager.execute(new UpdateFeatureCommand(
+            self._featureStore, self._selectedIds[si],
+            { tileParams: newTp }, { tileParams: oldTp }
           ));
         }
         eventBus.emit('features:changed');

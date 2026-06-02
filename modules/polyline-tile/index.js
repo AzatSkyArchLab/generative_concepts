@@ -59,6 +59,10 @@ var STYLOBATE_FILL = 'rgba(120, 120, 120, 0.38)'; // gray — стилобат (
 var STYLOBATE_BORDER = 'rgba(90, 90, 90, 0.6)';
 var LLU_FILL = 'rgba(219, 39, 119, 0.88)';        // magenta — лестница (staircase)
 var LLU_ELEV_FILL = 'rgba(124, 58, 237, 0.85)';   // violet — лифты (elevators)
+var TOWER_FILL = 'rgba(234, 179, 8, 0.55)';       // amber — tower footprint
+var TOWER_BORDER = '#a16207';                      // amber-700 — tower outline
+var TOWER_BUFFER_FILL = 'rgba(234, 179, 8, 0.12)'; // pale amber — 15 m no-build buffer
+var TOWER_BUFFER_BORDER = 'rgba(161, 98, 7, 0.35)'; // thin pale amber outline
 var CELL_BORDER   = 'rgba(110, 110, 110, 0.55)';
 var WEDGE_BORDER  = 'rgba(147, 51, 234, 0.85)';
 var REMNANT_BORDER = 'rgba(22, 163, 74, 0.85)';
@@ -189,11 +193,13 @@ var module_ = {
         source: SRC_SECTIONS,
         filter: ['!=', ['get', 'isLabel'], true],
         paint: {
-          // Dark-gray outer contour around every group. Corner sections
-          // are a single L-ring, so this traces the outer perimeter
-          // cleanly (no internal seams).
-          'line-color': '#3a3a3a',
-          'line-width': 2,
+          // Per-feature line-color (fillColor's outline variant if set,
+          // else dark gray). Width is 0.8 for tower buffer (thin), 2
+          // elsewhere.
+          'line-color': ['case', ['has', 'lineColor'], ['get', 'lineColor'], '#3a3a3a'],
+          // Thin outline for the tower buffer (isTowerBuffer=true);
+          // default 2 for regular section/LLU contours.
+          'line-width': ['case', ['==', ['get', 'isTowerBuffer'], true], 0.8, 2],
           'line-opacity': 0.95
         }
       });
@@ -478,10 +484,12 @@ var module_ = {
                 geometry: { type: 'Polygon', coordinates: [stRing] }
               });
             }
-            // Лифты — соседняя ячейка / фиолетовый угол.
-            if (sec.cornerElevLngLat) {
-              var evRing = closeRing(sec.cornerElevLngLat);
-              if (evRing && evRing.length >= 4) {
+            // Лифты — внутренний фиолетовый сегмент + остаток между ним и
+            // лестницей (может быть несколько полигонов).
+            if (sec.cornerElevPolysLngLat) {
+              for (var ev = 0; ev < sec.cornerElevPolysLngLat.length; ev++) {
+                var evRing = closeRing(sec.cornerElevPolysLngLat[ev]);
+                if (!evRing || evRing.length < 4) continue;
                 sectionFeats.push({
                   type: 'Feature',
                   properties: {
@@ -518,6 +526,45 @@ var module_ = {
             properties: { featureId: p.id, isLabel: true, label: 'стилобат',
               fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)' },
             geometry: { type: 'Point', coordinates: result.stylobate[st].centroidLngLat }
+          });
+        }
+      }
+      // Tower footprint (+Tower is on in tileParams). The 15-m buffer
+      // around the tower is drawn first (underneath) as a pale amber
+      // ring; the solid tower square sits on top.
+      if (result.tower && result.tower.bufferLngLat) {
+        var bufRing = closeRing(result.tower.bufferLngLat);
+        if (bufRing && bufRing.length >= 4) {
+          sectionFeats.push({
+            type: 'Feature',
+            properties: {
+              featureId: p.id, isTowerBuffer: true,
+              fillColor: TOWER_BUFFER_FILL, lineColor: TOWER_BUFFER_BORDER, label: ''
+            },
+            geometry: { type: 'Polygon', coordinates: [bufRing] }
+          });
+        }
+      }
+      if (result.tower && result.tower.footprintLngLat) {
+        var towerRing = closeRing(result.tower.footprintLngLat);
+        if (towerRing && towerRing.length >= 4) {
+          sectionFeats.push({
+            type: 'Feature',
+            properties: {
+              featureId: p.id, isTower: true,
+              fillColor: TOWER_FILL, lineColor: TOWER_BORDER, label: 'Tower'
+            },
+            geometry: { type: 'Polygon', coordinates: [towerRing] }
+          });
+        }
+        if (result.tower.centroidLngLat) {
+          sectionFeats.push({
+            type: 'Feature',
+            properties: {
+              featureId: p.id, isLabel: true, label: 'Tower',
+              fillColor: 'rgba(0,0,0,0)', lineColor: 'rgba(0,0,0,0)'
+            },
+            geometry: { type: 'Point', coordinates: result.tower.centroidLngLat }
           });
         }
       }

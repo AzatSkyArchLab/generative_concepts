@@ -4,8 +4,8 @@
 
 export const Config = {
   map: {
-    center: [37.618, 55.751],   // Moscow
-    zoom: 15,
+    center: [37.63324, 55.69831],   // ул. Родченко, квартал ЗИЛ-АРТ (Даниловский р-н, Москва)
+    zoom: 15.8,
     minZoom: 2,
     maxZoom: 20,
     pitch: 45,

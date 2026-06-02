@@ -104,6 +104,162 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   var buffer = tileParams.buffer;
   var rows   = tileParams.rows;
 
+  // A polygon is effectively a CCW polyline along the outer ring. We open
+  // it at v0 (the first vertex) with a curved cut-out:
+  //   1. Offset the polygon INWARD by sd (section depth) to get the inner
+  //      offset polyline.
+  //   2. At the inner offset of v0 (= P, the intersection of the two inner
+  //      offset edges adjacent to v0), draw a 15 m circle and trim the
+  //      inner offset edges where they enter the circle.
+  //   3. Offset the trimmed inner polyline back OUTWARD by sd. The two new
+  //      endpoints sit on the polygon's outer edges adjacent to v0.
+  // After this, the rest of the algorithm uses the standard polyline path
+  // (multi-corner sections, LLU, corner LLU) — single code path.
+  // Polygon start-vertex rotation (Shuffle): cycle pts so the chosen
+  // vertex becomes pts[0] (= v0 for the polyline conversion below).
+  if (isPolygon && pts.length >= 3) {
+    var sv = (tileParams && typeof tileParams.startVertex === 'number') ? Math.floor(tileParams.startVertex) : 0;
+    if (sv > 0) {
+      sv = ((sv % pts.length) + pts.length) % pts.length;
+      if (sv > 0) pts = pts.slice(sv).concat(pts.slice(0, sv));
+    }
+  }
+
+  var towerXY = null;   // tower footprint (4 corners, internal frame) if +Tower is on
+  if (isPolygon && pts.length >= 3) {
+    var sd = 2 * depth + buffer;
+    var trimR = 15;
+    var withTower = !!(tileParams && tileParams.withTower);
+    var TOWER_CELL = 3.3, TOWER_CELLS = 7;        // small tower: 7×7 cells
+    var towerSize = TOWER_CELL * TOWER_CELLS;     // = 23.1 m (smallest tower)
+    var Npts0 = pts.length;
+    var pv = pts[Npts0 - 1], v0 = pts[0], nv = pts[1];
+    function _u(a, b) {
+      var ux = b.x - a.x, uy = b.y - a.y, uL = Math.hypot(ux, uy);
+      return uL > 1e-9 ? { x: ux / uL, y: uy / uL, L: uL } : null;
+    }
+    var dP = _u(pv, v0);   // incoming edge direction (toward v0)
+    var dN = _u(v0, nv);   // outgoing edge direction (away from v0)
+    var converted = false;
+    if (dP && dN) {
+      var nP = { x: -dP.y, y: dP.x };       // inward normals
+      var nN = { x: -dN.y, y: dN.x };
+      var crossDN = dP.x * dN.y - dP.y * dN.x;
+      if (crossDN > 1e-9) {   // convex v0 (CCW math = CW canvas)
+        var truncA = 0, truncB = 0;
+        if (withTower) {
+          // Helper: every sample on the tower perimeter (6 points/edge,
+          // including the actual corners) — INSET 0.2 m toward the tower
+          // centre — must be inside the polygon. The inset handles the
+          // ray-cast ambiguity at boundary points (Option A's corner sits
+          // on a polygon vertex); 0.2 m is small enough that any tower
+          // corner more than 0.2 m outside still fails.
+          var towerFitCheck = function (corners) {
+            var INSET = 0.2;   // metres
+            var ccx = (corners[0].x + corners[1].x + corners[2].x + corners[3].x) / 4;
+            var ccy = (corners[0].y + corners[1].y + corners[2].y + corners[3].y) / 4;
+            for (var ee = 0; ee < 4; ee++) {
+              var aa = corners[ee], bb = corners[(ee + 1) % 4];
+              for (var kk = 0; kk <= 5; kk++) {
+                var ttp = kk / 5;
+                var px = aa.x + ttp * (bb.x - aa.x);
+                var py = aa.y + ttp * (bb.y - aa.y);
+                var ddx = ccx - px, ddy = ccy - py;
+                var dl = Math.hypot(ddx, ddy);
+                var f = (dl > 1e-9) ? Math.min(1, INSET / dl) : 0;
+                var ix = px + f * ddx, iy = py + f * ddy;
+                if (!pointInPolygon({ x: ix, y: iy }, pts)) return false;
+              }
+            }
+            return true;
+          };
+
+          // Tower is ALWAYS axes-aligned with the outgoing edge B (sides
+          // along dN and nN). For obtuse/90° corners we anchor it at v0
+          // (corner of tower = v0). For acute corners the v0-anchored
+          // square pokes outside edge A — in that case STEP BACK from v0
+          // along edge B by the smallest d > 0 where the shifted tower
+          // fits inside the polygon.
+          //
+          // After placement, TRIM the polyline axes by the tower's 15-m
+          // buffer: along edge B the buffer reaches v0 + (d+ts+15)·dN, so
+          // truncB = d+ts+15. Along edge A only Option A (d ≤ 0.5) trims
+          // by the buffer (truncA = ts+15); for Option B the tower is far
+          // enough from edge A that the standard 15-m circle trim handles
+          // edge A (truncA filled in by the block below).
+          //
+          // GUARD: if tower trim would leave the polyline edge shorter
+          // than MIN_POLY_EDGE, fall back to standard 15-m circle trim
+          // on that side (truncA/truncB stay 0 → filled by block below).
+          // Without this guard, on small urban-blocks some shuffle
+          // positions leave the Q_A-end polyline edge with 0 complete
+          // triples → multi-corner dispatcher rejects the whole layout
+          // and every cell becomes стилобат.
+          var MIN_POLY_EDGE = 8 * step;   // ~26 m at default step=3.3
+          for (var d = 0; d <= dN.L - towerSize - 0.5; d += 0.5) {
+            var ox = v0.x + d * dN.x, oy = v0.y + d * dN.y;
+            var twD = [
+              { x: ox, y: oy },
+              { x: ox + towerSize * dN.x, y: oy + towerSize * dN.y },
+              { x: ox + towerSize * (dN.x + nN.x), y: oy + towerSize * (dN.y + nN.y) },
+              { x: ox + towerSize * nN.x, y: oy + towerSize * nN.y }
+            ];
+            if (towerFitCheck(twD)) {
+              towerXY = twD;
+              var ttB = d + towerSize + trimR;
+              if (dN.L - ttB >= MIN_POLY_EDGE) truncB = ttB;
+              if (d <= 0.5) {
+                var ttA = towerSize + trimR;
+                if (dP.L - ttA >= MIN_POLY_EDGE) truncA = ttA;
+              }
+              break;
+            }
+          }
+        }
+        if (truncA === 0 || truncB === 0) {
+          // Fill in the missing trim(s) with the standard 15-m circle
+          // trim at the inner-offset corner P. This covers: no-tower
+          // mode (both 0), OR Option-B tower (shifted along edge B —
+          // only truncB was set by the tower; truncA stays 0 and gets
+          // filled here). We do NOT overwrite a value already set by
+          // the tower block (else Option B's tower-aware truncB would
+          // be lost, the polyline would pass through the tower).
+          var rhsX = sd * (nP.x - nN.x);
+          var rhsY = sd * (nP.y - nN.y);
+          var det = -crossDN;
+          if (Math.abs(det) > 1e-9) {
+            var tParam = (rhsX * dN.y - dN.x * rhsY) / det;
+            var sParam = (-dP.x * rhsY + rhsX * dP.y) / det;
+            if (truncA === 0) truncA = trimR - tParam;
+            if (truncB === 0) truncB = sParam + trimR;
+          }
+        }
+        if (truncA > 0 && truncB > 0 && truncA < dP.L * 0.95 && truncB < dN.L * 0.95) {
+          var QA = { x: v0.x - truncA * dP.x, y: v0.y - truncA * dP.y };
+          var QB = { x: v0.x + truncB * dN.x, y: v0.y + truncB * dN.y };
+          var newPts = [QB];
+          for (var i = 1; i < Npts0; i++) newPts.push(pts[i]);
+          newPts.push(QA);
+          pts = newPts;
+          converted = true;
+        }
+      }
+    }
+    if (!converted) {
+      // Fallback: simply shorten the last edge by 6 cells (when v0 is
+      // reflex or the trim doesn't fit the adjacent edges).
+      var pvF = pts[pts.length - 1], v0F = pts[0];
+      var dxF = v0F.x - pvF.x, dyF = v0F.y - pvF.y;
+      var LF = Math.hypot(dxF, dyF);
+      var gapMF = 6 * step;
+      if (LF > gapMF + 1e-3) {
+        var ff = (LF - gapMF) / LF;
+        pts.push({ x: pvF.x + dxF * ff, y: pvF.y + dyF * ff });
+      }
+    }
+    isPolygon = false;
+  }
+
   // ─── Build tiles (cells + wedges + remnants + corridor) ───
   var built = buildTiles(pts, isPolygon, step, depth, buffer, rows, sideSign);
   var tilesXY = built.tiles;
@@ -134,6 +290,33 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
         secPolysXY.push(sectionsXY[si].polys[pii]);
       }
     }
+    // Tower-buffer predicate: a point is inside the 15-m rounded buffer
+    // (Minkowski sum of tower square + 15-m disk) iff the squared
+    // distance to the tower square is ≤ 15². Tower is axes-aligned with
+    // the v0 edges (dN, nN), but here we recover its frame from the 4
+    // corners so the predicate doesn't depend on dN/nN being in scope.
+    var towerBufferContains = null;
+    if (towerXY && towerXY.length === 4) {
+      var tcA = towerXY[0], tcB = towerXY[1], tcD = towerXY[3];
+      var axx = tcB.x - tcA.x, axy = tcB.y - tcA.y;
+      var ayx = tcD.x - tcA.x, ayy = tcD.y - tcA.y;
+      var Lx = Math.hypot(axx, axy), Ly = Math.hypot(ayx, ayy);
+      if (Lx > 1e-9 && Ly > 1e-9) {
+        var uxx = axx / Lx, uxy = axy / Lx;
+        var uyx = ayx / Ly, uyy = ayy / Ly;
+        var cxT = (tcA.x + towerXY[2].x) / 2, cyT = (tcA.y + towerXY[2].y) / 2;
+        var hwT = Lx / 2, hhT = Ly / 2;
+        var BUF = 15, BUF2 = BUF * BUF;
+        towerBufferContains = function (p) {
+          var dx0 = p.x - cxT, dy0 = p.y - cyT;
+          var lxp = dx0 * uxx + dy0 * uxy;
+          var lyp = dx0 * uyx + dy0 * uyy;
+          var ex = Math.abs(lxp) - hwT; if (ex < 0) ex = 0;
+          var ey = Math.abs(lyp) - hhT; if (ey < 0) ey = 0;
+          return (ex * ex + ey * ey) <= BUF2;
+        };
+      }
+    }
     for (var ti = 0; ti < tilesXY.length; ti++) {
       var tt = tilesXY[ti];
       var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
@@ -145,7 +328,17 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       for (var pj = 0; pj < secPolysXY.length; pj++) {
         if (pointInPolygon(ctr, secPolysXY[pj])) { inside = true; break; }
       }
-      if (!inside) tt.stylobate = true;
+      if (!inside) {
+        // Cell would become стилобат — but if its centroid falls inside
+        // the tower's 15-m rounded buffer, drop it from output entirely
+        // so the buffer footprint reads clean (no grey podium under the
+        // tower / its halo).
+        if (towerBufferContains && towerBufferContains(ctr)) {
+          tt._dropFromOutput = true;
+        } else {
+          tt.stylobate = true;
+        }
+      }
     }
     styloRegionsXY = buildStylobateRegions(tilesXY, edges, sideSign, 2 * depth + buffer);
   }
@@ -187,9 +380,12 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   }
 
   // ─── Convert tile corners back to lng/lat ───
-  var outTiles = new Array(tilesXY.length);
+  // Skip tiles flagged with _dropFromOutput (стилобаты swallowed by the
+  // tower-buffer footprint).
+  var outTiles = [];
   for (var k = 0; k < tilesXY.length; k++) {
     var srcT = tilesXY[k];
+    if (srcT._dropFromOutput) continue;
     var cornersLngLat = new Array(srcT.corners.length);
     for (var c = 0; c < srcT.corners.length; c++) {
       var p = srcT.corners[c];
@@ -197,7 +393,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var lngLat = proj.toLngLat(p.x, -p.y);
       cornersLngLat[c] = [lngLat[0], lngLat[1]];
     }
-    outTiles[k] = {
+    outTiles.push({
       kind: srcT.kind,
       row: srcT.row,
       type: srcT.type,
@@ -206,7 +402,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       cellIdx: srcT.cellIdx != null ? srcT.cellIdx : undefined,
       vertexIdx: srcT.vertexIdx != null ? srcT.vertexIdx : undefined,
       cornersLngLat: cornersLngLat
-    };
+    });
   }
 
   // ─── Convert stylobate regions to lng/lat centroids (for labels) ───
@@ -243,48 +439,37 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     //   Case 2 (purple wedge, convex vertex): stair + wedge-as-elevators
     //           (if wedge ≥ std cell) else adjacent cell.
     var stairLngLat = null, stairCentroidLngLat = null;
-    var elevLngLat = null, elevCentroidLngLat = null, elevKind = null;
-    var lluGroupCentroidLngLat = null, lluIsOpen = false;
-
-    // Case detection from the corner's vertex class.
-    var vc = (s._ext && s._ext.kind === 'corner' && s._ext.vIdx != null && vertexClasses[s._ext.vIdx])
+    var elevPolysLngLat = null, elevCentroidLngLat = null;
+    var lluGroupCentroidLngLat = null;
+    // EXTERNAL corner element = ≥2 edges on the section's outer contour
+    // (reflex vertex); INTERNAL = only the vertex touches (convex). Lifts
+    // are placed in INTERNAL elements only.
+    var cvc = (s._ext && s._ext.kind === 'corner' && s._ext.vIdx != null && vertexClasses[s._ext.vIdx])
       ? vertexClasses[s._ext.vIdx].class : null;
-    lluIsOpen = (vc === 'reflex');
-    // For OPEN (reflex) corners the elevators take the inner corner cell;
-    // reserve it up-front so the staircase never lands on it.
-    var innerXY = null, excludeC = null;
-    if (lluIsOpen && s._ext && s._ext.kind === 'corner') {
-      innerXY = innerCornerCell(tilesXY, edges, s._ext);
-      if (innerXY) excludeC = polysCentroid([innerXY]);
-    }
-    var stair = computeCornerStaircase(s, edges, tilesXY, sideSign, step, depth, buffer, excludeC);
-    if (stair) {
-      var stairXY = stair.quad;
-      stairLngLat = stairXY.map(function (p) {
+    var isExternalCorner = (cvc === 'reflex');
+    var clu = computeCornerLLU(s, edges, tilesXY, sideSign, step, depth, buffer, isExternalCorner);
+    if (clu) {
+      stairLngLat = clu.stairXY.map(function (p) {
         var ll = proj.toLngLat(p.x, -p.y);
         return [ll[0], ll[1]];
       });
-      var sc = polysCentroid([stairXY]);
+      var sc = polysCentroid([clu.stairXY]);
       var scll = proj.toLngLat(sc.x, -sc.y);
       stairCentroidLngLat = [scll[0], scll[1]];
 
-      var elev = (lluIsOpen && innerXY)
-        ? { polyXY: innerXY, kind: 'inner-corner' }
-        : computeCornerElevator(s, edges, tilesXY, sideSign, step, depth, buffer, stair, lluIsOpen);
-      if (elev) {
-        elevKind = elev.kind;
-        elevLngLat = elev.polyXY.map(function (p) {
+      elevPolysLngLat = clu.elevPolysXY.map(function (poly) {
+        return poly.map(function (p) {
           var ll = proj.toLngLat(p.x, -p.y);
           return [ll[0], ll[1]];
         });
-        var ec = polysCentroid([elev.polyXY]);
-        var ecll = proj.toLngLat(ec.x, -ec.y);
-        elevCentroidLngLat = [ecll[0], ecll[1]];
-        // LLU group label anchor — midpoint of stair + elevator centroids.
-        var gx = (sc.x + ec.x) / 2, gy = (sc.y + ec.y) / 2;
-        var gll = proj.toLngLat(gx, -gy);
-        lluGroupCentroidLngLat = [gll[0], gll[1]];
-      }
+      });
+      var ec = polysCentroid(clu.elevPolysXY);
+      var ecll = proj.toLngLat(ec.x, -ec.y);
+      elevCentroidLngLat = [ecll[0], ecll[1]];
+      // LLU group label anchor — midpoint of stair + elevator centroids.
+      var gx = (sc.x + ec.x) / 2, gy = (sc.y + ec.y) / 2;
+      var gll = proj.toLngLat(gx, -gy);
+      lluGroupCentroidLngLat = [gll[0], gll[1]];
     }
     return {
       type: s.type,
@@ -298,13 +483,78 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       lluCentroidLngLat: lluCentroidLngLat,
       cornerStairLngLat: stairLngLat,
       cornerStairCentroidLngLat: stairCentroidLngLat,
-      cornerElevLngLat: elevLngLat,
+      cornerElevPolysLngLat: elevPolysLngLat,
       cornerElevCentroidLngLat: elevCentroidLngLat,
-      cornerElevKind: elevKind,
-      cornerLLUIsOpen: lluIsOpen,
       cornerLLUGroupCentroidLngLat: lluGroupCentroidLngLat
     };
   });
+
+  // Tower footprint (when +Tower is on for a polygon) → lng/lat. Also a
+  // 15-m buffer ring around the tower (Minkowski-square approximation,
+  // sharp corners) so the user can see the no-build zone visually.
+  var outTower = null;
+  if (towerXY) {
+    var ringLngLat = towerXY.map(function (p) {
+      var ll = proj.toLngLat(p.x, -p.y);
+      return [ll[0], ll[1]];
+    });
+    var tc = polysCentroid([towerXY]);
+    var tcll = proj.toLngLat(tc.x, -tc.y);
+    // 15 m rounded buffer: Minkowski sum of the tower square with a 15-m
+    // disk → straight edges parallel to the tower offset 15 m outward,
+    // connected by quarter-circle arcs of radius 15 m at each corner.
+    var BUF = 15;
+    var ARC_SEGS = 6;   // segments per quarter arc → 24-point smooth ring
+    var Nt = towerXY.length;
+    // Centroid (used to pick the outward direction of each edge).
+    var cTx = 0, cTy = 0;
+    for (var ti = 0; ti < Nt; ti++) { cTx += towerXY[ti].x; cTy += towerXY[ti].y; }
+    cTx /= Nt; cTy /= Nt;
+    // Outward unit normal of each edge i (from towerXY[i] to towerXY[i+1]).
+    var nOuts = [];
+    for (var ei = 0; ei < Nt; ei++) {
+      var ta = towerXY[ei], tb = towerXY[(ei + 1) % Nt];
+      var ex = tb.x - ta.x, ey = tb.y - ta.y;
+      var eL = Math.hypot(ex, ey);
+      if (eL < 1e-9) { nOuts.push({ x: 0, y: 0 }); continue; }
+      var nx = -ey / eL, ny = ex / eL;
+      // Pick the perpendicular pointing AWAY from the centroid.
+      var midX = (ta.x + tb.x) / 2, midY = (ta.y + tb.y) / 2;
+      if ((midX - cTx) * nx + (midY - cTy) * ny < 0) { nx = -nx; ny = -ny; }
+      nOuts.push({ x: nx, y: ny });
+    }
+    // For each tower corner, sweep an arc from the incoming-edge outward
+    // normal to the outgoing-edge outward normal (radius 15 m, centered at
+    // the corner). Consecutive corners' arc endpoints are connected
+    // automatically (straight buffer edges).
+    var bufXY = [];
+    for (var ci = 0; ci < Nt; ci++) {
+      var nIn  = nOuts[(ci - 1 + Nt) % Nt];
+      var nOut = nOuts[ci];
+      var aIn  = Math.atan2(nIn.y, nIn.x);
+      var aOut = Math.atan2(nOut.y, nOut.x);
+      var da = aOut - aIn;
+      while (da >  Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      var corner = towerXY[ci];
+      for (var s = 0; s <= ARC_SEGS; s++) {
+        var ang = aIn + (s / ARC_SEGS) * da;
+        bufXY.push({
+          x: corner.x + BUF * Math.cos(ang),
+          y: corner.y + BUF * Math.sin(ang)
+        });
+      }
+    }
+    var bufLngLat = bufXY.map(function (p) {
+      var ll = proj.toLngLat(p.x, -p.y);
+      return [ll[0], ll[1]];
+    });
+    outTower = {
+      footprintLngLat: ringLngLat,
+      bufferLngLat: bufLngLat,
+      centroidLngLat: [tcll[0], tcll[1]]
+    };
+  }
 
   return {
     tiles: outTiles,
@@ -312,6 +562,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     vertices: outVertices,
     sections: outSections,
     stylobate: outStylobate,
+    tower: outTower,
     projection: { originLng: origin[0], originLat: origin[1] }
   };
 }
@@ -1257,91 +1508,127 @@ function wedgeTileOnRow(tilesXY, vIdx, rowLabel) {
   return best ? { corners: best.corners, area: bestA } : null;
 }
 
-// Лестница (staircase) for a CORNER section: ONE regular grid cell next
-// to the corner element, on the NORTHERNMOST candidate among the corner's
-// two arms × two rows — but never on an arm that contributes only ONE
-// cell (the "торец"). Grid-aligned (after the green remnants), no flush
-// offset. Returns placement metadata or null.
-function computeCornerStaircase(section, edges, tilesXY, sideSign, step, depth, buffer, excludeCentroid) {
+// ЛЛУ for a CORNER section (unified for convex & reflex corners):
+//   • Лестница (staircase) = the NORTHERNMOST regular grid cell adjacent
+//     to the corner element, across both arms × both rows (lone single-
+//     cell "торец" arms are skipped). On the common grid (the first cell
+//     after the green остаток).
+//   • Лифты (elevators):
+//       – INTERNAL element (only the vertex on the outer contour — convex)
+//         whose inner segment area > 1.5 standard cells → the inner purple
+//         segment;
+//       – otherwise (EXTERNAL/reflex element — never used for lifts — or a
+//         too-small inner segment) → a cell directly next to the corner
+//         element (the next northernmost adjacent cell, ≠ the staircase).
+//     The green остаток that DIRECTLY borders the lifts is given to them
+//     (never the corridor, never the staircase-side остаток across it).
+// Returns { stairXY, elevPolysXY } or null.
+function computeCornerLLU(section, edges, tilesXY, sideSign, step, depth, buffer, isExternal) {
   var ext = section._ext;
   if (!ext || ext.kind !== 'corner') return null;
+  var innerWedge = wedgeTileOnRow(tilesXY, ext.vIdx, 'inner');
+  var stdCell = step * depth;
+
+  // Valid arms (≥2 cells; skip lone "торец").
   var arms = [];
   if (ext.ccA && ext.ccA.length >= 2) arms.push({ ei: ext.eiA, side: 'tail' });
   if (ext.ccB && ext.ccB.length >= 2) arms.push({ ei: ext.eiB, side: 'head' });
   if (!arms.length) return null;
 
-  var rowLabels = ['outer', 'inner'];
-  var best = null, bestY = Infinity;
-  for (var ai = 0; ai < arms.length; ai++) {
-    var arm = arms[ai], e = edges[arm.ei];
-    if (segLength(e.a, e.b) < 1e-6) continue;
-    for (var ri = 0; ri < rowLabels.length; ri++) {
-      var rc = armRowCells(tilesXY, arm.ei, rowLabels[ri], e, arm.side);
-      if (!rc || !rc.cell) continue;
-      var ctr = tileCentroid({ corners: rc.cell.corners });
-      // Skip the cell reserved for the elevators (inner corner cell).
-      if (excludeCentroid &&
-          Math.hypot(ctr.x - excludeCentroid.x, ctr.y - excludeCentroid.y) < 1e-3) continue;
-      if (ctr.y < bestY) {   // smaller internal y = more north
-        bestY = ctr.y;
-        best = {
-          quad: rc.cell.corners.slice(), nextTile: rc.next,
-          ei: arm.ei, side: arm.side, rowLabel: rowLabels[ri]
-        };
-      }
+  // ЛИФТЫ — всегда во ВНУТРЕННЕМ угловом элементе (только вершина касается
+  // внешнего контура секции; convex-углы), если ПОЛНАЯ площадь элемента
+  // (все wedge-тайлы при вершине) не меньше площади регулярной ячейки.
+  // Иначе fallback: лифт в соседней ячейке. У reflex-углов внутреннего
+  // элемента нет → также fallback.
+  var liftPoly = null, stairCell = null;
+  var elemArea = 0;
+  for (var eti = 0; eti < tilesXY.length; eti++) {
+    var et = tilesXY[eti];
+    if (et.vertexIdx === ext.vIdx && et.kind === 'wedge') {
+      elemArea += polygonAreaM2(et.corners);
     }
   }
-  return best;
-}
-
-// Внутренняя угловая ячейка (inner corner cell): the inner-row regular
-// cell of this corner nearest the inner wedge (corner element). Used for
-// the elevators at OPEN (reflex) corners — the open (outer) corner cell
-// must never hold the lifts.
-function innerCornerCell(tilesXY, edges, ext) {
-  var iw = wedgeTileOnRow(tilesXY, ext.vIdx, 'inner');
-  var target = iw ? polysCentroid([iw.corners])
-    : (edges[ext.eiB] ? edges[ext.eiB].a : null);
-  if (!target) return null;
-  var best = null, bestD = Infinity;
-  for (var i = 0; i < tilesXY.length; i++) {
-    var t = tilesXY[i];
-    if (t.kind !== 'cell' || t.row !== 'inner') continue;
-    if (t.edgeIdx !== ext.eiA && t.edgeIdx !== ext.eiB) continue;
-    var c = tileCentroid({ corners: t.corners });
-    var d = Math.hypot(c.x - target.x, c.y - target.y);
-    if (d < bestD) { bestD = d; best = t; }
-  }
-  return best ? best.corners.slice() : null;
-}
-
-// Лифты (elevators) of a corner LLU.
-//   Case 1 (open / reflex): the inner corner cell — never the open
-//     (outer) corner cell.
-//   Case 2 (purple wedge / convex): the wedge if its (per-row) area ≥ a
-//     standard cell; otherwise the next grid cell along the arm.
-// Returns { polyXY, kind } or null.
-function computeCornerElevator(section, edges, tilesXY, sideSign, step, depth, buffer, stair, isOpen) {
-  if (!stair) return null;
-  var ext = section._ext;
-
-  if (isOpen) {
-    var inner = innerCornerCell(tilesXY, edges, ext);
-    if (inner) {
-      // Guard against the inner corner cell coinciding with the stair.
-      var ic = polysCentroid([inner]), sc = polysCentroid([stair.quad]);
-      if (Math.hypot(ic.x - sc.x, ic.y - sc.y) > 1e-3) {
-        return { polyXY: inner, kind: 'inner-corner' };
+  var useElement = (!isExternal && innerWedge && elemArea >= stdCell - 1e-6);
+  if (useElement) {
+    liftPoly = innerWedge.corners;
+    // Лестница = wedge-adjacent regular cell, северная (оба ряда — для
+    // углов, где внутренний ряд упирается в вершину и северная ячейка
+    // оказывается на внешнем ряду, тоже примыкающем к элементу).
+    var bestSY = Infinity;
+    for (var ai = 0; ai < arms.length; ai++) {
+      var arm = arms[ai], e = edges[arm.ei];
+      if (segLength(e.a, e.b) < 1e-6) continue;
+      for (var ri = 0; ri < 2; ri++) {
+        var rowL = ri === 0 ? 'outer' : 'inner';
+        var rc = armRowCells(tilesXY, arm.ei, rowL, e, arm.side);
+        if (!rc || !rc.cell) continue;
+        var sctr = tileCentroid({ corners: rc.cell.corners });
+        if (sctr.y < bestSY) { bestSY = sctr.y; stairCell = rc.cell; }
       }
     }
   } else {
-    var wt = wedgeTileOnRow(tilesXY, ext.vIdx, stair.rowLabel);
-    if (wt && wt.area >= step * depth - 1e-6) {
-      return { polyXY: wt.corners.slice(), kind: 'wedge' };
+    // Fallback: lift = a wedge-adjacent regular cell next to the corner
+    // element; staircase = a cell directly adjacent to the lift, on the
+    // north side. From a {wedge-adjacent, next-along-arm} pair we assign
+    // whichever cell is MORE NORTH as the staircase and the other as the
+    // lift. Pick the pair where the staircase ends up most-north overall.
+    var bestStY = Infinity;
+    for (var ai2 = 0; ai2 < arms.length; ai2++) {
+      var arm2 = arms[ai2], e2 = edges[arm2.ei];
+      if (segLength(e2.a, e2.b) < 1e-6) continue;
+      for (var ri2 = 0; ri2 < 2; ri2++) {
+        var rowL = ri2 === 0 ? 'outer' : 'inner';
+        var rc2 = armRowCells(tilesXY, arm2.ei, rowL, e2, arm2.side);
+        if (!rc2 || !rc2.cell || !rc2.next) continue;
+        var aCtr = tileCentroid({ corners: rc2.cell.corners });
+        var bCtr = tileCentroid({ corners: rc2.next.corners });
+        var stairC, liftC, sCtr;
+        if (aCtr.y <= bCtr.y) { stairC = rc2.cell; liftC = rc2.next; sCtr = aCtr; }
+        else                  { stairC = rc2.next; liftC = rc2.cell; sCtr = bCtr; }
+        if (sCtr.y < bestStY) {
+          bestStY = sCtr.y;
+          liftPoly = liftC.corners;
+          stairCell = stairC;
+        }
+      }
     }
   }
-  if (stair.nextTile) return { polyXY: stair.nextTile.corners.slice(), kind: 'cell' };
-  return null;
+  if (!liftPoly || !stairCell) return null;
+  var elevPolys = [liftPoly.slice()];
+
+  // Остаток отдаётся лифтам ТОЛЬКО если зелёный кусок НЕПОСРЕДСТВЕННО
+  // соседствует с лифтами (делит с ними ребро). Никогда не коридор.
+  // Если такой кусок лежит МЕЖДУ лестницей и лифтом — он всё равно идёт
+  // лифту (поглощается лифтом).
+  var baseRings = elevPolys.slice();
+  for (var ri = 0; ri < tilesXY.length; ri++) {
+    var rt = tilesXY[ri];
+    if (rt.vertexIdx !== ext.vIdx || rt.kind !== 'remnant' || rt.row === 'corridor') continue;
+    for (var bi = 0; bi < baseRings.length; bi++) {
+      if (ringsShareEdge(rt.corners, baseRings[bi])) { elevPolys.push(rt.corners.slice()); break; }
+    }
+  }
+  return { stairXY: stairCell.corners.slice(), elevPolysXY: elevPolys };
+}
+
+// Two polygon rings share (part of) an edge — i.e. they are directly
+// adjacent (≥2 corners of one lie on the other's boundary).
+function ringsShareEdge(ringA, ringB) {
+  function ptToRing(px, py, ring) {
+    var best = Infinity;
+    for (var j = 0; j < ring.length; j++) {
+      var a = ring[j], b = ring[(j + 1) % ring.length];
+      var d = distPointSeg(px, py, a.x, a.y, b.x, b.y);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+  function countOn(pts, ring) {
+    var c = 0;
+    for (var i = 0; i < pts.length; i++) if (ptToRing(pts[i].x, pts[i].y, ring) < 0.5) c++;
+    return c;
+  }
+  return countOn(ringA, ringB) >= 2 || countOn(ringB, ringA) >= 2;
 }
 
 // Single L-shaped outer outline ring for a corner section spanning
@@ -1471,14 +1758,16 @@ function buildSections(edges, tilesXY, step, depth, buffer, sideSign, isPolygon)
   var byEdge = ts.byEdge;
   var ctx = {
     edges: edges, tilesXY: tilesXY, sideSign: sideSign,
-    sectionDepth: sectionDepth, tripleArea: tripleArea, maxLon: maxLon, byEdge: byEdge
+    sectionDepth: sectionDepth, tripleArea: tripleArea, maxLon: maxLon,
+    byEdge: byEdge, isPolygon: isPolygon
   };
   var result = null;
-  // Any open polyline with ≥2 edges (≥1 interior corner) is handled by the
-  // universal multi-corner processor, PROVIDED every edge carries at least
-  // one complete triple (so each corner has cells on both sides). Otherwise
+  // Any open polyline with ≥2 edges (≥1 interior corner) OR closed polygon
+  // with ≥3 edges is handled by the universal multi-corner processor,
+  // PROVIDED every edge carries at least one complete triple. Otherwise
   // fall back to plain per-edge straights.
-  var allHaveCells = !isPolygon && edges.length >= 2;
+  var minEdges = isPolygon ? 3 : 2;
+  var allHaveCells = edges.length >= minEdges;
   for (var gi = 0; allHaveCells && gi < edges.length; gi++) {
     if (!byEdge[gi] || !byEdge[gi].length) allHaveCells = false;
   }
@@ -1684,15 +1973,26 @@ function buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, vIdx, emitAHead, emit
 // the two-corner case exactly.
 function buildSectionsMultiCorner(ctx) {
   var edges = ctx.edges, byEdge = ctx.byEdge, N = edges.length;
+  var isPolygon = !!ctx.isPolygon;
+  // For polygons every edge is a "middle" edge (head and tail both consumed
+  // by corners) — wrap-around closes the chain. For polylines only edges
+  // 1..N-2 are middle; edge 0 contributes only its tail, edge N-1 only its
+  // head.
+  function isMiddleEdge(ei) {
+    return isPolygon ? true : (ei >= 1 && ei <= N - 2);
+  }
 
   // 1. Reserve a tail slice of every middle edge for its RIGHT corner.
+  //    Corner at vertex v consumes edge((v-1+N)%N).tail and edge(v).head.
   var reserve = [];
   for (var ri = 0; ri < N; ri++) reserve.push(0);
-  for (var ei = 1; ei <= N - 2; ei++) {
-    var cornerNext = cornerElementTiles(ctx.tilesXY, ei + 1);
+  for (var ei = 0; ei < N; ei++) {
+    if (!isMiddleEdge(ei)) continue;
+    var nextEi = (ei + 1) % N;
+    var cornerNext = cornerElementTiles(ctx.tilesXY, nextEi);
     reserve[ei] = decideV2EdgeShare(
-      edges[ei].type, edges[ei + 1].type,
-      (byEdge[ei] || []).length, (byEdge[ei + 1] || []).length,
+      edges[ei].type, edges[nextEi].type,
+      (byEdge[ei] || []).length, (byEdge[nextEi] || []).length,
       cornerNext.area, ctx);
   }
 
@@ -1702,25 +2002,27 @@ function buildSectionsMultiCorner(ctx) {
     for (var k in r.validKeys) validKeys[k] = true;
   }
 
-  // 2. Build corners v = 1 … N-1, left to right.
-  for (var v = 1; v <= N - 1; v++) {
-    var eiA = v - 1, eiB = v;
+  // 2. Build corners. Polyline: v = 1 … N-1. Polygon: v = 0 … N-1 (wrap).
+  var vStart = isPolygon ? 0 : 1;
+  for (var v = vStart; v <= N - 1; v++) {
+    var eiA = isPolygon ? ((v - 1 + N) % N) : (v - 1);
+    var eiB = v;
     var cellsAll_A = byEdge[eiA] || [], cellsAll_B = byEdge[eiB] || [];
     var CA = cellsAll_A.length, CB = cellsAll_B.length;
 
     var cellsA, emitAHead;
-    if (eiA === 0) { cellsA = cellsAll_A; emitAHead = true; }
+    if (!isMiddleEdge(eiA)) { cellsA = cellsAll_A; emitAHead = true; }
     else { cellsA = cellsAll_A.slice(CA - reserve[eiA]); emitAHead = false; }
 
     var emitBTail = true;
-    var cellsB = (eiB <= N - 2) ? cellsAll_B.slice(0, CB - reserve[eiB]) : cellsAll_B;
+    var cellsB = isMiddleEdge(eiB) ? cellsAll_B.slice(0, CB - reserve[eiB]) : cellsAll_B;
 
     var r = buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, v, emitAHead, emitBTail);
 
     // Retry: corner failed because we over-reserved edge eiB's tail → give
-    // it the whole edge (corner v+1 then has no reserved tail and will, in
-    // turn, buffer-break on its own far edge).
-    if (!r && eiB <= N - 2 && reserve[eiB] > 0) {
+    // it the whole edge (the next corner then has no reserved tail and will
+    // in turn buffer-break on its own far edge).
+    if (!r && isMiddleEdge(eiB) && reserve[eiB] > 0) {
       reserve[eiB] = 0;
       cellsB = cellsAll_B;
       r = buildCornerBetween(ctx, eiA, eiB, cellsA, cellsB, v, emitAHead, emitBTail);
@@ -1730,11 +2032,13 @@ function buildSectionsMultiCorner(ctx) {
 
     // Corner v can't form → buffer-break edge eiB beyond a 15 m clearance.
     bufferBreakEdge(ctx, eiB, sections, validKeys);
-    if (eiB <= N - 2) reserve[eiB] = 0;   // tail consumed by the break
+    if (isMiddleEdge(eiB)) reserve[eiB] = 0;   // tail consumed by the break
   }
 
   // 3. Absorb 1–2 row dropped gaps on each middle edge.
-  for (var em = 1; em <= N - 2; em++) absorbMiddleGap(ctx, sections, validKeys, em);
+  for (var em = 0; em < N; em++) {
+    if (isMiddleEdge(em)) absorbMiddleGap(ctx, sections, validKeys, em);
+  }
 
   return { sections: sections, validKeys: validKeys };
 }
