@@ -43,6 +43,7 @@
  */
 
 import { createProjection } from '../geo/projection.js';
+import { classifyCells, generateCellsFromFootprint } from '../tower/TowerGenerator.js';
 
 // ─── Tunable constants (mirror prototype) ──────────────────────────
 var LAT_LON_THRESHOLD = 0.7;   // |dot with N| ≥ 0.7 → meridional
@@ -127,6 +128,8 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
 
   var towerXY = null;   // tower footprint (4 corners, internal frame) if +Tower is on
   var towerXY2 = null;  // second tower (at diagonal bbox corner of polygon)
+  var towerMeta = null;   // { rows, cols, orient, exitSide } for T1 (used to render internal cells)
+  var towerMeta2 = null;  // same for T2
   // T2 cut parameters — only populated when the tower-2 trim is valid;
   // then the polygon splits into TWO open polylines at v_k.
   var t2VertIdx = -1, t2dP = null, t2dN = null;
@@ -138,8 +141,17 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     var trimR = 15;
     var withTower = !!(tileParams && tileParams.withTower);
     var withTower2 = !!(tileParams && tileParams.withTower2);
-    var TOWER_CELL = 3.3, TOWER_CELLS = 7;        // small tower: 7×7 cells
-    var towerSize = TOWER_CELL * TOWER_CELLS;     // = 23.1 m (smallest tower)
+    var TOWER_CELL = 3.3;
+    var TOWER_COLS = 7;                           // always 7 cells across (= 23.1 m wide)
+    var TOWER_WIDTH = TOWER_COLS * TOWER_CELL;    // 23.1 m
+    // chooseRows: lat (E-W) axis → square 7×7; lon (N-S) axis → 12/9/7
+    // depending on available edge length (largest that fits with 1 m margin).
+    function chooseTowerRows(orient, availLen) {
+      if (orient === 'lat') return 7;
+      if (availLen >= 12 * TOWER_CELL + 1) return 12;
+      if (availLen >=  9 * TOWER_CELL + 1) return 9;
+      return 7;
+    }
     var Npts0 = pts.length;
     var pv = pts[Npts0 - 1], v0 = pts[0], nv = pts[1];
     function _u(a, b) {
@@ -203,18 +215,27 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           // sections (no corner sections), but the polyline visibly
           // respects the buffer. This is the user-requested sequence:
           // place tower → trim axes by buffer → build polyline.
-          for (var d = 0; d <= dN.L - towerSize - 0.5; d += 0.5) {
+          //
+          // Tower size: rows (along dN) depend on edge orientation —
+          // lat (E-W) → 7×7 square; lon (N-S) → 12/9/7 by edge length.
+          // Width across is always 7 cells = 23.1 m.
+          var t1Orient = classifySegment(v0, nv);   // edge B direction (= dN)
+          var t1Rows = chooseTowerRows(t1Orient, dN.L);
+          var t1Along = t1Rows * TOWER_CELL;
+          var t1Across = TOWER_WIDTH;
+          for (var d = 0; d <= dN.L - t1Along - 0.5; d += 0.5) {
             var ox = v0.x + d * dN.x, oy = v0.y + d * dN.y;
             var twD = [
               { x: ox, y: oy },
-              { x: ox + towerSize * dN.x, y: oy + towerSize * dN.y },
-              { x: ox + towerSize * (dN.x + nN.x), y: oy + towerSize * (dN.y + nN.y) },
-              { x: ox + towerSize * nN.x, y: oy + towerSize * nN.y }
+              { x: ox + t1Along * dN.x, y: oy + t1Along * dN.y },
+              { x: ox + t1Along * dN.x + t1Across * nN.x, y: oy + t1Along * dN.y + t1Across * nN.y },
+              { x: ox + t1Across * nN.x, y: oy + t1Across * nN.y }
             ];
             if (towerFitCheck(twD)) {
               towerXY = twD;
-              truncB = d + towerSize + trimR;
-              if (d <= 0.5) truncA = towerSize + trimR;
+              towerMeta = { rows: t1Rows, cols: TOWER_COLS, orient: t1Orient, exitSide: 'row-end' };
+              truncB = d + t1Along + trimR;
+              if (d <= 0.5) truncA = t1Across + trimR;
               break;
             }
           }
@@ -279,33 +300,36 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
               if (crossDN_2 <= 1e-9) continue;   // reflex / collinear — skip
               var nN_2 = { x: -dN_2.y, y: dN_2.x };
               var nP_2 = { x: -dP_2.y, y: dP_2.x };
-              for (var d2 = 0; d2 <= dN_2.L - towerSize - 0.5; d2 += 0.5) {
+              // T2 size mirrors T1 logic: rows by orientation of edge B at v_k.
+              var t2Orient = classifySegment(v0_2, nv_2);
+              var t2Rows = chooseTowerRows(t2Orient, dN_2.L);
+              var t2Along = t2Rows * TOWER_CELL;
+              var t2Across = TOWER_WIDTH;
+              for (var d2 = 0; d2 <= dN_2.L - t2Along - 0.5; d2 += 0.5) {
                 var ox2 = v0_2.x + d2 * dN_2.x, oy2 = v0_2.y + d2 * dN_2.y;
                 var twD2 = [
                   { x: ox2, y: oy2 },
-                  { x: ox2 + towerSize * dN_2.x, y: oy2 + towerSize * dN_2.y },
-                  { x: ox2 + towerSize * (dN_2.x + nN_2.x), y: oy2 + towerSize * (dN_2.y + nN_2.y) },
-                  { x: ox2 + towerSize * nN_2.x, y: oy2 + towerSize * nN_2.y }
+                  { x: ox2 + t2Along * dN_2.x, y: oy2 + t2Along * dN_2.y },
+                  { x: ox2 + t2Along * dN_2.x + t2Across * nN_2.x, y: oy2 + t2Along * dN_2.y + t2Across * nN_2.y },
+                  { x: ox2 + t2Across * nN_2.x, y: oy2 + t2Across * nN_2.y }
                 ];
                 if (!towerFitCheck(twD2)) continue;
                 // Reject placements that overlap tower 1's footprint
-                // (centres closer than ts + 2·BUF — tower 1 and tower 2
-                // buffers would visibly merge, which the user clearly
-                // doesn't want when they ask for two distinct towers).
+                // (centres closer than 0.5·(t1Along+t1Across) + 2·BUF —
+                // approximation; ensures buffers don't merge).
                 var c2cx = (twD2[0].x + twD2[2].x) / 2;
                 var c2cy = (twD2[0].y + twD2[2].y) / 2;
                 var cdx = c2cx - t1cx, cdy = c2cy - t1cy;
                 var cdist = Math.hypot(cdx, cdy);
-                if (cdist < towerSize + 2 * BUF2) continue;
+                if (cdist < 0.5 * (t1Along + t1Across) + 2 * BUF2) continue;
                 towerXY2 = twD2;
+                towerMeta2 = { rows: t2Rows, cols: TOWER_COLS, orient: t2Orient, exitSide: 'row-end' };
                 t2VertIdx = vk;
                 t2dP = dP_2; t2dN = dN_2;
                 t2nP = nP_2; t2nN = nN_2;
                 t2crossDN = crossDN_2;
-                // Tower 2 polyline trim at v_k — same logic as v0/T1.
-                // Buffer ALWAYS trims; no MIN_POLY_EDGE fallback.
-                t2TruncB = d2 + towerSize + trimR;
-                if (d2 <= 0.5) t2TruncA = towerSize + trimR;
+                t2TruncB = d2 + t2Along + trimR;
+                if (d2 <= 0.5) t2TruncA = t2Across + trimR;
                 break;
               }
             }
@@ -639,7 +663,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   // lng/lat. Also a 15-m rounded buffer ring around the tower
   // (Minkowski-square approximation with quarter-circle arc corners) so
   // the user can see the no-build zone visually.
-  function buildTowerOutput(twXY) {
+  function buildTowerOutput(twXY, meta) {
     if (!twXY) return null;
     var ringLngLat = twXY.map(function (p) {
       var ll = proj.toLngLat(p.x, -p.y);
@@ -696,14 +720,42 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var ll = proj.toLngLat(p.x, -p.y);
       return [ll[0], ll[1]];
     });
+    // ── Internal structure: cells (apartment / llu / llu-exit) ──
+    // classifyCells works in row-major order (id = r*cols + c) and
+    // generateCellsFromFootprint emits polygons in the same order, so
+    // we can zip the two arrays index-by-index. Footprint convention:
+    //   twXY[0] = axis-start near, twXY[1] = axis-end near,
+    //   twXY[2] = axis-end far,    twXY[3] = axis-start far.
+    var cells = [];
+    if (meta && meta.rows && meta.cols) {
+      // generateCellsFromFootprint expects [x,y] arrays, not {x,y}.
+      var fpArr = twXY.map(function (p) { return [p.x, p.y]; });
+      var classified = classifyCells(meta.rows, meta.cols, meta.exitSide || 'row-end');
+      var localPolys = generateCellsFromFootprint(fpArr, meta.rows, meta.cols);
+      for (var ci2 = 0; ci2 < classified.length; ci2++) {
+        var lp = localPolys[ci2];
+        var llRing = lp.map(function (xy) {
+          var ll = proj.toLngLat(xy[0], -xy[1]);
+          return [ll[0], ll[1]];
+        });
+        cells.push({
+          type: classified[ci2].type,    // 'apartment' | 'llu' | 'llu-exit'
+          row: classified[ci2].row,
+          col: classified[ci2].col,
+          cornersLngLat: llRing
+        });
+      }
+    }
     return {
       footprintLngLat: ringLngLat,
       bufferLngLat: bufLngLat,
-      centroidLngLat: [tcll[0], tcll[1]]
+      centroidLngLat: [tcll[0], tcll[1]],
+      cells: cells,
+      meta: meta ? { rows: meta.rows, cols: meta.cols, orient: meta.orient } : null
     };
   }
-  var outTower  = buildTowerOutput(towerXY);
-  var outTower2 = buildTowerOutput(towerXY2);
+  var outTower  = buildTowerOutput(towerXY,  towerMeta);
+  var outTower2 = buildTowerOutput(towerXY2, towerMeta2);
 
   return {
     tiles: outTiles,

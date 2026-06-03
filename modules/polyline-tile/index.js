@@ -63,6 +63,12 @@ var TOWER_FILL = 'rgba(234, 179, 8, 0.55)';       // amber — tower footprint
 var TOWER_BORDER = '#a16207';                      // amber-700 — tower outline
 var TOWER_BUFFER_FILL = 'rgba(234, 179, 8, 0.12)'; // pale amber — 15 m no-build buffer
 var TOWER_BUFFER_BORDER = 'rgba(161, 98, 7, 0.35)'; // thin pale amber outline
+// Tower internal-cell colors (apartment / llu / llu-exit) — match the
+// existing section LLU palette so the visual language stays coherent.
+var TOWER_APT_FILL  = 'rgba(252, 211, 77, 0.55)'; // amber-300 — apartments (lighter than footprint)
+var TOWER_LLU_FILL  = 'rgba(219, 39, 119, 0.75)'; // magenta — core (stair-elevator unit)
+var TOWER_EXIT_FILL = 'rgba(124, 58, 237, 0.85)'; // violet — LLU exit corridor
+var TOWER_CELL_BORDER = 'rgba(120, 53, 15, 0.6)';
 var CELL_BORDER   = 'rgba(110, 110, 110, 0.55)';
 var WEDGE_BORDER  = 'rgba(147, 51, 234, 0.85)';
 var REMNANT_BORDER = 'rgba(22, 163, 74, 0.85)';
@@ -551,16 +557,51 @@ var module_ = {
           }
         }
         if (twOut.footprintLngLat) {
-          var towerRing = closeRing(twOut.footprintLngLat);
-          if (towerRing && towerRing.length >= 4) {
-            sectionFeats.push({
-              type: 'Feature',
-              properties: {
-                featureId: p.id, isTower: true,
-                fillColor: TOWER_FILL, lineColor: TOWER_BORDER, label: twLabel
-              },
-              geometry: { type: 'Polygon', coordinates: [towerRing] }
-            });
+          // If we have classified cells, render them as the tower's
+          // internal structure (apartment / llu / llu-exit). Otherwise
+          // fall back to a single filled footprint polygon.
+          if (twOut.cells && twOut.cells.length) {
+            for (var tci = 0; tci < twOut.cells.length; tci++) {
+              var cell = twOut.cells[tci];
+              var cellRing = closeRing(cell.cornersLngLat);
+              if (!cellRing || cellRing.length < 4) continue;
+              var fill = TOWER_APT_FILL;
+              if (cell.type === 'llu') fill = TOWER_LLU_FILL;
+              else if (cell.type === 'llu-exit') fill = TOWER_EXIT_FILL;
+              sectionFeats.push({
+                type: 'Feature',
+                properties: {
+                  featureId: p.id, isTower: true, towerCellType: cell.type,
+                  fillColor: fill, lineColor: TOWER_CELL_BORDER, label: ''
+                },
+                geometry: { type: 'Polygon', coordinates: [cellRing] }
+              });
+            }
+            // Outline the whole footprint on top so the rectangular
+            // boundary reads cleanly over the cell grid.
+            var outlineRing = closeRing(twOut.footprintLngLat);
+            if (outlineRing && outlineRing.length >= 4) {
+              sectionFeats.push({
+                type: 'Feature',
+                properties: {
+                  featureId: p.id, isTowerOutline: true,
+                  fillColor: 'rgba(0,0,0,0)', lineColor: TOWER_BORDER, label: ''
+                },
+                geometry: { type: 'Polygon', coordinates: [outlineRing] }
+              });
+            }
+          } else {
+            var towerRing = closeRing(twOut.footprintLngLat);
+            if (towerRing && towerRing.length >= 4) {
+              sectionFeats.push({
+                type: 'Feature',
+                properties: {
+                  featureId: p.id, isTower: true,
+                  fillColor: TOWER_FILL, lineColor: TOWER_BORDER, label: twLabel
+                },
+                geometry: { type: 'Polygon', coordinates: [towerRing] }
+              });
+            }
           }
           if (twOut.centroidLngLat) {
             sectionFeats.push({
