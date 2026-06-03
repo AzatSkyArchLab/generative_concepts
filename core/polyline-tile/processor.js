@@ -141,15 +141,25 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     var trimR = 15;
     var withTower = !!(tileParams && tileParams.withTower);
     var withTower2 = !!(tileParams && tileParams.withTower2);
-    var TOWER_CELL = 3.3;
-    var TOWER_COLS = 7;                           // always 7 cells across (= 23.1 m wide)
-    var TOWER_WIDTH = TOWER_COLS * TOWER_CELL;    // 23.1 m
-    // chooseRows: lat (E-W) axis → square 7×7; lon (N-S) axis → 12/9/7
-    // depending on available edge length (largest that fits with 1 m margin).
+    // Tower cell size — user-tunable, 3.0..3.3 m (independent of section cell).
+    var TOWER_CELL = (tileParams && typeof tileParams.towerCellSize === 'number')
+      ? Math.max(3, Math.min(3.3, tileParams.towerCellSize)) : 3.3;
+    var TOWER_COLS = 7;                           // always 7 cells across
+    var TOWER_WIDTH = TOWER_COLS * TOWER_CELL;
+    // Tower-size cap from UI: 'small' | 'medium' | 'large'. Default small.
+    // small  → max 7 rows along axis
+    // medium → max 9 rows
+    // large  → max 12 rows
+    var TOWER_SIZE_MAX_ROWS = { small: 7, medium: 9, large: 12 };
+    var userSizeKey = (tileParams && tileParams.towerSize) || 'small';
+    var maxRows = TOWER_SIZE_MAX_ROWS[userSizeKey] || 7;
+    // chooseRows: lat (E-W) axis → 7×7 square (regardless of user cap);
+    // lon (N-S) axis → largest of {7, 9, 12} that is BOTH ≤ user cap
+    // AND fits the available edge length.
     function chooseTowerRows(orient, availLen) {
       if (orient === 'lat') return 7;
-      if (availLen >= 12 * TOWER_CELL + 1) return 12;
-      if (availLen >=  9 * TOWER_CELL + 1) return 9;
+      if (maxRows >= 12 && availLen >= 12 * TOWER_CELL + 1) return 12;
+      if (maxRows >=  9 && availLen >=  9 * TOWER_CELL + 1) return 9;
       return 7;
     }
     var Npts0 = pts.length;

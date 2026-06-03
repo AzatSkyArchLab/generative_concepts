@@ -1051,6 +1051,8 @@ export class FeaturePanel {
     var sectionWidth = Math.round(2 * depth + buffer);
     var withTower = tp.withTower === true;
     var withTower2 = tp.withTower2 === true;
+    var towerSize = tp.towerSize || 'small';            // 'small' | 'medium' | 'large'
+    var towerCellSize = tp.towerCellSize != null ? tp.towerCellSize : 3.3;
     var typeName = (p.type === 'polygon-tile') ? 'Polygon tile' : 'Polyline tile';
     var label = features.length === 1
       ? typeName + ' ' + (p.id ? p.id.slice(0, 6) : '')
@@ -1082,6 +1084,34 @@ export class FeaturePanel {
     h += (withTower2 ? ' checked' : '');
     h += (withTower ? '' : ' disabled');
     h += '></div></div>';
+    // Tower size — caps the rows-along-axis count. On lat (E-W) edges
+    // a tower is ALWAYS 7×7 regardless of this setting; on lon (N-S)
+    // edges this is the largest allowed: small=7×7, medium=9×7, large=12×7.
+    var SZ_OPTS = [
+      { id: 'small',  label: 'S · 7×7' },
+      { id: 'medium', label: 'M · 9×7' },
+      { id: 'large',  label: 'L · 12×7' }
+    ];
+    h += '<div class="param-row"><label class="param-label">Tower size</label>';
+    h += '<div class="param-input-wrap" style="display:flex;gap:4px">';
+    for (var sz = 0; sz < SZ_OPTS.length; sz++) {
+      var opt = SZ_OPTS[sz];
+      var sel = (towerSize === opt.id);
+      h += '<button class="ug-toggle-btn tower-size-btn' + (sel ? ' active' : '') + '"';
+      h += ' data-tower-size="' + opt.id + '"';
+      h += ' style="flex:1;font-size:10px;padding:3px 4px;' +
+        (sel ? 'border-color:rgba(99,102,241,0.6);background:rgba(99,102,241,0.15);color:#6366f1;font-weight:700' : '') + '"';
+      h += (withTower ? '' : ' disabled');
+      h += '>' + opt.label + '</button>';
+    }
+    h += '</div></div>';
+    // Tower cell size — fixed 3.0..3.3 m (independent of section cell).
+    h += '<div class="param-row"><label class="param-label">Tower cell</label>';
+    h += '<div class="param-input-wrap"><input type="number" class="param-input" data-key="towerCellSize" data-target="tile"';
+    h += ' value="' + towerCellSize + '" min="3" max="3.3" step="0.1"';
+    h += (withTower ? '' : ' disabled');
+    h += '>';
+    h += '<span class="param-unit">m</span></div></div>';
     if (p.type === 'polygon-tile') {
       var sv = (tp.startVertex != null) ? tp.startVertex : 0;
       h += '<div class="param-row" style="margin-top:6px"><button class="ug-toggle-btn" data-action="shuffle" data-target="tile" style="width:100%;text-align:center">';
@@ -1426,6 +1456,29 @@ export class FeaturePanel {
       });
     }
 
+    // Tower size buttons (small / medium / large) — sets tileParams.towerSize.
+    var towerSizeBtns = this._container.querySelectorAll('.tower-size-btn');
+    for (var tsi = 0; tsi < towerSizeBtns.length; tsi++) {
+      towerSizeBtns[tsi].addEventListener('click', function (e) {
+        if (e.target.disabled) return;
+        var sz = e.target.dataset.towerSize;
+        if (!sz) return;
+        for (var si = 0; si < self._selectedIds.length; si++) {
+          var f = self._featureStore.get(self._selectedIds[si]);
+          if (!f) continue;
+          var t = f.properties.type;
+          if (t !== 'polygon-tile' && t !== 'polyline-tile') continue;
+          var oldTp = f.properties.tileParams || { step: 3.3, depth: 8, buffer: 2, rows: 3, cornerR: 20 };
+          var newTp = Object.assign({}, oldTp, { towerSize: sz });
+          commandManager.execute(new UpdateFeatureCommand(
+            self._featureStore, self._selectedIds[si],
+            { tileParams: newTp }, { tileParams: oldTp }
+          ));
+        }
+        eventBus.emit('features:changed');
+      });
+    }
+
     // Tile inputs (polygon-tile / polyline-tile parameters). Section
     // width maps to depth via sd = 2*depth + buffer; cell width = step;
     // withTower is a boolean checkbox. tileParams is a nested object —
@@ -1439,6 +1492,7 @@ export class FeaturePanel {
         if (!isBool && isNaN(val)) return;
         if (key === 'sectionWidth') val = Math.max(15, Math.min(18, Math.round(val)));
         else if (key === 'step')    val = Math.max(3,  Math.min(3.3, val));
+        else if (key === 'towerCellSize') val = Math.max(3, Math.min(3.3, val));
         for (var si = 0; si < self._selectedIds.length; si++) {
           var f = self._featureStore.get(self._selectedIds[si]);
           if (!f) continue;
