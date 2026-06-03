@@ -196,14 +196,13 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           // enough from edge A that the standard 15-m circle trim handles
           // edge A (truncA filled in by the block below).
           //
-          // GUARD: if tower trim would leave the polyline edge shorter
-          // than MIN_POLY_EDGE, fall back to standard 15-m circle trim
-          // on that side (truncA/truncB stay 0 → filled by block below).
-          // Without this guard, on small urban-blocks some shuffle
-          // positions leave the Q_A-end polyline edge with 0 complete
-          // triples → multi-corner dispatcher rejects the whole layout
-          // and every cell becomes стилобат.
-          var MIN_POLY_EDGE = 8 * step;   // ~26 m at default step=3.3
+          // Buffer ALWAYS trims the polyline axes — no MIN_POLY_EDGE
+          // fallback. On small blocks where the buffer-respecting trim
+          // would leave a polyline edge with no complete triples, the
+          // multi-corner section dispatcher falls back to per-edge
+          // sections (no corner sections), but the polyline visibly
+          // respects the buffer. This is the user-requested sequence:
+          // place tower → trim axes by buffer → build polyline.
           for (var d = 0; d <= dN.L - towerSize - 0.5; d += 0.5) {
             var ox = v0.x + d * dN.x, oy = v0.y + d * dN.y;
             var twD = [
@@ -214,12 +213,8 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             ];
             if (towerFitCheck(twD)) {
               towerXY = twD;
-              var ttB = d + towerSize + trimR;
-              if (dN.L - ttB >= MIN_POLY_EDGE) truncB = ttB;
-              if (d <= 0.5) {
-                var ttA = towerSize + trimR;
-                if (dP.L - ttA >= MIN_POLY_EDGE) truncA = ttA;
-              }
+              truncB = d + towerSize + trimR;
+              if (d <= 0.5) truncA = towerSize + trimR;
               break;
             }
           }
@@ -308,12 +303,9 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
                 t2nP = nP_2; t2nN = nN_2;
                 t2crossDN = crossDN_2;
                 // Tower 2 polyline trim at v_k — same logic as v0/T1.
-                var ttB2 = d2 + towerSize + trimR;
-                if (dN_2.L - ttB2 >= MIN_POLY_EDGE) t2TruncB = ttB2;
-                if (d2 <= 0.5) {
-                  var ttA2 = towerSize + trimR;
-                  if (dP_2.L - ttA2 >= MIN_POLY_EDGE) t2TruncA = ttA2;
-                }
+                // Buffer ALWAYS trims; no MIN_POLY_EDGE fallback.
+                t2TruncB = d2 + towerSize + trimR;
+                if (d2 <= 0.5) t2TruncA = towerSize + trimR;
                 break;
               }
             }
