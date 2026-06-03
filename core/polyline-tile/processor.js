@@ -302,18 +302,33 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
                 var cdx = c2cx - t1cx, cdy = c2cy - t1cy;
                 var cdist = Math.hypot(cdx, cdy);
                 if (cdist < towerSize + 2 * BUF2) continue;
+                // STRICT trim validation for T2: the buffer trim must
+                // physically fit on both adjacent polygon edges. If it
+                // doesn't, this placement is rejected (try next d2 or
+                // next vertex) — otherwise T2 would be drawn but the
+                // polyline would pass through its buffer.
+                var ttB2 = d2 + towerSize + trimR;
+                if (dN_2.L - ttB2 < MIN_POLY_EDGE) continue;
+                var ttA2 = 0;
+                if (d2 <= 0.5) {
+                  ttA2 = towerSize + trimR;
+                  // Option A — both edges trimmed by buffer.
+                  if (dP_2.L - ttA2 < MIN_POLY_EDGE) continue;
+                } else {
+                  // Option B (acute corner) — circle trim along edge A.
+                  // For T2 we don't accept Option B because the circle
+                  // trim (~33 m) is smaller than the buffer reach along
+                  // dP_2 (≈ ts + √(225-d2²) ≥ ts), so the polyline would
+                  // enter the buffer along edge A. Reject.
+                  continue;
+                }
                 towerXY2 = twD2;
                 t2VertIdx = vk;
                 t2dP = dP_2; t2dN = dN_2;
                 t2nP = nP_2; t2nN = nN_2;
                 t2crossDN = crossDN_2;
-                // Tower 2 polyline trim at v_k — same logic as v0/T1.
-                var ttB2 = d2 + towerSize + trimR;
-                if (dN_2.L - ttB2 >= MIN_POLY_EDGE) t2TruncB = ttB2;
-                if (d2 <= 0.5) {
-                  var ttA2 = towerSize + trimR;
-                  if (dP_2.L - ttA2 >= MIN_POLY_EDGE) t2TruncA = ttA2;
-                }
+                t2TruncB = ttB2;
+                t2TruncA = ttA2;
                 break;
               }
             }
@@ -453,6 +468,47 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var secResult_i = buildSections(edges_i, tilesXY_i, step, depth, buffer, sideSign, isPolygon);
       sectionsXY_i = secResult_i.sections;
       var vk_i = secResult_i.validKeys;
+      // Drop sections whose polygon enters any tower buffer. Reflex
+      // corner sections form L-rings that extend DEEP inward — for
+      // non-convex polygons these L-rings can intersect a tower's
+      // 15-m buffer even when the tower is placed far away with valid
+      // polyline-trim. Without this drop, a section is drawn over the
+      // buffer (user-flagged "секция встает вплотную к башне"). The
+      // section's underlying triples are removed from validKeys so
+      // their cells fall through to the стилобат / triple-drop pass
+      // and get the same buffer-clean treatment.
+      if (towerBufferContains && sectionsXY_i.length) {
+        var keptSec = [];
+        for (var sj = 0; sj < sectionsXY_i.length; sj++) {
+          var ss = sectionsXY_i[sj];
+          var hit = false;
+          for (var pa = 0; pa < ss.polys.length && !hit; pa++) {
+            var ring = ss.polys[pa];
+            for (var pb = 0; pb < ring.length; pb++) {
+              if (towerBufferContains(ring[pb])) { hit = true; break; }
+            }
+          }
+          if (!hit) { keptSec.push(ss); continue; }
+          // Drop — clear this section's cell keys from validKeys so
+          // they're re-evaluated below.
+          var ext = ss._ext;
+          if (ext) {
+            if (ext.kind === 'straight' && ext.cells) {
+              for (var ec = 0; ec < ext.cells.length; ec++) {
+                delete vk_i[ext.ei + ':' + ext.cells[ec].cellIdx];
+              }
+            } else if (ext.kind === 'corner') {
+              if (ext.ccA) for (var eca = 0; eca < ext.ccA.length; eca++) {
+                delete vk_i[ext.eiA + ':' + ext.ccA[eca].cellIdx];
+              }
+              if (ext.ccB) for (var ecb = 0; ecb < ext.ccB.length; ecb++) {
+                delete vk_i[ext.eiB + ':' + ext.ccB[ecb].cellIdx];
+              }
+            }
+          }
+        }
+        sectionsXY_i = keptSec;
+      }
       var secPolysXY_i = [];
       for (var si = 0; si < sectionsXY_i.length; si++) {
         for (var pii = 0; pii < sectionsXY_i[si].polys.length; pii++) {
