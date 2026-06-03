@@ -155,21 +155,16 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     var maxRows = TOWER_SIZE_MAX_ROWS[userSizeKey] || 7;
     // chooseRows: pick the largest rows count (capped at user choice)
     // that leaves ≥ (sd + 1m) of polyline edge on BOTH adjacent sides
-    // after the buffer trim. This stricter check (vs. just trim<edge)
-    // ensures the corner section's L-ring at the adjacent vertex has
-    // room to form WITHOUT extending back into the tower buffer.
-    //   • lat (E-W) — forced to 7 (always 7×7 square, per the established
-    //     TowerGenerator rule), but still validated.
-    //   • lon (N-S) — try {12, 9, 7} clipped to user cap.
+    // after the buffer trim. Orient is informational only — the user's
+    // size choice applies to BOTH lat and lon edges (the long side of
+    // the tower simply aligns with the polygon edge dN in either case).
     // Returns 0 ⇒ no tower fits without polyline-into-buffer overlap.
     var MIN_TAIL = sd + 1;   // ≈19 m at default sd=18
     function chooseTowerRows(orient, edgeBLen, edgeALen) {
       var across = TOWER_WIDTH;
       var trimAcross = across + trimR;
-      // truncA (cols * cell + 15) is independent of rows; if edgeA
-      // doesn't have enough remaining after trim → no tower at all.
       if (edgeALen - trimAcross < MIN_TAIL) return 0;
-      var pool = (orient === 'lat') ? [7] : [12, 9, 7];
+      var pool = [12, 9, 7];
       for (var i = 0; i < pool.length; i++) {
         var r = pool[i];
         if (r > maxRows) continue;
@@ -243,30 +238,27 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           // respects the buffer. This is the user-requested sequence:
           // place tower → trim axes by buffer → build polyline.
           //
-          // Tower size: rows (along dN) depend on edge orientation —
-          // lat (E-W) → 7×7 square; lon (N-S) → 12/9/7 by edge length.
-          // Width across is always 7 cells = 23.1 m.
-          // chooseTowerRows validates both trims fit the adjacent edges
-          // so the polyline-trim gate below NEVER fails on tower size —
-          // returns 0 if no size fits (skip tower placement entirely).
-          var t1Orient = classifySegment(v0, nv);   // edge B direction (= dN)
+          // Tower placement is ANCHORED at v0 (no step-back). If the
+          // tower's axes-aligned footprint at d=0 doesn't fit (acute
+          // corner pokes outside edge A), the tower is NOT placed —
+          // user-flagged behaviour: "tower must always sit at the
+          // polygon vertex, not be shifted along the edge".
+          var t1Orient = classifySegment(v0, nv);   // edge B direction
           var t1Rows = chooseTowerRows(t1Orient, dN.L, dP.L);
           var t1Along = t1Rows * TOWER_CELL;
           var t1Across = TOWER_WIDTH;
-          for (var d = 0; t1Rows > 0 && d <= dN.L - t1Along - 0.5; d += 0.5) {
-            var ox = v0.x + d * dN.x, oy = v0.y + d * dN.y;
+          if (t1Rows > 0) {
             var twD = [
-              { x: ox, y: oy },
-              { x: ox + t1Along * dN.x, y: oy + t1Along * dN.y },
-              { x: ox + t1Along * dN.x + t1Across * nN.x, y: oy + t1Along * dN.y + t1Across * nN.y },
-              { x: ox + t1Across * nN.x, y: oy + t1Across * nN.y }
+              { x: v0.x, y: v0.y },
+              { x: v0.x + t1Along * dN.x, y: v0.y + t1Along * dN.y },
+              { x: v0.x + t1Along * dN.x + t1Across * nN.x, y: v0.y + t1Along * dN.y + t1Across * nN.y },
+              { x: v0.x + t1Across * nN.x, y: v0.y + t1Across * nN.y }
             ];
             if (towerFitCheck(twD)) {
               towerXY = twD;
               towerMeta = { rows: t1Rows, cols: TOWER_COLS, orient: t1Orient, exitSide: 'row-end' };
-              truncB = d + t1Along + trimR;
-              if (d <= 0.5) truncA = t1Across + trimR;
-              break;
+              truncB = t1Along + trimR;
+              truncA = t1Across + trimR;
             }
           }
           // ─── Second tower (visual + buffer cull, NO polyline trim) ───
