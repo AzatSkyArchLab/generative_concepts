@@ -238,27 +238,32 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           // respects the buffer. This is the user-requested sequence:
           // place tower → trim axes by buffer → build polyline.
           //
-          // Tower placement is ANCHORED at v0 (no step-back). If the
-          // tower's axes-aligned footprint at d=0 doesn't fit (acute
-          // corner pokes outside edge A), the tower is NOT placed —
-          // user-flagged behaviour: "tower must always sit at the
-          // polygon vertex, not be shifted along the edge".
-          var t1Orient = classifySegment(v0, nv);   // edge B direction
+          // Tower is anchored at v0 by default; if the axes-aligned
+          // footprint at d=0 pokes outside an adjacent edge (acute
+          // corner), STEP BACK along dN by 0.5 m until it fits inside
+          // the polygon. Only constraint: footprint must stay inside
+          // the polygon (towerFitCheck). On step-back, only truncB
+          // is adjusted by the offset; truncA stays = across+trimR
+          // (Option A only sets it when d ≤ 0.5; Option B leaves
+          // truncA = 0 which falls through to circle trim below).
+          var t1Orient = classifySegment(v0, nv);
           var t1Rows = chooseTowerRows(t1Orient, dN.L, dP.L);
           var t1Along = t1Rows * TOWER_CELL;
           var t1Across = TOWER_WIDTH;
-          if (t1Rows > 0) {
+          for (var d = 0; t1Rows > 0 && d <= dN.L - t1Along - 0.5; d += 0.5) {
+            var ox = v0.x + d * dN.x, oy = v0.y + d * dN.y;
             var twD = [
-              { x: v0.x, y: v0.y },
-              { x: v0.x + t1Along * dN.x, y: v0.y + t1Along * dN.y },
-              { x: v0.x + t1Along * dN.x + t1Across * nN.x, y: v0.y + t1Along * dN.y + t1Across * nN.y },
-              { x: v0.x + t1Across * nN.x, y: v0.y + t1Across * nN.y }
+              { x: ox, y: oy },
+              { x: ox + t1Along * dN.x, y: oy + t1Along * dN.y },
+              { x: ox + t1Along * dN.x + t1Across * nN.x, y: oy + t1Along * dN.y + t1Across * nN.y },
+              { x: ox + t1Across * nN.x, y: oy + t1Across * nN.y }
             ];
             if (towerFitCheck(twD)) {
               towerXY = twD;
               towerMeta = { rows: t1Rows, cols: TOWER_COLS, orient: t1Orient, exitSide: 'row-end' };
-              truncB = t1Along + trimR;
-              truncA = t1Across + trimR;
+              truncB = d + t1Along + trimR;
+              if (d <= 0.5) truncA = t1Across + trimR;
+              break;
             }
           }
           // ─── Second tower (visual + buffer cull, NO polyline trim) ───
