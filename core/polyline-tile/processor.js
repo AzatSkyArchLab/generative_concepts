@@ -488,52 +488,85 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   // Build tiles, edges, sections, and стилобат markers independently
   // for each polyline in ptsList. Output conversion below iterates
   // these per-polyline arrays and concatenates the lng/lat results.
+  //
+  // Direction picker: for each polyline we run the pipeline TWICE —
+  // once forward (pts as-is) and once reversed (pts.reverse() with
+  // sideSign flipped so sections stay on the polygon's interior side).
+  // Triple-partitioning drops the remainder at the END of an edge run,
+  // and corner-section formation depends on edge traversal order, so
+  // the two directions can produce different counts of whole sections.
+  // We pick whichever direction yields more total triples-in-sections
+  // (≡ fewer стилобат cells, more living area). Acts AFTER buffer trim.
+  function runPolylinePipeline(ptsCand, sideCand) {
+    var built = buildTiles(ptsCand, isPolygon, step, depth, buffer, rows, sideCand);
+    var tiles = built.tiles;
+    var vcs   = built.vertexClasses;
+    var es    = getEdges(ptsCand, isPolygon);
+    var ss = [], sr = [];
+    if (rows === 3) {
+      var sec = buildSections(es, tiles, step, depth, buffer, sideCand, isPolygon);
+      ss = sec.sections;
+      var vkLocal = sec.validKeys;
+      var secPolysLocal = [];
+      for (var sii = 0; sii < ss.length; sii++) {
+        for (var pj0 = 0; pj0 < ss[sii].polys.length; pj0++) {
+          secPolysLocal.push(ss[sii].polys[pj0]);
+        }
+      }
+      for (var tj = 0; tj < tiles.length; tj++) {
+        var tt0 = tiles[tj];
+        var isReg0 = (tt0.kind === 'cell' || tt0.kind === 'corridor') &&
+          tt0.edgeIdx != null && tt0.cellIdx != null && tt0.cellIdx >= 0;
+        if (!isReg0) continue;
+        if (vkLocal[tt0.edgeIdx + ':' + tt0.cellIdx] === true) continue;
+        var ctr0 = tileCentroid({ corners: tt0.corners });
+        var inside0 = false;
+        for (var pj1 = 0; pj1 < secPolysLocal.length; pj1++) {
+          if (pointInPolygon(ctr0, secPolysLocal[pj1])) { inside0 = true; break; }
+        }
+        if (!inside0) {
+          if (towerBufferContains && towerBufferContains(ctr0)) {
+            tt0._dropFromOutput = true;
+          } else {
+            tt0.stylobate = true;
+          }
+        }
+      }
+      sr = buildStylobateRegions(tiles, es, sideCand, 2 * depth + buffer);
+    }
+    return {
+      pts: ptsCand,
+      tilesXY: tiles,
+      vertexClasses: vcs,
+      edges: es,
+      sectionsXY: ss,
+      styloRegions: sr
+    };
+  }
+  function scorePipelineResult(res) {
+    // Sum of triple counts across all sections — proxy for "whole
+    // sections without стилобат". Higher is better.
+    var total = 0;
+    for (var k = 0; k < res.sectionsXY.length; k++) {
+      total += (res.sectionsXY[k].tripleCount || 0);
+    }
+    return total;
+  }
   var tilesXYList = [], edgesList = [], sectionsXYList = [];
   var vertexClassesList = [], styloRegionsXYList = [];
   for (var pli = 0; pli < ptsList.length; pli++) {
     var ptsi = ptsList[pli];
-    var built_i = buildTiles(ptsi, isPolygon, step, depth, buffer, rows, sideSign);
-    var tilesXY_i = built_i.tiles;
-    var vertexClasses_i = built_i.vertexClasses;
-    var edges_i = getEdges(ptsi, isPolygon);
-    var sectionsXY_i = [];
-    var styloRegionsXY_i = [];
-    if (rows === 3) {
-      var secResult_i = buildSections(edges_i, tilesXY_i, step, depth, buffer, sideSign, isPolygon);
-      sectionsXY_i = secResult_i.sections;
-      var vk_i = secResult_i.validKeys;
-      var secPolysXY_i = [];
-      for (var si = 0; si < sectionsXY_i.length; si++) {
-        for (var pii = 0; pii < sectionsXY_i[si].polys.length; pii++) {
-          secPolysXY_i.push(sectionsXY_i[si].polys[pii]);
-        }
-      }
-      for (var ti = 0; ti < tilesXY_i.length; ti++) {
-        var tt = tilesXY_i[ti];
-        var isReg = (tt.kind === 'cell' || tt.kind === 'corridor') &&
-          tt.edgeIdx != null && tt.cellIdx != null && tt.cellIdx >= 0;
-        if (!isReg) continue;
-        if (vk_i[tt.edgeIdx + ':' + tt.cellIdx] === true) continue;
-        var ctr = tileCentroid({ corners: tt.corners });
-        var inside = false;
-        for (var pj = 0; pj < secPolysXY_i.length; pj++) {
-          if (pointInPolygon(ctr, secPolysXY_i[pj])) { inside = true; break; }
-        }
-        if (!inside) {
-          if (towerBufferContains && towerBufferContains(ctr)) {
-            tt._dropFromOutput = true;
-          } else {
-            tt.stylobate = true;
-          }
-        }
-      }
-      styloRegionsXY_i = buildStylobateRegions(tilesXY_i, edges_i, sideSign, 2 * depth + buffer);
-    }
-    tilesXYList.push(tilesXY_i);
-    edgesList.push(edges_i);
-    sectionsXYList.push(sectionsXY_i);
-    vertexClassesList.push(vertexClasses_i);
-    styloRegionsXYList.push(styloRegionsXY_i);
+    var fwd = runPolylinePipeline(ptsi, sideSign);
+    var rev = runPolylinePipeline(ptsi.slice().reverse(), -sideSign);
+    var picked = scorePipelineResult(rev) > scorePipelineResult(fwd) ? rev : fwd;
+    tilesXYList.push(picked.tilesXY);
+    edgesList.push(picked.edges);
+    sectionsXYList.push(picked.sectionsXY);
+    vertexClassesList.push(picked.vertexClasses);
+    styloRegionsXYList.push(picked.styloRegions);
+    // Replace the polyline's pts with the picked direction's pts so
+    // the output's vertex diagnostic matches the actually-built layout.
+    ptsList[pli] = picked.pts;
   }
 
   // ─── Output conversion — iterate per polyline, concatenate results ───
