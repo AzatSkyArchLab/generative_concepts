@@ -153,14 +153,31 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     var TOWER_SIZE_MAX_ROWS = { small: 7, medium: 9, large: 12 };
     var userSizeKey = (tileParams && tileParams.towerSize) || 'small';
     var maxRows = TOWER_SIZE_MAX_ROWS[userSizeKey] || 7;
-    // chooseRows: lat (E-W) axis → 7×7 square (regardless of user cap);
-    // lon (N-S) axis → largest of {7, 9, 12} that is BOTH ≤ user cap
-    // AND fits the available edge length.
-    function chooseTowerRows(orient, availLen) {
-      if (orient === 'lat') return 7;
-      if (maxRows >= 12 && availLen >= 12 * TOWER_CELL + 1) return 12;
-      if (maxRows >=  9 && availLen >=  9 * TOWER_CELL + 1) return 9;
-      return 7;
+    // chooseRows: pick the largest rows count (capped at user choice)
+    // that leaves ≥ (sd + 1m) of polyline edge on BOTH adjacent sides
+    // after the buffer trim. This stricter check (vs. just trim<edge)
+    // ensures the corner section's L-ring at the adjacent vertex has
+    // room to form WITHOUT extending back into the tower buffer.
+    //   • lat (E-W) — forced to 7 (always 7×7 square, per the established
+    //     TowerGenerator rule), but still validated.
+    //   • lon (N-S) — try {12, 9, 7} clipped to user cap.
+    // Returns 0 ⇒ no tower fits without polyline-into-buffer overlap.
+    var MIN_TAIL = sd + 1;   // ≈19 m at default sd=18
+    function chooseTowerRows(orient, edgeBLen, edgeALen) {
+      var across = TOWER_WIDTH;
+      var trimAcross = across + trimR;
+      // truncA (cols * cell + 15) is independent of rows; if edgeA
+      // doesn't have enough remaining after trim → no tower at all.
+      if (edgeALen - trimAcross < MIN_TAIL) return 0;
+      var pool = (orient === 'lat') ? [7] : [12, 9, 7];
+      for (var i = 0; i < pool.length; i++) {
+        var r = pool[i];
+        if (r > maxRows) continue;
+        var trimAlong = r * TOWER_CELL + trimR;
+        if (edgeBLen - trimAlong < MIN_TAIL) continue;
+        return r;
+      }
+      return 0;
     }
     var Npts0 = pts.length;
     var pv = pts[Npts0 - 1], v0 = pts[0], nv = pts[1];
@@ -229,11 +246,14 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           // Tower size: rows (along dN) depend on edge orientation —
           // lat (E-W) → 7×7 square; lon (N-S) → 12/9/7 by edge length.
           // Width across is always 7 cells = 23.1 m.
+          // chooseTowerRows validates both trims fit the adjacent edges
+          // so the polyline-trim gate below NEVER fails on tower size —
+          // returns 0 if no size fits (skip tower placement entirely).
           var t1Orient = classifySegment(v0, nv);   // edge B direction (= dN)
-          var t1Rows = chooseTowerRows(t1Orient, dN.L);
+          var t1Rows = chooseTowerRows(t1Orient, dN.L, dP.L);
           var t1Along = t1Rows * TOWER_CELL;
           var t1Across = TOWER_WIDTH;
-          for (var d = 0; d <= dN.L - t1Along - 0.5; d += 0.5) {
+          for (var d = 0; t1Rows > 0 && d <= dN.L - t1Along - 0.5; d += 0.5) {
             var ox = v0.x + d * dN.x, oy = v0.y + d * dN.y;
             var twD = [
               { x: ox, y: oy },
@@ -311,8 +331,11 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
               var nN_2 = { x: -dN_2.y, y: dN_2.x };
               var nP_2 = { x: -dP_2.y, y: dP_2.x };
               // T2 size mirrors T1 logic: rows by orientation of edge B at v_k.
+              // If chooseTowerRows returns 0 (no size fits), skip this vertex
+              // entirely so T2 doesn't end up placed without valid trim.
               var t2Orient = classifySegment(v0_2, nv_2);
-              var t2Rows = chooseTowerRows(t2Orient, dN_2.L);
+              var t2Rows = chooseTowerRows(t2Orient, dN_2.L, dP_2.L);
+              if (t2Rows === 0) continue;
               var t2Along = t2Rows * TOWER_CELL;
               var t2Across = TOWER_WIDTH;
               for (var d2 = 0; d2 <= dN_2.L - t2Along - 0.5; d2 += 0.5) {
