@@ -536,6 +536,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     }
     return {
       pts: ptsCand,
+      sideSign: sideCand,
       tilesXY: tiles,
       vertexClasses: vcs,
       edges: es,
@@ -554,6 +555,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   }
   var tilesXYList = [], edgesList = [], sectionsXYList = [];
   var vertexClassesList = [], styloRegionsXYList = [];
+  var sideSignList = [];   // picked sideSign per polyline (passed to LLU helpers below)
   for (var pli = 0; pli < ptsList.length; pli++) {
     var ptsi = ptsList[pli];
     var fwd = runPolylinePipeline(ptsi, sideSign);
@@ -564,6 +566,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     sectionsXYList.push(picked.sectionsXY);
     vertexClassesList.push(picked.vertexClasses);
     styloRegionsXYList.push(picked.styloRegions);
+    sideSignList.push(picked.sideSign);
     // Replace the polyline's pts with the picked direction's pts so
     // the output's vertex diagnostic matches the actually-built layout.
     ptsList[pli] = picked.pts;
@@ -662,7 +665,8 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       });
       var cll = proj.toLngLat(s.centroid.x, -s.centroid.y);
       var lluLngLat = null, lluCentroidLngLat = null;
-      var lluXY = computeSectionLLU(s, edgesO, sideSign, depth, buffer);
+      var sideO = sideSignList[po];   // picked direction's sideSign for this polyline
+      var lluXY = computeSectionLLU(s, edgesO, sideO, depth, buffer);
       if (lluXY) {
         lluLngLat = lluXY.map(function (p) {
           var ll = proj.toLngLat(p.x, -p.y);
@@ -678,7 +682,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var cvc = (s._ext && s._ext.kind === 'corner' && s._ext.vIdx != null && vertexClassesO[s._ext.vIdx])
         ? vertexClassesO[s._ext.vIdx].class : null;
       var isExternalCorner = (cvc === 'reflex');
-      var clu = computeCornerLLU(s, edgesO, tilesXYO, sideSign, step, depth, buffer, isExternalCorner);
+      var clu = computeCornerLLU(s, edgesO, tilesXYO, sideO, step, depth, buffer, isExternalCorner);
       if (clu) {
         stairLngLat = clu.stairXY.map(function (p) {
           var ll = proj.toLngLat(p.x, -p.y);
