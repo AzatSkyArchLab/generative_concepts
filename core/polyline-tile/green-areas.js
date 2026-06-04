@@ -34,31 +34,57 @@ function circlePoly(cx, cy, radius, segments) {
   return pts;
 }
 
+// Signed area (×2) of a ring of {x,y}. Sign gives winding; used to
+// orient the outward edge normal consistently regardless of the
+// coordinate frame (canvas y-down here).
+function ringSignedArea2(ring) {
+  var s = 0, n = ring.length;
+  for (var i = 0; i < n; i++) {
+    var a = ring[i], b = ring[(i + 1) % n];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return s;
+}
+
 function bufferRingShapes(ringXY, radius, segments) {
-  // ringXY is an array of {x,y}. Returns an array of polygon-clipping
-  // "polygons" ([[ring]]) — feed straight into polygonClipping.union.
+  // True Minkowski sum of the polygon with a disk of `radius`, built as
+  // the union of:
+  //   • the original polygon
+  //   • one straight RECTANGULAR SLAB per edge, offset outward by radius
+  //     → gives perfectly straight offset edges (no scalloping)
+  //   • one disk per vertex → rounds the convex corners
+  // The previous "disks every 0.3·r along each edge" approach produced
+  // a ragged (scalloped) boundary from overlapping low-poly circles.
   var shapes = [];
-  // Original polygon — close the ring for polygon-clipping (expects
-  // first === last vertex on each ring).
+  var N = ringXY.length;
+  // Original polygon — close the ring for polygon-clipping.
   var orig = ringXY.map(function (p) { return [r4(p.x), r4(p.y)]; });
   orig.push([r4(ringXY[0].x), r4(ringXY[0].y)]);
   shapes.push([orig]);
-  // Disks at every vertex.
-  for (var i = 0; i < ringXY.length; i++) {
-    shapes.push([circlePoly(ringXY[i].x, ringXY[i].y, radius, segments)]);
-  }
-  // Disks along every edge at regular intervals.
-  var spacing = Math.max(1, radius * 0.3);
-  for (var j = 0; j < ringXY.length; j++) {
-    var a = ringXY[j], b = ringXY[(j + 1) % ringXY.length];
+
+  // Outward normal sign: exterior is to the right of the travel
+  // direction for a CCW ring (signedArea > 0), to the left for CW.
+  var sgn = ringSignedArea2(ringXY) >= 0 ? 1 : -1;
+
+  for (var j = 0; j < N; j++) {
+    var a = ringXY[j], b = ringXY[(j + 1) % N];
     var dx = b.x - a.x, dy = b.y - a.y;
     var L = Math.hypot(dx, dy);
+    // Disk at vertex a (rounds the corner).
+    shapes.push([circlePoly(a.x, a.y, radius, segments)]);
     if (L < 1e-6) continue;
-    var n = Math.max(1, Math.floor(L / spacing));
-    for (var k = 1; k < n; k++) {
-      var t = k / n;
-      shapes.push([circlePoly(a.x + dx * t, a.y + dy * t, radius, segments)]);
-    }
+    var ux = dx / L, uy = dy / L;
+    // Outward unit normal: rotate travel direction by ∓90° by winding.
+    var nx = sgn * uy, ny = -sgn * ux;
+    // Slab: A → B → B+r·n → A+r·n (closed). Straight outer edge.
+    var slab = [
+      [r4(a.x), r4(a.y)],
+      [r4(b.x), r4(b.y)],
+      [r4(b.x + radius * nx), r4(b.y + radius * ny)],
+      [r4(a.x + radius * nx), r4(a.y + radius * ny)]
+    ];
+    slab.push([slab[0][0], slab[0][1]]);
+    shapes.push([slab]);
   }
   return shapes;
 }
@@ -78,7 +104,7 @@ function bufferRingShapes(ringXY, radius, segments) {
  */
 export function computeGreenAreas(polygonRing, sectionRings, towerRings, sectionBuffer, towerBuffer) {
   if (!polygonRing || polygonRing.length < 3) return [];
-  var SEG = 12;   // disk smoothness
+  var SEG = 24;   // vertex-disk smoothness (only at corners now → cheap)
 
   // Gather buffered-shape polygons (each shape is a list of rings —
   // polygon-clipping treats the array as a "polygon", and we union all
