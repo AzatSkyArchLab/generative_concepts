@@ -167,12 +167,13 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     // hard block — the "size doesn't change" bug was the old lat→7
     // branch (now removed), NOT this tail guard.
     //
-    // Tail requirement = SECTION_MIN_LON triples + 1 cell margin, i.e.
-    // the shortest run that partitionTriples will keep as a section.
-    // (Smaller than the old sd+1 so size varies on more blocks.)
+    // Tail requirement = sd + 1 m ≈ 19 m — the value that placed towers
+    // AND kept sections forming on realistic blocks before the tower-
+    // size work. (SECTION_MIN_LON+1)·step ≈ 26 m was too strict and made
+    // towers vanish on ~70 m blocks; sd+1 places on edges ≥ 57 m.
     // Orient is informational; the long side aligns with edge dN.
     // Returns 0 only when even the smallest tower can't leave a tail.
-    var MIN_TAIL = (SECTION_MIN_LON + 1) * step;   // ≈ 26 m at step 3.3
+    var MIN_TAIL = sd + 1;   // ≈ 19 m at default sd = 18
     function chooseTowerRows(orient, edgeBLen, edgeALen) {
       var trimAcross = TOWER_WIDTH + trimR;
       if (edgeALen - trimAcross < MIN_TAIL) return 0;   // perpendicular edge too short
