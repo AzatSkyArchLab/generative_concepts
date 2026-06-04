@@ -545,6 +545,71 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       var sec = buildSections(es, tiles, step, depth, buffer, sideCand, isPolygon);
       ss = sec.sections;
       var vkLocal = sec.validKeys;
+
+      // ── Buffer removes WHOLE sections (preserve strict triple shape) ──
+      // A section is a strict set of triples (outer + corridor + inner
+      // columns) forming one clean rectangle / L-ring. If the tower
+      // buffer would delete ANY of its cells the section can no longer
+      // keep that shape — so we remove the ENTIRE section from the axis
+      // rather than leave a broken, non-rectangular remnant. Detection:
+      // collect every cell centroid inside a buffer, then drop any
+      // section whose polygon contains at least one such centroid.
+      if (towerBufferContains) {
+        // Cell centroids inside a buffer (case b — a big section engulfing
+        // the buffer). NOT a gate: the per-section check below ALWAYS
+        // runs, because the axis trim may have already removed the cells
+        // while a section CORNER still pokes into the rounded buffer.
+        var bufCtrs = [];
+        for (var bt = 0; bt < tiles.length; bt++) {
+          var btile = tiles[bt];
+          if (btile.kind !== 'cell' && btile.kind !== 'corridor') continue;
+          var bctr = tileCentroid({ corners: btile.corners });
+          if (towerBufferContains(bctr)) bufCtrs.push(bctr);
+        }
+        var keptSecs = [];
+        var removedPolys = [];
+        for (var s2 = 0; s2 < ss.length; s2++) {
+          var sct = ss[s2];
+          var hit = false;
+          // (a) any vertex of the section polygon inside the buffer —
+          //     catches a section corner poking into the rounded buffer
+          //     even when no cell centroid is inside.
+          for (var pa = 0; pa < sct.polys.length && !hit; pa++) {
+            var ringA = sct.polys[pa];
+            for (var va = 0; va < ringA.length; va++) {
+              if (towerBufferContains(ringA[va])) { hit = true; break; }
+            }
+          }
+          // (b) any buffered cell centroid inside the section polygon —
+          //     catches a large section that engulfs the buffer.
+          for (var bi3 = 0; bi3 < bufCtrs.length && !hit; bi3++) {
+            for (var pj2 = 0; pj2 < sct.polys.length; pj2++) {
+              if (pointInPolygon(bufCtrs[bi3], sct.polys[pj2])) { hit = true; break; }
+            }
+          }
+          if (hit) {
+            for (var pp = 0; pp < sct.polys.length; pp++) removedPolys.push(sct.polys[pp]);
+          } else {
+            keptSecs.push(sct);
+          }
+        }
+        ss = keptSecs;
+        // Drop EVERY tile inside a removed section's polygon (all its
+        // outer/corridor/inner cells) so the whole section vanishes.
+        if (removedPolys.length) {
+          for (var rt = 0; rt < tiles.length; rt++) {
+            var rtile = tiles[rt];
+            var rc = tileCentroid({ corners: rtile.corners });
+            for (var rp = 0; rp < removedPolys.length; rp++) {
+              if (pointInPolygon(rc, removedPolys[rp])) { rtile._dropFromOutput = true; break; }
+            }
+          }
+        }
+      }
+
+      // ── Stylobate marking for remaining non-section cells ──
+      // (Kept sections are now guaranteed buffer-free, so any cell still
+      // inside the buffer here is a non-section leftover → drop it.)
       var secPolysLocal = [];
       for (var sii = 0; sii < ss.length; sii++) {
         for (var pj0 = 0; pj0 < ss[sii].polys.length; pj0++) {
@@ -553,35 +618,32 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       }
       for (var tj = 0; tj < tiles.length; tj++) {
         var tt0 = tiles[tj];
+        if (tt0._dropFromOutput) continue;
         var isReg0 = (tt0.kind === 'cell' || tt0.kind === 'corridor') &&
           tt0.edgeIdx != null && tt0.cellIdx != null && tt0.cellIdx >= 0;
         if (!isReg0) continue;
-        if (vkLocal[tt0.edgeIdx + ':' + tt0.cellIdx] === true) continue;
         var ctr0 = tileCentroid({ corners: tt0.corners });
+        if (towerBufferContains && towerBufferContains(ctr0)) {
+          // Non-section cell still inside the buffer → drop (clean zone).
+          tt0._dropFromOutput = true;
+          continue;
+        }
+        if (vkLocal[tt0.edgeIdx + ':' + tt0.cellIdx] === true) continue;
         var inside0 = false;
         for (var pj1 = 0; pj1 < secPolysLocal.length; pj1++) {
           if (pointInPolygon(ctr0, secPolysLocal[pj1])) { inside0 = true; break; }
         }
-        if (!inside0) {
-          if (towerBufferContains && towerBufferContains(ctr0)) {
-            tt0._dropFromOutput = true;
-          } else {
-            tt0.stylobate = true;
-          }
-        }
+        if (!inside0) tt0.stylobate = true;
       }
-      // Buffer ALWAYS trims sections: drop ANY tile (cell / corridor /
-      // wedge / remnant — even one belonging to a kept section) whose
-      // centroid is inside a tower buffer. The 1-D axis trim above can't
-      // guarantee the 2-D section rectangle clears the rounded buffer on
-      // tight blocks; this final cull does, so no colored cell ever
-      // renders inside the tower's no-build zone.
+      // Catch-all: drop ANY remaining tile (wedge / remnant / corner-fill
+      // — kinds the cell/corridor stylobate pass skips) whose centroid is
+      // inside a buffer. Kept-section cells are already guaranteed clear
+      // (a section is removed wholesale if any of its cells/corners hit
+      // the buffer), so this only sweeps non-section leftover geometry.
       if (towerBufferContains) {
         for (var tk = 0; tk < tiles.length; tk++) {
           var tkt = tiles[tk];
           if (tkt._dropFromOutput) continue;
-          if (tkt.kind !== 'cell' && tkt.kind !== 'corridor' &&
-              tkt.kind !== 'wedge' && tkt.kind !== 'remnant') continue;
           var ck = tileCentroid({ corners: tkt.corners });
           if (towerBufferContains(ck)) tkt._dropFromOutput = true;
         }
