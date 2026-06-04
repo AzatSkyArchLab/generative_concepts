@@ -158,24 +158,23 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     var TOWER_SIZE_MAX_ROWS = { small: 7, medium: 9, large: 12 };
     var userSizeKey = (tileParams && tileParams.towerSize) || 'small';
     var maxRows = TOWER_SIZE_MAX_ROWS[userSizeKey] || 7;
-    // chooseRows: pick the largest rows count (capped at user choice)
-    // that leaves ≥ (sd + 1m) of polyline edge on BOTH adjacent sides
-    // after the buffer trim. Orient is informational only — the user's
-    // size choice applies to BOTH lat and lon edges (the long side of
-    // the tower simply aligns with the polygon edge dN in either case).
-    // Returns 0 ⇒ no tower fits without polyline-into-buffer overlap.
-    var MIN_TAIL = sd + 1;   // ≈19 m at default sd=18
+    // chooseRows: honour the user's size choice (maxRows = 7/9/12), only
+    // downgrading when the tower is physically LONGER than the polygon
+    // edge it sits on. The sole hard constraint is "footprint inside the
+    // polygon" — enforced by towerFitCheck during the step-back loop —
+    // so here we just guarantee the step-back loop has room (the tower
+    // can't be longer than the edge). No buffer-tail (MIN_TAIL) guard:
+    // that previously clamped large→medium→small on realistic blocks,
+    // which read as "changing tower size does nothing".
+    // Orient is informational; the long side aligns with edge dN either
+    // way. Returns 0 only when even the smallest tower (7) is longer
+    // than the edge.
     function chooseTowerRows(orient, edgeBLen, edgeALen) {
-      var across = TOWER_WIDTH;
-      var trimAcross = across + trimR;
-      if (edgeALen - trimAcross < MIN_TAIL) return 0;
       var pool = [12, 9, 7];
       for (var i = 0; i < pool.length; i++) {
         var r = pool[i];
-        if (r > maxRows) continue;
-        var trimAlong = r * TOWER_CELL + trimR;
-        if (edgeBLen - trimAlong < MIN_TAIL) continue;
-        return r;
+        if (r > maxRows) continue;                  // respect user cap
+        if (r * TOWER_CELL <= edgeBLen - 0.5) return r;  // fits along edge
       }
       return 0;
     }
