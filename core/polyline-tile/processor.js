@@ -159,31 +159,22 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     var userSizeKey = (tileParams && tileParams.towerSize) || 'small';
     var maxRows = TOWER_SIZE_MAX_ROWS[userSizeKey] || 7;
     // chooseRows: the user's size choice (maxRows = 7/9/12) is the CAP;
-    // we return the largest size ≤ cap that still leaves a valid section
-    // tail on BOTH adjacent edges after the buffer trim. Picking the
-    // largest-that-fits means the size visibly varies per edge (a big
-    // edge keeps the requested large; a short edge auto-downgrades so
-    // sections + buffer trim stay intact). This is a DOWNGRADE, never a
-    // hard block — the "size doesn't change" bug was the old lat→7
-    // branch (now removed), NOT this tail guard.
-    //
-    // Tail requirement = sd + 1 m ≈ 19 m — the value that placed towers
-    // AND kept sections forming on realistic blocks before the tower-
-    // size work. (SECTION_MIN_LON+1)·step ≈ 26 m was too strict and made
-    // towers vanish on ~70 m blocks; sd+1 places on edges ≥ 57 m.
+    // return the largest size ≤ cap that physically fits ALONG the edge
+    // (rows·cell ≤ edgeB − 0.5). There is NO section-tail / buffer guard
+    // here — the tower's only placement constraint is "footprint inside
+    // the polygon" (enforced by towerFitCheck in the step-back loop).
+    // The buffer trim of the axis is independent: it always cuts the
+    // polyline (arc-length walk below, robust to overshoot), and the
+    // standard polyline-tile builder lays sections on whatever remains —
+    // a short tail simply yields fewer sections, never a broken layout.
     // Orient is informational; the long side aligns with edge dN.
-    // Returns 0 only when even the smallest tower can't leave a tail.
-    var MIN_TAIL = sd + 1;   // ≈ 19 m at default sd = 18
+    // Returns 0 only when even the smallest tower is longer than edgeB.
     function chooseTowerRows(orient, edgeBLen, edgeALen) {
-      var trimAcross = TOWER_WIDTH + trimR;
-      if (edgeALen - trimAcross < MIN_TAIL) return 0;   // perpendicular edge too short
       var pool = [12, 9, 7];
       for (var i = 0; i < pool.length; i++) {
         var r = pool[i];
         if (r > maxRows) continue;                  // respect user cap
-        var trimAlong = r * TOWER_CELL + trimR;
-        if (edgeBLen - trimAlong < MIN_TAIL) continue;
-        return r;
+        if (r * TOWER_CELL <= edgeBLen - 0.5) return r;  // fits along edge
       }
       return 0;
     }
@@ -408,15 +399,52 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             if (t2TruncB === 0) t2TruncB = sParam2 + trimR;
           }
         }
-        if (truncA > 0 && truncB > 0 && truncA < dP.L * 0.95 && truncB < dN.L * 0.95) {
-          var QA = { x: v0.x - truncA * dP.x, y: v0.y - truncA * dP.y };
-          var QB = { x: v0.x + truncB * dN.x, y: v0.y + truncB * dN.y };
-          // T2 is "valid for splitting" only if its trim distances are
-          // both > 0, leave enough edge on both sides, and we captured
-          // a valid interior vertex index. Otherwise the single-polyline
-          // path runs and T2 stays visual-only.
+        // ─── Robust arc-length cut of the polyline by the tower buffer ───
+        // Walk forward from v0 (toward pts[1], pts[2]…) by truncB to find
+        // QB, and backward from v0 (toward pts[N-1], pts[N-2]…) by truncA
+        // to find QA. Vertices the cut passes are DROPPED, so the buffer
+        // always trims the axis cleanly — even when it reaches past the
+        // adjacent vertex (big tower / short edge). This replaces the old
+        // edge-local cut + 0.95 reject gate that left the polyline
+        // un-trimmed (sections then crossed the buffer).
+        var cutFwd = function (dist) {
+          var rem = dist;
+          for (var fi = 0; fi < Npts0 - 1; fi++) {
+            var a = pts[fi], b = pts[fi + 1];
+            var L = Math.hypot(b.x - a.x, b.y - a.y);
+            if (L < 1e-9) continue;
+            if (rem <= L) {
+              var t = rem / L;
+              return { pt: { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }, firstKeep: fi + 1 };
+            }
+            rem -= L;
+          }
+          return null;
+        };
+        var cutBwd = function (dist) {
+          var rem = dist;
+          for (var bi = Npts0 - 1; bi >= 1; bi--) {
+            var a = pts[(bi + 1) % Npts0];   // endpoint nearer v0
+            var b = pts[bi];                 // endpoint further back
+            var L = Math.hypot(b.x - a.x, b.y - a.y);
+            if (L < 1e-9) continue;
+            if (rem <= L) {
+              var t = rem / L;
+              return { pt: { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }, lastKeep: bi };
+            }
+            rem -= L;
+          }
+          return null;
+        };
+        var fwd = (truncB > 0) ? cutFwd(truncB) : null;
+        var bwd = (truncA > 0) ? cutBwd(truncA) : null;
+        if (fwd && bwd && fwd.firstKeep <= bwd.lastKeep) {
+          var QB = fwd.pt, QA = bwd.pt;
+          var firstKeep = fwd.firstKeep, lastKeep = bwd.lastKeep;
+          // T2 split is valid only if its diagonal vertex lies strictly
+          // inside the kept range and its own trims fit its edges.
           var t2Valid =
-            !!towerXY2 && t2VertIdx >= 2 && t2VertIdx <= Npts0 - 2 &&
+            !!towerXY2 && t2VertIdx > firstKeep && t2VertIdx < lastKeep &&
             t2TruncA > 0 && t2TruncB > 0 &&
             t2TruncA < t2dP.L * 0.95 && t2TruncB < t2dN.L * 0.95;
           if (t2Valid) {
@@ -424,15 +452,15 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             var Qin  = { x: vK.x - t2TruncA * t2dP.x, y: vK.y - t2TruncA * t2dP.y };
             var Qout = { x: vK.x + t2TruncB * t2dN.x, y: vK.y + t2TruncB * t2dN.y };
             var polyA = [QB];
-            for (var ai = 1; ai < t2VertIdx; ai++) polyA.push(pts[ai]);
+            for (var ai = firstKeep; ai < t2VertIdx; ai++) polyA.push(pts[ai]);
             polyA.push(Qin);
             var polyB = [Qout];
-            for (var bi2 = t2VertIdx + 1; bi2 < Npts0; bi2++) polyB.push(pts[bi2]);
+            for (var bi2 = t2VertIdx + 1; bi2 <= lastKeep; bi2++) polyB.push(pts[bi2]);
             polyB.push(QA);
             ptsList = [polyA, polyB];
           } else {
             var newPts = [QB];
-            for (var i = 1; i < Npts0; i++) newPts.push(pts[i]);
+            for (var i = firstKeep; i <= lastKeep; i++) newPts.push(pts[i]);
             newPts.push(QA);
             ptsList = [newPts];
           }
@@ -540,6 +568,22 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           } else {
             tt0.stylobate = true;
           }
+        }
+      }
+      // Buffer ALWAYS trims sections: drop ANY tile (cell / corridor /
+      // wedge / remnant — even one belonging to a kept section) whose
+      // centroid is inside a tower buffer. The 1-D axis trim above can't
+      // guarantee the 2-D section rectangle clears the rounded buffer on
+      // tight blocks; this final cull does, so no colored cell ever
+      // renders inside the tower's no-build zone.
+      if (towerBufferContains) {
+        for (var tk = 0; tk < tiles.length; tk++) {
+          var tkt = tiles[tk];
+          if (tkt._dropFromOutput) continue;
+          if (tkt.kind !== 'cell' && tkt.kind !== 'corridor' &&
+              tkt.kind !== 'wedge' && tkt.kind !== 'remnant') continue;
+          var ck = tileCentroid({ corners: tkt.corners });
+          if (towerBufferContains(ck)) tkt._dropFromOutput = true;
         }
       }
       sr = buildStylobateRegions(tiles, es, sideCand, 2 * depth + buffer);

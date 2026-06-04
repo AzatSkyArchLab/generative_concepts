@@ -19,10 +19,29 @@ import polygonClipping from 'polygon-clipping';
 // at every vertex. Each disk = `segments`-sided polygon. Granularity:
 // disks every `radius * 0.3` metres along an edge; 12 segments per disk
 // (good visual smoothness, reasonable cost).
-// Round to 4 decimals (~0.1 mm precision) to suppress polygon-clipping's
+// Round to 1 decimal (~10 cm) to suppress polygon-clipping's
 // "Unable to find segment in SweepLine tree" errors that come from two
-// almost-coincident vertices differing only in their 14th decimal.
-function r4(v) { return Math.round(v * 10000) / 10000; }
+// almost-coincident vertices differing only in their lowest bits. The
+// many overlapping slab/disk corners of adjacent sections are the main
+// source; snapping them to a 10 cm grid collapses the near-duplicates.
+// 10 cm is far below any meaningful urban dimension.
+function r4(v) { return Math.round(v * 10) / 10; }
+
+// Drop consecutive coincident points from a closed ring (polygon-clipping
+// chokes on zero-length edges). Keeps the ring closed.
+function dedupeRing(ring) {
+  var out = [];
+  for (var i = 0; i < ring.length; i++) {
+    var p = ring[i];
+    var q = out.length ? out[out.length - 1] : null;
+    if (!q || Math.abs(p[0] - q[0]) > 1e-9 || Math.abs(p[1] - q[1]) > 1e-9) out.push(p);
+  }
+  if (out.length >= 2) {
+    var f = out[0], l = out[out.length - 1];
+    if (Math.abs(f[0] - l[0]) > 1e-9 || Math.abs(f[1] - l[1]) > 1e-9) out.push([f[0], f[1]]);
+  }
+  return out;
+}
 
 function circlePoly(cx, cy, radius, segments) {
   var pts = [];
@@ -57,10 +76,11 @@ function bufferRingShapes(ringXY, radius, segments) {
   // a ragged (scalloped) boundary from overlapping low-poly circles.
   var shapes = [];
   var N = ringXY.length;
-  // Original polygon — close the ring for polygon-clipping.
+  // Original polygon — close + dedupe the ring for polygon-clipping.
   var orig = ringXY.map(function (p) { return [r4(p.x), r4(p.y)]; });
   orig.push([r4(ringXY[0].x), r4(ringXY[0].y)]);
-  shapes.push([orig]);
+  orig = dedupeRing(orig);
+  if (orig.length >= 4) shapes.push([orig]);
 
   // Outward normal sign: exterior is to the right of the travel
   // direction for a CCW ring (signedArea > 0), to the left for CW.
@@ -132,23 +152,34 @@ export function computeGreenAreas(polygonRing, sectionRings, towerRings, section
     return [sitePoly];
   }
 
-  // Union of all buffered shapes.
-  var occUnion;
-  try {
-    occUnion = polygonClipping.union.apply(polygonClipping, allShapes);
-  } catch (err) {
-    if (typeof console !== 'undefined') console.warn('[green-areas] union failed:', err && err.message);
-    return [];
+  // Union of all buffered shapes — done INCREMENTALLY so a single
+  // numerically-degenerate shape (polygon-clipping's "Unable to find
+  // segment in SweepLine tree") is skipped instead of killing the whole
+  // green layer. Far more robust than one big union() call.
+  var occUnion = null;
+  for (var ai = 0; ai < allShapes.length; ai++) {
+    var shp = allShapes[ai];
+    if (occUnion === null) { occUnion = [shp]; continue; }
+    try {
+      occUnion = polygonClipping.union(occUnion, [shp]);
+    } catch (err) {
+      // skip this shape; keep the accumulated union
+    }
   }
   if (!occUnion || occUnion.length === 0) return [sitePoly];
 
-  // Difference: site \ occupied.
-  var green;
+  // Difference: site \ occupied. Retry once with a re-unioned occ if the
+  // first attempt hits a degenerate edge.
+  var green = null;
   try {
     green = polygonClipping.difference([sitePoly], occUnion);
   } catch (err2) {
-    if (typeof console !== 'undefined') console.warn('[green-areas] difference failed:', err2 && err2.message);
-    return [];
+    try {
+      green = polygonClipping.difference([sitePoly], polygonClipping.union(occUnion));
+    } catch (err3) {
+      if (typeof console !== 'undefined') console.warn('[green-areas] difference failed:', err3 && err3.message);
+      return [];
+    }
   }
   return green || [];
 }
