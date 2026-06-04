@@ -44,6 +44,7 @@
 
 import { createProjection } from '../geo/projection.js';
 import { classifyCells, generateCellsFromFootprint } from '../tower/TowerGenerator.js';
+import { computeGreenAreas } from './green-areas.js';
 
 // ─── Tunable constants (mirror prototype) ──────────────────────────
 var LAT_LON_THRESHOLD = 0.7;   // |dot with N| ≥ 0.7 → meridional
@@ -93,6 +94,10 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   // Normalize polygon to CW in canvas (= CCW in math). Matches the
   // prototype's finish() routine.
   if (isPolygon && signedArea(pts) < 0) pts.reverse();
+  // Preserve the original (unmutated) polygon ring for downstream
+  // green-area subtraction — pts is later overwritten by polyline
+  // conversion (QA/QB cut) and we still need the closed site outline.
+  var origPolyRing = isPolygon ? pts.map(function (p) { return { x: p.x, y: p.y }; }) : null;
 
   // sideSign: for polygon, after CW-canvas normalization, inside = +1.
   // For polyline, follows the user's chosen extrusion side.
@@ -824,6 +829,46 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   var outTower  = buildTowerOutput(towerXY,  towerMeta);
   var outTower2 = buildTowerOutput(towerXY2, towerMeta2);
 
+  // ─── Green courtyard / common areas ───
+  // Inflate every section polygon by 9.2 m (5 + 4.2) and every tower
+  // footprint by 14 m (8 + 6), union the result, subtract from the
+  // site polygon. What's left is the publicly-usable "green" area.
+  // Only meaningful in polygon mode (open polylines have no site
+  // outline to subtract from).
+  var outGreen = [];
+  if (origPolyRing && origPolyRing.length >= 3) {
+    var sectionRingsXY = [];
+    for (var poG = 0; poG < sectionsXYList.length; poG++) {
+      var secsG = sectionsXYList[poG];
+      for (var sgi = 0; sgi < secsG.length; sgi++) {
+        var sPolys = secsG[sgi].polys || [];
+        for (var spi = 0; spi < sPolys.length; spi++) {
+          sectionRingsXY.push(sPolys[spi]);
+        }
+      }
+    }
+    var towerRingsXY = [];
+    if (towerXY)  towerRingsXY.push(towerXY);
+    if (towerXY2) towerRingsXY.push(towerXY2);
+    var greenXY = computeGreenAreas(origPolyRing, sectionRingsXY, towerRingsXY, 9.2, 14);
+    // greenXY is MultiPolygon: Array<Polygon>; Polygon = Array<Ring>;
+    // Ring = Array<[x,y]>. Convert to lng/lat (with y-flip back).
+    for (var gpi = 0; gpi < greenXY.length; gpi++) {
+      var poly = greenXY[gpi];
+      var polyLL = [];
+      for (var gri = 0; gri < poly.length; gri++) {
+        var ring = poly[gri];
+        var ringLL = [];
+        for (var gci = 0; gci < ring.length; gci++) {
+          var ll = proj.toLngLat(ring[gci][0], -ring[gci][1]);
+          ringLL.push([ll[0], ll[1]]);
+        }
+        polyLL.push(ringLL);
+      }
+      outGreen.push(polyLL);
+    }
+  }
+
   return {
     tiles: outTiles,
     edges: outEdgesMeta,
@@ -832,6 +877,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     stylobate: outStylobate,
     tower: outTower,
     tower2: outTower2,
+    greenAreas: outGreen,
     projection: { originLng: origin[0], originLat: origin[1] }
   };
 }

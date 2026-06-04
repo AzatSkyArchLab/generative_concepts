@@ -21,6 +21,9 @@ var SRC_TILES = 'ptl-tiles';
 var SRC_AXIS = 'ptl-axis';
 var SRC_VERTS = 'ptl-vertices';
 var SRC_SECTIONS = 'ptl-sections';
+var SRC_GREEN = 'ptl-green';
+var LAYER_GREEN_FILL = 'ptl-green-fill';
+var LAYER_GREEN_LINE = 'ptl-green-line';
 var LAYER_FILL = 'ptl-fill';
 var LAYER_LINE_CELL = 'ptl-line-cell';
 var LAYER_AXIS = 'ptl-axis-line';
@@ -91,10 +94,11 @@ var module_ = {
     if (!map) return;
     [LAYER_SECTION_LABEL, LAYER_SECTION_LINE, LAYER_SECTION_FILL,
      LAYER_VERT_DOT, LAYER_VERT_HALO,
-     LAYER_LINE_CELL, LAYER_FILL, LAYER_AXIS].forEach(function (id) {
+     LAYER_LINE_CELL, LAYER_FILL, LAYER_AXIS,
+     LAYER_GREEN_LINE, LAYER_GREEN_FILL].forEach(function (id) {
       if (map.getLayer(id)) map.removeLayer(id);
     });
-    [SRC_TILES, SRC_AXIS, SRC_VERTS, SRC_SECTIONS].forEach(function (id) {
+    [SRC_TILES, SRC_AXIS, SRC_VERTS, SRC_SECTIONS, SRC_GREEN].forEach(function (id) {
       if (map.getSource(id)) map.removeSource(id);
     });
   },
@@ -109,6 +113,21 @@ var module_ = {
     if (!map) { console.warn('[polyline-tile] no map — skip setup'); return; }
 
     var EMPTY = { type: 'FeatureCollection', features: [] };
+    // Green courtyard layer — site \ (buffered sections + buffered towers).
+    // Added FIRST so it sits below all other ptl-* layers in z-order.
+    mm.addGeoJSONSource(SRC_GREEN, EMPTY);
+    mm.addLayer({
+      id: LAYER_GREEN_FILL,
+      type: 'fill',
+      source: SRC_GREEN,
+      paint: { 'fill-color': 'rgba(34, 197, 94, 0.35)', 'fill-opacity': 1 }
+    });
+    mm.addLayer({
+      id: LAYER_GREEN_LINE,
+      type: 'line',
+      source: SRC_GREEN,
+      paint: { 'line-color': 'rgba(22, 101, 52, 0.6)', 'line-width': 1 }
+    });
     mm.addGeoJSONSource(SRC_AXIS,  EMPTY);
     mm.addGeoJSONSource(SRC_TILES, EMPTY);
     mm.addGeoJSONSource(SRC_VERTS, EMPTY);
@@ -318,6 +337,7 @@ var module_ = {
     var axisFeats = [];
     var vertFeats = [];
     var sectionFeats = [];
+    var greenFeats = [];
     var sectionSeq = 0;  // global counter for palette cycling
 
     for (var i = 0; i < all.length; i++) {
@@ -367,6 +387,21 @@ var module_ = {
           ? { type: 'Polygon', coordinates: f.geometry.coordinates }
           : { type: 'LineString', coordinates: f.geometry.coordinates }
       });
+
+      // Green courtyard / common areas — site polygon minus
+      // (sections inflated by 9.2 m + towers inflated by 14 m).
+      // Each entry in result.greenAreas is a Polygon = [outerRing, ...holes].
+      if (result.greenAreas && result.greenAreas.length) {
+        for (var ga = 0; ga < result.greenAreas.length; ga++) {
+          var polyLL = result.greenAreas[ga];
+          if (!polyLL || !polyLL.length) continue;
+          greenFeats.push({
+            type: 'Feature',
+            properties: { featureId: p.id },
+            geometry: { type: 'Polygon', coordinates: polyLL }
+          });
+        }
+      }
 
       // Vertex diagnostic features: TWO Points per polyline vertex.
       //   role='inner' — on the axis (V itself), the section's inner corner
@@ -621,6 +656,7 @@ var module_ = {
     mm.updateGeoJSONSource(SRC_AXIS,  { type: 'FeatureCollection', features: axisFeats });
     mm.updateGeoJSONSource(SRC_VERTS, { type: 'FeatureCollection', features: vertFeats });
     mm.updateGeoJSONSource(SRC_SECTIONS, { type: 'FeatureCollection', features: sectionFeats });
+    mm.updateGeoJSONSource(SRC_GREEN, { type: 'FeatureCollection', features: greenFeats });
     console.log('[polyline-tile] refresh —',
       tileFeats.length, 'tiles,',
       axisFeats.length, 'axes,',
