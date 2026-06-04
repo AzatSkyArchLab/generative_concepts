@@ -755,11 +755,33 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     }
     return total;
   }
+  // Trim too-short terminal segments off an OPEN polyline. If the
+  // segment at the corner at the START (or END) of the polyline is
+  // shorter than a minimal corner can occupy, that segment is removed
+  // and the layout begins at the NEXT vertex — applied recursively from
+  // both ends. MIN_CORNER_SEG = one section depth (≈18 m): a wall
+  // shorter than the building is deep can't host a proper corner turn.
+  function trimShortTerminalSegments(p) {
+    var MIN_CORNER_SEG = 2 * depth + buffer;   // = sd
+    var out = p.slice();
+    while (out.length > 2) {
+      var d0 = Math.hypot(out[1].x - out[0].x, out[1].y - out[0].y);
+      if (d0 < MIN_CORNER_SEG) out.shift(); else break;
+    }
+    while (out.length > 2) {
+      var n = out.length;
+      var dN2 = Math.hypot(out[n - 1].x - out[n - 2].x, out[n - 1].y - out[n - 2].y);
+      if (dN2 < MIN_CORNER_SEG) out.pop(); else break;
+    }
+    return out;
+  }
+
   var tilesXYList = [], edgesList = [], sectionsXYList = [];
   var vertexClassesList = [], styloRegionsXYList = [];
   var sideSignList = [];   // picked sideSign per polyline (passed to LLU helpers below)
   for (var pli = 0; pli < ptsList.length; pli++) {
     var ptsi = ptsList[pli];
+    if (!isPolygon) ptsi = trimShortTerminalSegments(ptsi);   // open polyline only
     var fwd = runPolylinePipeline(ptsi, sideSign);
     var rev = runPolylinePipeline(ptsi.slice().reverse(), -sideSign);
     var picked = scorePipelineResult(rev) > scorePipelineResult(fwd) ? rev : fwd;
