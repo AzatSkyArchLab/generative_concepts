@@ -563,12 +563,15 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       // a broken remnant — instead:
       //   • STRAIGHT section: drop the columns whose triple touches the
       //     buffer, keep the longest surviving CONTIGUOUS run as a
-      //     smaller rectangle — but ONLY if it still has ≥ MIN_KEEP_ROWS
-      //     (7) cells; otherwise drop the whole section.
+      //     smaller rectangle — but ONLY if it still has at least one
+      //     WHOLE natural section's worth of cells; otherwise drop the
+      //     whole section.
       //   • CORNER section (L-ring at a polygon vertex): can't be trimmed
       //     into a clean rectangle, so it's removed whole if touched.
-      // "≥7 cells in a row → keep" applies regardless of lat / lon.
-      var MIN_KEEP_ROWS = 7;
+      // Keep-threshold is the section's NATURAL minimum: lat = 6
+      // (SECTION_LAT_LEN), lon = 7 (SECTION_MIN_LON). Using a flat 7 for
+      // both wiped natural 6-cell lat sections on any buffer contact,
+      // which made grouping vanish on small/medium blocks.
       if (towerBufferContains) {
         var sdLocal = 2 * depth + buffer;
         // Does the FULL-depth column at one outer cell touch a buffer?
@@ -598,7 +601,8 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             }
             if (!anyHit) { keptSecs.push(sct); continue; }   // buffer doesn't touch it
             var survivors = run.slice(bestS, bestE + 1);
-            if (survivors.length >= MIN_KEEP_ROWS) {
+            var minKeep = (edge.type === 'lat') ? SECTION_LAT_LEN : SECTION_MIN_LON;
+            if (survivors.length >= minKeep) {
               // Rebuild the section as the trimmed rectangle.
               var newRect = runRect(edge, survivors, sideCand, sdLocal);
               sct.polys = [newRect];
