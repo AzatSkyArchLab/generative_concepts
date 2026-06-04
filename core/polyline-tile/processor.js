@@ -638,6 +638,39 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
         }
       }
 
+      // ── Drop tiny terminal stubs ──
+      // An open polyline's FIRST (0) and LAST (N-1) edge may be a sliver
+      // too short to host a section OR contribute to the adjacent corner
+      // element (e.g. left over after a big tower trim, or a short leg of
+      // the drawn shape). If such a terminal edge ends up covered by NO
+      // section, its cells are an orphaned stub — drop them entirely so
+      // the end of the axis stays EMPTY instead of showing a stray
+      // stylobate / remnant fragment.
+      if (!isPolygon && es.length >= 2) {
+        var coveredEdge = {};
+        for (var scv = 0; scv < ss.length; scv++) {
+          var xext = ss[scv]._ext;
+          if (!xext) continue;
+          if (xext.kind === 'straight') coveredEdge[xext.ei] = true;
+          else if (xext.kind === 'corner') { coveredEdge[xext.eiA] = true; coveredEdge[xext.eiB] = true; }
+        }
+        var terminals = [0, es.length - 1];
+        for (var tmi = 0; tmi < terminals.length; tmi++) {
+          var tEi = terminals[tmi];
+          if (coveredEdge[tEi]) continue;   // edge hosts/feeds a section → keep
+          // The interior corner adjacent to this terminal edge: vertex 1
+          // for edge 0, vertex N-1 for edge N-1. Since the edge is
+          // uncovered, that corner never formed, so its wedge tiles are
+          // orphaned — drop them too.
+          var cornerV = (tEi === 0) ? 1 : tEi;   // tEi === N-1 → vertex N-1
+          for (var dt = 0; dt < tiles.length; dt++) {
+            var dtl = tiles[dt];
+            if (dtl.edgeIdx === tEi) { dtl._dropFromOutput = true; continue; }
+            if (dtl.vertexIdx === cornerV) dtl._dropFromOutput = true;
+          }
+        }
+      }
+
       // ── Stylobate marking for remaining non-section cells ──
       // (Kept sections are now guaranteed buffer-free, so any cell still
       // inside the buffer here is a non-section leftover → drop it.)
