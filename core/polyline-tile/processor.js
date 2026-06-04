@@ -158,23 +158,31 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     var TOWER_SIZE_MAX_ROWS = { small: 7, medium: 9, large: 12 };
     var userSizeKey = (tileParams && tileParams.towerSize) || 'small';
     var maxRows = TOWER_SIZE_MAX_ROWS[userSizeKey] || 7;
-    // chooseRows: honour the user's size choice (maxRows = 7/9/12), only
-    // downgrading when the tower is physically LONGER than the polygon
-    // edge it sits on. The sole hard constraint is "footprint inside the
-    // polygon" — enforced by towerFitCheck during the step-back loop —
-    // so here we just guarantee the step-back loop has room (the tower
-    // can't be longer than the edge). No buffer-tail (MIN_TAIL) guard:
-    // that previously clamped large→medium→small on realistic blocks,
-    // which read as "changing tower size does nothing".
-    // Orient is informational; the long side aligns with edge dN either
-    // way. Returns 0 only when even the smallest tower (7) is longer
-    // than the edge.
+    // chooseRows: the user's size choice (maxRows = 7/9/12) is the CAP;
+    // we return the largest size ≤ cap that still leaves a valid section
+    // tail on BOTH adjacent edges after the buffer trim. Picking the
+    // largest-that-fits means the size visibly varies per edge (a big
+    // edge keeps the requested large; a short edge auto-downgrades so
+    // sections + buffer trim stay intact). This is a DOWNGRADE, never a
+    // hard block — the "size doesn't change" bug was the old lat→7
+    // branch (now removed), NOT this tail guard.
+    //
+    // Tail requirement = SECTION_MIN_LON triples + 1 cell margin, i.e.
+    // the shortest run that partitionTriples will keep as a section.
+    // (Smaller than the old sd+1 so size varies on more blocks.)
+    // Orient is informational; the long side aligns with edge dN.
+    // Returns 0 only when even the smallest tower can't leave a tail.
+    var MIN_TAIL = (SECTION_MIN_LON + 1) * step;   // ≈ 26 m at step 3.3
     function chooseTowerRows(orient, edgeBLen, edgeALen) {
+      var trimAcross = TOWER_WIDTH + trimR;
+      if (edgeALen - trimAcross < MIN_TAIL) return 0;   // perpendicular edge too short
       var pool = [12, 9, 7];
       for (var i = 0; i < pool.length; i++) {
         var r = pool[i];
         if (r > maxRows) continue;                  // respect user cap
-        if (r * TOWER_CELL <= edgeBLen - 0.5) return r;  // fits along edge
+        var trimAlong = r * TOWER_CELL + trimR;
+        if (edgeBLen - trimAlong < MIN_TAIL) continue;
+        return r;
       }
       return 0;
     }
@@ -843,6 +851,18 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
         var sPolys = secsG[sgi].polys || [];
         for (var spi = 0; spi < sPolys.length; spi++) {
           sectionRingsXY.push(sPolys[spi]);
+        }
+      }
+    }
+    // Стилобаты are part of a section's footprint (its non-living
+    // podium cells) — include them in the subtraction set, buffered by
+    // the SAME 9.2 m, so green areas never sit underneath a стилобат.
+    for (var poS = 0; poS < tilesXYList.length; poS++) {
+      var tlist = tilesXYList[poS];
+      for (var tsi = 0; tsi < tlist.length; tsi++) {
+        var st = tlist[tsi];
+        if (st.stylobate && st.corners && st.corners.length >= 3) {
+          sectionRingsXY.push(st.corners);
         }
       }
     }
