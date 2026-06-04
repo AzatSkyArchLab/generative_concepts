@@ -546,56 +546,87 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
       ss = sec.sections;
       var vkLocal = sec.validKeys;
 
-      // ── Buffer removes WHOLE sections (preserve strict triple shape) ──
+      // ── Tower buffer cuts sections (preserve strict triple shape) ──
       // A section is a strict set of triples (outer + corridor + inner
-      // columns) forming one clean rectangle / L-ring. If the tower
-      // buffer would delete ANY of its cells the section can no longer
-      // keep that shape — so we remove the ENTIRE section from the axis
-      // rather than leave a broken, non-rectangular remnant. Detection:
-      // collect every cell centroid inside a buffer, then drop any
-      // section whose polygon contains at least one such centroid.
+      // columns). When the tower buffer reaches a section we don't leave
+      // a broken remnant — instead:
+      //   • STRAIGHT section: drop the columns whose triple touches the
+      //     buffer, keep the longest surviving CONTIGUOUS run as a
+      //     smaller rectangle — but ONLY if it still has ≥ MIN_KEEP_ROWS
+      //     (7) cells; otherwise drop the whole section.
+      //   • CORNER section (L-ring at a polygon vertex): can't be trimmed
+      //     into a clean rectangle, so it's removed whole if touched.
+      // "≥7 cells in a row → keep" applies regardless of lat / lon.
+      var MIN_KEEP_ROWS = 7;
       if (towerBufferContains) {
-        // Cell centroids inside a buffer (case b — a big section engulfing
-        // the buffer). NOT a gate: the per-section check below ALWAYS
-        // runs, because the axis trim may have already removed the cells
-        // while a section CORNER still pokes into the rounded buffer.
-        var bufCtrs = [];
-        for (var bt = 0; bt < tiles.length; bt++) {
-          var btile = tiles[bt];
-          if (btile.kind !== 'cell' && btile.kind !== 'corridor') continue;
-          var bctr = tileCentroid({ corners: btile.corners });
-          if (towerBufferContains(bctr)) bufCtrs.push(bctr);
-        }
+        var sdLocal = 2 * depth + buffer;
+        // Does the FULL-depth column at one outer cell touch a buffer?
+        var columnInBuffer = function (cell, edge) {
+          var rect = runRect(edge, [cell], sideCand, sdLocal);
+          for (var c = 0; c < rect.length; c++) if (towerBufferContains(rect[c])) return true;
+          var mx = (rect[0].x + rect[2].x) / 2, my = (rect[0].y + rect[2].y) / 2;
+          return towerBufferContains({ x: mx, y: my });
+        };
         var keptSecs = [];
         var removedPolys = [];
         for (var s2 = 0; s2 < ss.length; s2++) {
           var sct = ss[s2];
-          var hit = false;
-          // (a) any vertex of the section polygon inside the buffer —
-          //     catches a section corner poking into the rounded buffer
-          //     even when no cell centroid is inside.
-          for (var pa = 0; pa < sct.polys.length && !hit; pa++) {
-            var ringA = sct.polys[pa];
-            for (var va = 0; va < ringA.length; va++) {
-              if (towerBufferContains(ringA[va])) { hit = true; break; }
+          var ext = sct._ext;
+          if (ext && ext.kind === 'straight' && ext.cells && ext.cells.length) {
+            var edge = es[ext.ei];
+            var run = ext.cells.slice().sort(function (a, b) { return a.t0 - b.t0; });
+            // Longest contiguous run of columns NOT touching any buffer.
+            var bestS = 0, bestE = -1, curS = 0, anyHit = false;
+            for (var ci = 0; ci <= run.length; ci++) {
+              var hitCol = (ci < run.length) ? columnInBuffer(run[ci], edge) : true;
+              if (hitCol) {
+                if (ci < run.length) anyHit = true;
+                if (ci - 1 - curS > bestE - bestS) { bestS = curS; bestE = ci - 1; }
+                curS = ci + 1;
+              }
             }
-          }
-          // (b) any buffered cell centroid inside the section polygon —
-          //     catches a large section that engulfs the buffer.
-          for (var bi3 = 0; bi3 < bufCtrs.length && !hit; bi3++) {
-            for (var pj2 = 0; pj2 < sct.polys.length; pj2++) {
-              if (pointInPolygon(bufCtrs[bi3], sct.polys[pj2])) { hit = true; break; }
+            if (!anyHit) { keptSecs.push(sct); continue; }   // buffer doesn't touch it
+            var survivors = run.slice(bestS, bestE + 1);
+            if (survivors.length >= MIN_KEEP_ROWS) {
+              // Rebuild the section as the trimmed rectangle.
+              var newRect = runRect(edge, survivors, sideCand, sdLocal);
+              sct.polys = [newRect];
+              sct.centroid = polysCentroid([newRect]);
+              sct.tripleCount = survivors.length;
+              sct.areaRaw = survivors.length * (step * sdLocal);
+              sct.areaLiving = sct.areaRaw * SECTION_LIVING_COEF;
+              ext.cells = survivors;
+              // Drop tiles of the trimmed-away columns (by cellIdx key).
+              var keepKeys = {};
+              for (var kk = 0; kk < survivors.length; kk++) keepKeys[ext.ei + ':' + survivors[kk].cellIdx] = true;
+              for (var rk = 0; rk < run.length; rk++) {
+                var key = ext.ei + ':' + run[rk].cellIdx;
+                if (!keepKeys[key]) delete vkLocal[key];
+              }
+              keptSecs.push(sct);
+            } else {
+              // Too small to keep — drop the whole section.
+              for (var pp0 = 0; pp0 < sct.polys.length; pp0++) removedPolys.push(sct.polys[pp0]);
             }
-          }
-          if (hit) {
-            for (var pp = 0; pp < sct.polys.length; pp++) removedPolys.push(sct.polys[pp]);
           } else {
-            keptSecs.push(sct);
+            // Corner (or unknown) section: remove whole if touched.
+            var hit = false;
+            for (var pa = 0; pa < sct.polys.length && !hit; pa++) {
+              var ringA = sct.polys[pa];
+              for (var va = 0; va < ringA.length; va++) {
+                if (towerBufferContains(ringA[va])) { hit = true; break; }
+              }
+            }
+            if (hit) {
+              for (var pp1 = 0; pp1 < sct.polys.length; pp1++) removedPolys.push(sct.polys[pp1]);
+            } else {
+              keptSecs.push(sct);
+            }
           }
         }
         ss = keptSecs;
-        // Drop EVERY tile inside a removed section's polygon (all its
-        // outer/corridor/inner cells) so the whole section vanishes.
+        // Drop tiles inside a removed section's polygon (whole-removed
+        // corner sections + too-small straight sections).
         if (removedPolys.length) {
           for (var rt = 0; rt < tiles.length; rt++) {
             var rtile = tiles[rt];
