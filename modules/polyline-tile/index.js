@@ -24,6 +24,8 @@ var SRC_SECTIONS = 'ptl-sections';
 var SRC_GREEN = 'ptl-green';
 var LAYER_GREEN_FILL = 'ptl-green-fill';
 var LAYER_GREEN_LINE = 'ptl-green-line';
+var SRC_TRIM = 'ptl-trim';
+var LAYER_TRIM_LINE = 'ptl-trim-line';
 var LAYER_FILL = 'ptl-fill';
 var LAYER_LINE_CELL = 'ptl-line-cell';
 var LAYER_AXIS = 'ptl-axis-line';
@@ -95,10 +97,10 @@ var module_ = {
     [LAYER_SECTION_LABEL, LAYER_SECTION_LINE, LAYER_SECTION_FILL,
      LAYER_VERT_DOT, LAYER_VERT_HALO,
      LAYER_LINE_CELL, LAYER_FILL, LAYER_AXIS,
-     LAYER_GREEN_LINE, LAYER_GREEN_FILL].forEach(function (id) {
+     LAYER_TRIM_LINE, LAYER_GREEN_LINE, LAYER_GREEN_FILL].forEach(function (id) {
       if (map.getLayer(id)) map.removeLayer(id);
     });
-    [SRC_TILES, SRC_AXIS, SRC_VERTS, SRC_SECTIONS, SRC_GREEN].forEach(function (id) {
+    [SRC_TILES, SRC_AXIS, SRC_VERTS, SRC_SECTIONS, SRC_GREEN, SRC_TRIM].forEach(function (id) {
       if (map.getSource(id)) map.removeSource(id);
     });
   },
@@ -320,6 +322,26 @@ var module_ = {
       console.warn('[polyline-tile] section label layer failed:', err);
     }
 
+    // ─── Trimmed-axis remnants (cut away by tower buffers) ───
+    // Dashed red line on top, so the user sees exactly which stretch of
+    // the axis each tower buffer removed.
+    try {
+      mm.addGeoJSONSource(SRC_TRIM, EMPTY);
+      mm.addLayer({
+        id: LAYER_TRIM_LINE,
+        type: 'line',
+        source: SRC_TRIM,
+        paint: {
+          'line-color': '#dc2626',          // red-600
+          'line-width': 2,
+          'line-dasharray': [2, 2],
+          'line-opacity': 0.9
+        }
+      });
+    } catch (err) {
+      console.warn('[polyline-tile] trim layer failed:', err);
+    }
+
     this._initialized = true;
     console.log('[polyline-tile] layers ready (structure + sections)');
     this._refresh();
@@ -338,6 +360,7 @@ var module_ = {
     var vertFeats = [];
     var sectionFeats = [];
     var greenFeats = [];
+    var trimFeats = [];
     var sectionSeq = 0;  // global counter for palette cycling
 
     for (var i = 0; i < all.length; i++) {
@@ -399,6 +422,19 @@ var module_ = {
             type: 'Feature',
             properties: { featureId: p.id },
             geometry: { type: 'Polygon', coordinates: polyLL }
+          });
+        }
+      }
+
+      // Trimmed-axis remnants — stretches of axis cut away by tower buffers.
+      if (result.trimmedAxis && result.trimmedAxis.length) {
+        for (var tr = 0; tr < result.trimmedAxis.length; tr++) {
+          var segLL = result.trimmedAxis[tr];
+          if (!segLL || segLL.length < 2) continue;
+          trimFeats.push({
+            type: 'Feature',
+            properties: { featureId: p.id },
+            geometry: { type: 'LineString', coordinates: segLL }
           });
         }
       }
@@ -657,6 +693,7 @@ var module_ = {
     mm.updateGeoJSONSource(SRC_VERTS, { type: 'FeatureCollection', features: vertFeats });
     mm.updateGeoJSONSource(SRC_SECTIONS, { type: 'FeatureCollection', features: sectionFeats });
     mm.updateGeoJSONSource(SRC_GREEN, { type: 'FeatureCollection', features: greenFeats });
+    mm.updateGeoJSONSource(SRC_TRIM, { type: 'FeatureCollection', features: trimFeats });
     console.log('[polyline-tile] refresh —',
       tileFeats.length, 'tiles,',
       axisFeats.length, 'axes,',

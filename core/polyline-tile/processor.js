@@ -141,6 +141,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
   var t2TruncA = 0, t2TruncB = 0;
   var t2nP = null, t2nN = null, t2crossDN = 0;
   var ptsList = null;   // populated during polygon→polyline conversion (1 or 2 polylines)
+  var trimmedAxisXY = [];   // axis stretches removed by tower-buffer cuts (gap polylines)
   if (isPolygon && pts.length >= 3) {
     var sd = 2 * depth + buffer;
     var trimR = 15;
@@ -447,6 +448,14 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             !!towerXY2 && t2VertIdx > firstKeep && t2VertIdx < lastKeep &&
             t2TruncA > 0 && t2TruncB > 0 &&
             t2TruncA < t2dP.L * 0.95 && t2TruncB < t2dN.L * 0.95;
+          // The axis stretch the tower-1 buffer ATE = the wrap-around gap
+          // from QA back through v0 (pts[0]) to QB. Captured for display.
+          var gap1 = [QA];
+          for (var ga = lastKeep + 1; ga < Npts0; ga++) gap1.push(pts[ga]);
+          gap1.push(pts[0]);
+          for (var gb = 1; gb < firstKeep; gb++) gap1.push(pts[gb]);
+          gap1.push(QB);
+          trimmedAxisXY.push(gap1);
           if (t2Valid) {
             var vK = pts[t2VertIdx];
             var Qin  = { x: vK.x - t2TruncA * t2dP.x, y: vK.y - t2TruncA * t2dP.y };
@@ -458,6 +467,8 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
             for (var bi2 = t2VertIdx + 1; bi2 <= lastKeep; bi2++) polyB.push(pts[bi2]);
             polyB.push(QA);
             ptsList = [polyA, polyB];
+            // Tower-2 buffer gap = Qin → v_k → Qout.
+            trimmedAxisXY.push([Qin, vK, Qout]);
           } else {
             var newPts = [QB];
             for (var i = firstKeep; i <= lastKeep; i++) newPts.push(pts[i]);
@@ -1103,6 +1114,21 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     }
   }
 
+  // ─── Trimmed-axis remnants → lng/lat ───
+  // The axis stretches the tower buffers cut away (gap polylines around
+  // each tower), for visual highlight.
+  var outTrimmedAxis = [];
+  for (var ta = 0; ta < trimmedAxisXY.length; ta++) {
+    var seg = trimmedAxisXY[ta];
+    if (!seg || seg.length < 2) continue;
+    var segLL = [];
+    for (var tp = 0; tp < seg.length; tp++) {
+      var tll = proj.toLngLat(seg[tp].x, -seg[tp].y);
+      segLL.push([tll[0], tll[1]]);
+    }
+    outTrimmedAxis.push(segLL);
+  }
+
   return {
     tiles: outTiles,
     edges: outEdgesMeta,
@@ -1112,6 +1138,7 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
     tower: outTower,
     tower2: outTower2,
     greenAreas: outGreen,
+    trimmedAxis: outTrimmedAxis,
     projection: { originLng: origin[0], originLat: origin[1] }
   };
 }
