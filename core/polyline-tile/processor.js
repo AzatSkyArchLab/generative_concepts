@@ -712,6 +712,28 @@ export function processTileFeature(coords, tileParams, mode, startSectionAt) {
           if (towerBufferContains(ck)) tkt._dropFromOutput = true;
         }
       }
+
+      // ── Whole-triple integrity ──
+      // A triple (outer + corridor + inner cells sharing edgeIdx:cellIdx)
+      // is the atomic unit of the layout. If ANY cell of a triple was
+      // dropped (buffer cull, terminal stub, section trim), the WHOLE
+      // triple is dropped — sections AND стилобаты are always rectangular
+      // strict triples, never a broken column missing a row. (Corner
+      // wedges / remnants have no triple key and are unaffected.)
+      var tripleDropped = {};
+      for (var qa = 0; qa < tiles.length; qa++) {
+        var qt = tiles[qa];
+        if (!qt._dropFromOutput) continue;
+        if (qt.edgeIdx == null || qt.cellIdx == null || qt.cellIdx < 0) continue;
+        tripleDropped[qt.edgeIdx + ':' + qt.cellIdx] = true;
+      }
+      for (var qb = 0; qb < tiles.length; qb++) {
+        var qt2 = tiles[qb];
+        if (qt2._dropFromOutput) continue;
+        if (qt2.edgeIdx == null || qt2.cellIdx == null || qt2.cellIdx < 0) continue;
+        if (tripleDropped[qt2.edgeIdx + ':' + qt2.cellIdx]) qt2._dropFromOutput = true;
+      }
+
       sr = buildStylobateRegions(tiles, es, sideCand, 2 * depth + buffer);
     }
     return {
@@ -2267,17 +2289,23 @@ function buildSections(edges, tilesXY, step, depth, buffer, sideSign, isPolygon)
     byEdge: byEdge, isPolygon: isPolygon
   };
   var result = null;
-  // Any open polyline with ≥2 edges (≥1 interior corner) OR closed polygon
-  // with ≥3 edges is handled by the universal multi-corner processor,
-  // PROVIDED every edge carries at least one complete triple. Otherwise
-  // fall back to plain per-edge straights.
+  // Multi-corner processor handles any open polyline with ≥2 edges
+  // (≥1 interior corner) or closed polygon with ≥3 edges. We require a
+  // complete triple only on the MIDDLE edges — a polyline's TERMINAL
+  // edges (0 and N-1) may be empty stubs left after a tower-buffer cut,
+  // and the processor handles them gracefully (the corner there simply
+  // buffer-breaks). Previously ANY empty edge — including a tiny
+  // terminal stub — forced the WHOLE layout into per-edge mode, which
+  // dropped every corner on some shuffles ("углы становятся стилобатами").
   var minEdges = isPolygon ? 3 : 2;
-  var allHaveCells = edges.length >= minEdges;
-  for (var gi = 0; allHaveCells && gi < edges.length; gi++) {
-    if (!byEdge[gi] || !byEdge[gi].length) allHaveCells = false;
+  var middleOk = edges.length >= minEdges;
+  for (var gi = 0; middleOk && gi < edges.length; gi++) {
+    var isTerminal = !isPolygon && (gi === 0 || gi === edges.length - 1);
+    if (isTerminal) continue;
+    if (!byEdge[gi] || !byEdge[gi].length) middleOk = false;
   }
-  if (allHaveCells) result = buildSectionsMultiCorner(ctx);
-  if (!result) result = buildSectionsPerEdge(ctx);
+  if (middleOk) result = buildSectionsMultiCorner(ctx);
+  if (!result || !result.sections.length) result = buildSectionsPerEdge(ctx);
   result.completeSet = ts.complete;
   return result;
 }
